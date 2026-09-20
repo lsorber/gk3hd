@@ -1,0 +1,16 @@
+{
+  "archives": [
+    {
+      "filename": "gk3hd-texture-pack-v1.0-part01-of-02.zip",
+      "sha256": "fc9ef91498d825effdbc1802f1d10bf696cd587ee6210fc9841eaa79869fcf57",
+      "size": 1988414596
+    },
+    {
+      "filename": "gk3hd-texture-pack-v1.0-part02-of-02.zip",
+      "sha256": "0cdbe33a198a62a3285b67f95cce1d5bc8902d2648814653139ef969c28406cc",
+      "size": 620684858
+    }
+  ],
+  "inventory_sha256": "4b02e7f9ec8355a7bc8c71ba4c81f0c354d5c10295115287ad15ebfa2b0d7b5b",
+  "tag": "v1.0"
+}

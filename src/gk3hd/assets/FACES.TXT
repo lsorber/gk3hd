@@ -1,0 +1,928 @@
+//////////////////////////////////////////////////////////////////////////////
+//
+// File     :  Faces.txt (GK3: Content)
+// Author(s):  Scott Bilas, Laurent Sorber
+//
+// Summary  :  Contains specifications for character faces.
+//
+// Copyright � 1998 Sierra On-Line, Inc.  All rights reserved.
+//----------------------------------------------------------------------------
+//  $Revision:: 1$              $Date: 2026-01-23$
+//----------------------------------------------------------------------------
+//////////////////////////////////////////////////////////////////////////////
+
+//
+// Minimum required bitmap names (xxx is model name):
+//
+//   Face:     xxx_face.bmp
+//   Eyelids:  xxx_eyelids.bmp
+//   Forehead: xxx_forehead.bmp
+//
+// Notes:
+//
+//   * all texture coordinates are always from the upper left corner of
+//     the face bitmap.
+//   * when referring to texture coordinates, "left" is when looking at the
+//     texture (lower values of "x" are to the left).
+//   * if any entries are left out, they will be copied from [DEFAULT]. If
+//     they do not exist in [DEFAULT] then they will be left blank (or zero).
+//   * use [GAB] for documentation purposes
+//   * as art is created and moved over, remove the "-XXX" from section names
+//     to "uncomment" them. also go into characters.txt and remove the
+//     character data from there that relates to texture coordinates and
+//     blink frequencies.
+//
+
+//////////////////////////////////////////////////////////////////////////////
+[Eyes]
+//
+// Format for eyes: <name>=AxB [,DownSampleOnly]
+//
+// Where:
+//
+//   * <name> is the name of the bitmap to use for the eye.
+//   * A and B are the number of subpixels to use for the eye. Currently only
+//     1x1, 2x2, 4x4 are supported.
+//   * DownSampleOnly is an optional flag that says whether or not the source
+//     bitmap is already at the higher resolution. If DownSampleOnly is not
+//     used, then the source bitmap will be upsampled based on A and B before
+//     constructing the subpixel bitmaps.
+//
+Eye_GreenX   = 4x4, DownSampleOnly
+Eye_BrownX   = 4x4, DownSampleOnly
+Eye_LtBrownX = 4x4, DownSampleOnly
+Eye_DrkBrownX = 4x4, DownSampleOnly
+Eye_HazelX   = 4x4, DownSampleOnly
+Eye_BlueX    = 4x4, DownSampleOnly
+Eye2_GreenX   = 4x4, DownSampleOnly
+Eye2_BrownX   = 4x4, DownSampleOnly
+Eye2_LtBrownX = 4x4, DownSampleOnly
+Eye2_DrkBrownX = 4x4, DownSampleOnly
+Eye2_HazelX   = 4x4, DownSampleOnly
+Eye2_BlueX    = 4x4, DownSampleOnly
+Eye_RedX     = 4x4, DownSampleOnly
+Eye2_RedX     = 4x4, DownSampleOnly
+Eye_Gr2Red1     = 4x4, DownSampleOnly
+Eye_Gr2Red2     = 4x4, DownSampleOnly
+Eye_Gr2Red3     = 4x4, DownSampleOnly
+
+
+//////////////////////////////////////////////////////////////////////////////
+[DEFAULT]
+//
+// Note for defaults: generally, texture coordinates, sizes, and
+// actor-specific names (such as blink anims and alpha channels) will not
+// get copied from the [DEFAULT] section - each actor must specify its own.
+//
+Max Look Distance       = 8.0,8.0
+Jitter Frequency        = 1000,5000
+Max Jitter Distance     = 4,4
+Eye Field Of View       = 120,90
+Eye Short Field Of View = 50,30
+Eye Separation          = 2.5
+Head Radius             = 4.0
+Head Center Offset      = 0.0,0.0,0.0
+Blink Frequency         = 5000,12000
+
+
+//////////////////////////////////////////////////////////////////////////////
+[GAB]
+
+// Texture eye info
+Left Eye Name           = Eye_GreenX               // use an eye specified in [Eyes] section
+Right Eye Name          = Eye_GreenX               // use an eye specified in [Eyes] section
+Left Eye Offset         = 407,409                  // texture coordinate in pixels (x, y)
+Right Eye Offset        = 525,409                  // texture coordinate in pixels (x, y)
+Left Eye Bias           = -0.2,0.2                 // how much to offset eye in pixels (x, y)
+Right Eye Bias          = -0.2,0.2                 // how much to offset in pixels (x, y)
+Max Look Distance       = 8.0,8.0                  // max distance in each direction eyes can move in pixels (x, y)
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// 3D eye info
+Eye Field Of View       = 120,90                   // horizontal and vertical 3d field of view in degrees (x, y)
+Eye Short Field Of View = 80,30                    // special FOV used when figuring out when to move head in degrees (x, y)
+Eye Separation          = 2.5                      // how far apart eyes are on model in inches
+Head Radius             = 4.0                      // approx radius of model's head in inches
+Head Center Offset      = 0.0,0.0,0.0              // offset from head's center to where "virtual" head center is in inches (x, y, z)
+
+// Forehead info
+Forehead Offset         = 360,308                  // texture coordinate in pixels (x, y)
+
+// Eyelid info
+Eyelids Offset          = 420,424                  // texture coordinate in pixels (x, y)
+Eyelids Alpha Channel   = gab_eyelids_alpha        // optional alpha channel to use when drawing base eyelids
+Blink Anims             = gabblink,90,gabblink2,10 // list of blink anims followed by probabilities that they will be used
+Blink Frequency         = 5000,12000               // min and max dist between blinks in msec
+
+// Mouth info
+Mouth Offset            = 360,528                  // texture coordinate in pixels (x, y)
+Mouth Size              = 312x328                  // size of mouth texture region in pixels (x, y)
+
+
+//////////////////////////////////////////////////////////////////////////////
+[ABE]
+
+// Texture eye info
+Left Eye Name           = Eye_BrownX
+Right Eye Name          = Eye_BrownX
+Left Eye Offset         = 403,411
+Right Eye Offset        = 527,411
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 336,180
+
+// Eyelid info
+Eyelids Offset          = 412,416
+Eyelids Alpha Channel   = abe_eyelids_alpha
+Blink Anims             = abeblink,90,abeblink2,10
+
+// Mouth info
+Mouth Offset            = 336,564
+Mouth Size              = 356x364
+
+
+//////////////////////////////////////////////////////////////////////////////
+[BAR]
+
+// Texture eye info
+Left Eye Name           = Eye_GreenX
+Right Eye Name          = Eye_BlueX
+Left Eye Offset         = 392,309
+Right Eye Offset        = 529,309
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 380,252
+
+// Eyelid info
+Eyelids Offset          = 404,316
+Eyelids Alpha Channel   = bar_eyelids_alpha
+Blink Anims             = barblink,90,barblink2,10
+
+// Mouth info
+Mouth Offset            = 380,500
+Mouth Size              = 268x296
+
+
+//////////////////////////////////////////////////////////////////////////////
+[BIG]
+
+// Texture eye info
+Left Eye Name           = Eye_BrownX
+Right Eye Name          = Eye_BrownX
+Left Eye Offset         = 394,365
+Right Eye Offset        = 527,365
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 372,140
+
+// Eyelid info
+Eyelids Offset          = 400,372
+Eyelids Alpha Channel   = big_eyelids_alpha
+Blink Anims             = bigblink,90,bigblink2,10
+
+// Mouth info
+Mouth Offset            = 372,544
+Mouth Size              = 280x380
+
+
+//////////////////////////////////////////////////////////////////////////////
+[CON-XXX]
+
+// Texture eye info
+Left Eye Name           = Eye_BrownX
+Right Eye Name          = Eye_BrownX
+Left Eye Offset         = 97,98
+Right Eye Offset        = 133,98
+
+// Forehead info
+Forehead Offset         = 91,49
+
+// Eyelid info
+Eyelids Offset          = 99,100
+Eyelids Alpha Channel   = con_eyelids_alpha
+Blink Anims             = conblink,90,conblink2,10
+
+// Mouth info
+Mouth Offset            = 91,142
+Mouth Size              = 300x288
+
+
+//////////////////////////////////////////////////////////////////////////////
+[EML]
+
+// Texture eye info
+Left Eye Name           = Eye_LtBrownX
+Right Eye Name          = Eye_LtBrownX
+Left Eye Offset         = 398,413
+Right Eye Offset        = 527,413
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 372,200
+
+// Eyelid info
+Eyelids Offset          = 404,420
+Eyelids Alpha Channel   = eml_eyelids_alpha
+Blink Anims             = emlblink,90,emlblink2,10
+
+// Mouth info
+Mouth Offset            = 372,552
+Mouth Size              = 280x424
+
+
+//////////////////////////////////////////////////////////////////////////////
+[EM2-xxx]
+
+// Texture eye info
+Left Eye Name           = Eye_LtBrownX
+Right Eye Name          = Eye_LtBrownX
+Left Eye Offset         = 99,103
+Right Eye Offset        = 132,103
+
+// Forehead info
+Forehead Offset         = 93,50
+
+// Eyelid info
+Eyelids Offset          = 101,105
+Eyelids Alpha Channel   = eml_eyelids_alpha
+Blink Anims             = emlblink,90,emlblink2,10
+
+// Mouth info
+Mouth Offset            = 93,138
+Mouth Size              = 280x424
+
+
+//////////////////////////////////////////////////////////////////////////////
+[EST]
+
+// Texture eye info
+Left Eye Name           = Eye_BlueX
+Right Eye Name          = Eye_BlueX
+Left Eye Offset         = 384,379
+Right Eye Offset        = 502,379
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,12000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                       // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 352,236
+
+// Eyelid info
+Eyelids Offset          = 392,392
+Eyelids Alpha Channel   = est_eyelids_alpha
+Blink Anims             = estblink,90,estblink2,10
+
+// Mouth info
+Mouth Offset            = 352,500
+Mouth Size              = 296x340
+
+
+//////////////////////////////////////////////////////////////////////////////
+[GA3]
+
+// Texture eye info
+Left Eye Name           = Eye_GreenX
+Right Eye Name          = Eye_GreenX
+Left Eye Offset         = 407,409
+Right Eye Offset        = 525,409
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = -0.2,0.2
+
+// Forehead info
+Forehead Offset         = 360,308
+
+// Eyelid info
+Eyelids Offset          = 420,424
+Eyelids Alpha Channel   = ga3_eyelids_alpha
+Blink Anims             = ga3blink,90,ga3blink2,10
+
+// Mouth info
+Mouth Offset            = 360,520
+Mouth Size              = 312x336
+
+
+//////////////////////////////////////////////////////////////////////////////
+[GRA]
+
+// Texture eye info
+Left Eye Name           = Eye_DrkBrownX
+Right Eye Name          = Eye_DrkBrownX
+Left Eye Offset         = 415,438
+Right Eye Offset        = 511,438
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = -0.2,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 400,352
+
+// Eyelid info
+Eyelids Offset          = 420,444
+Eyelids Alpha Channel   = gra_eyelids_alpha
+Blink Anims             = grablink,90,grablink2,10
+
+// Mouth info
+Mouth Offset            = 400,548
+Mouth Size              = 228x316
+
+
+//////////////////////////////////////////////////////////////////////////////
+[HE1]
+
+// Texture eye info
+Left Eye Name           = Eye_GreenX
+Right Eye Name          = Eye_GreenX
+Left Eye Offset         = 403,413
+Right Eye Offset        = 527,413
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = -0.2,0.2
+Jitter Frequency        = 1000,8000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 372,208
+
+// Eyelid info
+Eyelids Offset          = 412,416
+Eyelids Alpha Channel   = he1_eyelids_alpha
+Blink Anims             = he1blink,90,he1blink2,10
+
+// Mouth info
+Mouth Offset            = 372,552
+Mouth Size              = 284x380
+
+Eye Field Of View       = 120,90                   // horizontal and vertical 3d field of view in degrees (x, y)
+Eye Short Field Of View = 80,30                    // special FOV used when figuring out when to move head in degrees (x, y)
+
+
+//////////////////////////////////////////////////////////////////////////////
+[HE2]
+
+// Texture eye info
+Left Eye Name           = Eye_BlueX
+Right Eye Name          = Eye_BlueX
+Left Eye Offset         = 410,414
+Right Eye Offset        = 516,414
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,8000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 400,188
+
+// Eyelid info
+Eyelids Offset          = 416,416
+Eyelids Alpha Channel   = he2_eyelids_alpha
+Blink Anims             = he2blink,90,he2blink2,10
+
+// Mouth info
+Mouth Offset            = 400,560
+Mouth Size              = 232x300
+
+Eye Field Of View       = 120,90                   // horizontal and vertical 3d field of view in degrees (x, y)
+Eye Short Field Of View = 80,30                    // special FOV used when figuring out when to move head in degrees (x, y)
+
+
+//////////////////////////////////////////////////////////////////////////////
+[JAM]
+
+// Texture eye info
+Left Eye Name           = Eye_BlueX
+Right Eye Name          = Eye_BlueX
+Left Eye Offset         = 409,413
+Right Eye Offset        = 519,413
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 360,192
+
+// Eyelid info
+Eyelids Offset          = 416,416
+Eyelids Alpha Channel   = jam_eyelids_alpha
+Blink Anims             = jamblink,90,jamblink2,10
+
+// Mouth info
+Mouth Offset            = 360,556
+Mouth Size              = 304x408
+
+
+//////////////////////////////////////////////////////////////////////////////
+[JEA]
+
+// Texture eye info
+Left Eye Name           = Eye_BlueX
+Right Eye Name          = Eye_BlueX
+Left Eye Offset         = 381,446
+Right Eye Offset        = 536,446
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 500,3000                 // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 336,340
+
+// Eyelid info
+Eyelids Offset          = 392,460
+Eyelids Alpha Channel   = jea_eyelids_alpha
+Blink Anims             = jeablink,90,jeablink2,10
+
+// Mouth info
+Mouth Offset            = 336,596
+Mouth Size              = 352x368
+
+
+//////////////////////////////////////////////////////////////////////////////
+[LAD]
+
+// Texture eye info
+Left Eye Name           = Eye2_GreenX
+Right Eye Name          = Eye2_GreenX
+Left Eye Offset         = 425,416
+Right Eye Offset        = 501,416
+Left Eye Bias           = 0,0.4
+Right Eye Bias          = 0,0.4
+
+
+// Forehead info
+Forehead Offset         = 412,328
+
+// Eyelid info
+Eyelids Offset          = 428,424
+Eyelids Alpha Channel   = lad_eyelids_alpha
+Blink Anims             = ladblink,90,ladblink2,10
+
+// Mouth info
+Mouth Offset            = 412,584
+Mouth Size              = 208x372
+
+
+//////////////////////////////////////////////////////////////////////////////
+[LAR]
+
+// Texture eye info
+Left Eye Name           = Eye_BlueX
+Right Eye Name          = Eye_BlueX
+Left Eye Offset         = 394,393
+Right Eye Offset        = 528,393
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 500,1500                // min and max dist between jitters in msec
+Max Jitter Distance     = 12,12                   // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 364,256
+
+// Eyelid info
+Eyelids Offset          = 404,404
+Eyelids Alpha Channel   = lar_eyelids_alpha
+Blink Anims             = larblink,90,larblink2,10
+
+// Mouth info
+Mouth Offset            = 364,596
+Mouth Size              = 300x308
+
+
+//////////////////////////////////////////////////////////////////////////////
+[LHO]
+
+// Texture eye info
+Left Eye Name           = Eye_LtBrownX
+Right Eye Name          = Eye_LtBrownX
+Left Eye Offset         = 405,271
+Right Eye Offset        = 526,271
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 384,100
+
+// Eyelid info
+Eyelids Offset          = 408,268
+Eyelids Alpha Channel   = lho_eyelids_alpha
+Blink Anims             = lh2blink,90,lh2blink2,10
+
+// Mouth info
+Mouth Offset            = 384,448
+Mouth Size              = 264x444
+
+
+//////////////////////////////////////////////////////////////////////////////
+[MAD]
+
+// Texture eye info
+Left Eye Name           = Eye2_GreenX
+Right Eye Name          = Eye2_GreenX
+Left Eye Offset         = 438,383
+Right Eye Offset        = 543,383
+Left Eye Bias           = 0,0.4
+Right Eye Bias          = 0,0.4
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 428,236
+
+// Eyelid info
+Eyelids Offset          = 452,396
+Eyelids Alpha Channel   = mad_eyelids_alpha
+Blink Anims             = madblink,90,madblink2,10
+
+// Mouth info
+Mouth Offset            = 428,476
+Mouth Size              = 228x256
+
+
+//////////////////////////////////////////////////////////////////////////////
+[MAR]
+
+// Texture eye info
+Left Eye Name           = Eye_HazelX
+Right Eye Name          = Eye_HazelX
+Left Eye Offset         = 410,432
+Right Eye Offset        = 513,432
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = -0.2,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 400,320
+
+// Eyelid info
+Eyelids Offset          = 428,444
+Eyelids Alpha Channel   = mar_eyelids_alpha
+Blink Anims             = marblink,90,marblink2,10
+
+// Mouth info
+Mouth Offset            = 400,576
+Mouth Size              = 236x312
+
+
+//////////////////////////////////////////////////////////////////////////////
+[MES]
+
+// Texture eye info
+Left Eye Name           = Eye_LtBrownX
+Right Eye Name          = Eye_LtBrownX
+Left Eye Offset         = 416,502
+Right Eye Offset        = 508,502
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 2000,8000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 396,356
+
+// Eyelid info
+Eyelids Offset          = 428,516
+Eyelids Alpha Channel   = mes_eyelids_alpha
+Blink Anims             = mesblink,90,mesblink2,10
+
+// Mouth info
+Mouth Offset            = 396,628
+Mouth Size              = 236x364
+
+
+//////////////////////////////////////////////////////////////////////////////
+[MON]
+
+// Texture eye info
+Left Eye Name           = Eye_GreenX
+Right Eye Name          = Eye_GreenX
+Left Eye Offset         = 395,364
+Right Eye Offset        = 537,364
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = -0.2,0.2
+Jitter Frequency        = 2000,8000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 336,204
+
+// Eyelid info
+Eyelids Offset          = 404,372
+Eyelids Alpha Channel   = mon_eyelids_alpha
+Blink Anims             = monblink,90,monblink2,10
+
+// Mouth info
+Mouth Offset            = 336,548
+Mouth Size              = 352x332
+
+
+//////////////////////////////////////////////////////////////////////////////
+[MOS]
+
+// Texture eye info
+Left Eye Name           = Eye_BlueX
+Right Eye Name          = Eye_BlueX
+Left Eye Offset         = 401,398
+Right Eye Offset        = 527,398
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,3000                // min and max dist between jitters in msec
+Max Jitter Distance     = 12,12                    // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 348,168
+
+// Eyelid info
+Eyelids Offset          = 408,404
+Eyelids Alpha Channel   = mos_eyelids_alpha
+Blink Anims             = mosblink,90,mosblink2,10
+
+// Mouth info
+Mouth Offset            = 348,504
+Mouth Size              = 328x352
+
+//////////////////////////////////////////////////////////////////////////////
+[OLD]
+
+// Texture eye info
+Left Eye Name           = Eye_HazelX
+Right Eye Name          = Eye_HazelX
+Left Eye Offset         = 403,420
+Right Eye Offset        = 523,420
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = -0.2,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 352,188
+
+// Eyelid info
+Eyelids Offset          = 404,420
+Eyelids Alpha Channel   = old_eyelids_alpha
+Blink Anims             = oldblink,90,oldblink2,10
+
+// Mouth info
+Mouth Offset            = 352,572
+Mouth Size              = 320x396
+
+
+//////////////////////////////////////////////////////////////////////////////
+[ROX]
+
+// Texture eye info
+Left Eye Name           = Eye_HazelX
+Right Eye Name          = Eye_HazelX
+Left Eye Offset         = 399,354
+Right Eye Offset        = 521,354
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = -0.2,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 396,268
+
+// Eyelid info
+Eyelids Offset          = 404,360
+Eyelids Alpha Channel   = rox_eyelids_alpha
+Blink Anims             = roxblink,90,roxblink2,10
+
+// Mouth info
+Mouth Offset            = 396,532
+Mouth Size              = 240x276
+
+//////////////////////////////////////////////////////////////////////////////
+[SIM]
+
+// Texture eye info
+Left Eye Name           = Eye_HazelX
+Right Eye Name          = Eye_HazelX
+Left Eye Offset         = 400,354
+Right Eye Offset        = 521,354
+Left Eye Bias           = -0.2,0.2
+Right Eye Bias          = -0.2,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 380,240
+
+// Eyelid info
+Eyelids Offset          = 404,360
+Eyelids Alpha Channel   = sim_eyelids_alpha
+Blink Anims             = simblink,90,simblink2,10
+
+// Mouth info
+Mouth Offset            = 380,536
+Mouth Size              = 268x276
+
+
+//////////////////////////////////////////////////////////////////////////////
+[TAX]
+
+// Texture eye info
+Left Eye Name           = Eye_BlueX
+Right Eye Name          = Eye_BlueX
+Left Eye Offset         = 394,366
+Right Eye Offset        = 529,366
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 364,160
+
+// Eyelid info
+Eyelids Offset          = 404,368
+Eyelids Alpha Channel   = tax_eyelids_alpha
+Blink Anims             = taxblink,90,taxblink2,10
+
+// Mouth info
+Mouth Offset            = 364,544
+Mouth Size              = 296x300
+
+
+//////////////////////////////////////////////////////////////////////////////
+[VIT]
+
+// Texture eye info
+Left Eye Name           = Eye_BrownX
+Right Eye Name          = Eye_BrownX
+Left Eye Offset         = 378,420
+Right Eye Offset        = 544,420
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2
+Jitter Frequency        = 1500,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 344,228
+
+// Eyelid info
+Eyelids Offset          = 384,428
+Eyelids Alpha Channel   = vit_eyelids_alpha
+Blink Anims             = vitblink,90,vitblink2,10
+
+// Mouth info
+Mouth Offset            = 344,564
+Mouth Size              = 336x356
+
+//////////////////////////////////////////////////////////////////////////////
+[VM1]
+
+// Face info
+Face Name               = va1_face   
+
+// Texture eye info
+Left Eye Name           = Eye2_RedX
+Right Eye Name          = Eye2_RedX
+Left Eye Offset         = 412,439
+Right Eye Offset        = 515,439
+Left Eye Bias           = 0.6,-0.6
+Right Eye Bias          = 0.6,-0.6
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 412,281
+
+// Eyelid info
+Eyelids Offset          = 416,445
+Eyelids Alpha Channel   = va1_eyelids_alpha
+Blink Anims             = vm1blink,90,vm1blink2,10
+
+// Mouth info
+Mouth Offset            = 412,580
+Mouth Size              = 204x276
+
+/////////////////////////////////////////////////////////////////////////////
+[VM2]
+
+// Face info
+Face Name               = vm2_face
+
+// Texture eye info
+Left Eye Name           = Eye2_RedX
+Right Eye Name          = Eye2_RedX
+Left Eye Offset         = 413,438
+Right Eye Offset        = 514,438
+Left Eye Bias           = 0.6,-0.6
+Right Eye Bias          = 0.6,-0.6
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 412,280
+
+// Eyelid info
+Eyelids Offset          = 416,444
+Eyelids Alpha Channel   = vm2_eyelids_alpha
+Blink Anims             = vm2blink,90,vm2blink2,10
+
+// Mouth info
+Mouth Offset            = 412,580
+Mouth Size              = 204x276
+
+
+//////////////////////////////////////////////////////////////////////////////
+[VM3]
+
+// Face info
+Face Name               = va3_face     // face name doesn't match naming convention
+
+// Texture eye info
+Left Eye Name           = Eye2_BlueX
+Right Eye Name          = Eye2_BlueX
+Left Eye Offset         = 412,437
+Right Eye Offset        = 516,437
+Left Eye Bias           = 0.4,0.6
+Right Eye Bias          = 0.4,0.6
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 388,296
+
+// Eyelid info
+Eyelids Offset          = 416,444
+Eyelids Alpha Channel   = vm3_eyelids_alpha
+Blink Anims             = vm3blink,90,vm3blink2,10
+
+// Mouth info
+Mouth Offset            = 388,560
+Mouth Size              = 252x308
+
+//////////////////////////////////////////////////////////////////////////////
+[VR3]
+
+// Face info
+Face Name               = va3_face     // face name doesn't match naming convention
+
+// Texture eye info
+Left Eye Name           = Eye2_RedX
+Right Eye Name          = Eye2_RedX
+Left Eye Offset         = 408,432
+Right Eye Offset        = 520,432
+Left Eye Bias           = 0.6,1.0
+Right Eye Bias          = 0.6,1.0
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 388,296
+
+// Eyelid info
+Eyelids Offset          = 416,444
+Eyelids Alpha Channel   = va3_eyelids_alpha
+Blink Anims             = vm3blink,90,vm3blink2,10
+
+// Mouth info
+Mouth Offset            = 388,560
+Mouth Size              = 252x308
+
+
+//////////////////////////////////////////////////////////////////////////////
+[WIL]
+
+// Texture eye info
+Left Eye Name           = Eye_BrownX
+Right Eye Name          = Eye_BrownX
+Left Eye Offset         = 393,395
+Right Eye Offset        = 537,395
+Jitter Frequency        = 1000,4000                // min and max dist between jitters in msec
+Max Jitter Distance     = 8,8                      // max distance each direction possible to jitter in subpixels
+
+// Forehead info
+Forehead Offset         = 372,212
+
+// Eyelid info
+Eyelids Offset          = 400,408
+Eyelids Alpha Channel   = wil_eyelids_alpha
+Blink Anims             = wi2blink,90,wi2blink2,10
+
+// Mouth info
+Mouth Offset            = 372,516
+Mouth Size              = 280x368
+Left Eye Bias           = 0.6,0.2
+Right Eye Bias          = 0.6,0.2

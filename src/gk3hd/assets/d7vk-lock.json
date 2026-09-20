@@ -1,0 +1,8 @@
+{
+  "asset_url": "https://github.com/lsorber/gk3hd/releases/download/v1.0/d7vk-2.2-gk3hd.8.dll",
+  "dll_sha256": "5bd8f26bd11ea331561fa40ab65f10c07d2d900db9c852389dd66f318a8a3505",
+  "dll_size": "4263936",
+  "license": "Zlib",
+  "repository": "https://github.com/lsorber/gk3hd",
+  "version": "2.2-gk3hd.8"
+}

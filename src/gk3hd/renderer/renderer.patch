@@ -1,0 +1,2948 @@
+diff --git a/meson.build b/meson.build
+index a87fa49..1464517 100644
+--- a/meson.build
++++ b/meson.build
+@@ -36,7 +36,7 @@ if get_option('build_id')
+   ]
+ endif
+ 
+-dxvk_include_dirs = ['./include']
++dxvk_include_dirs = ['.', './include']
+ if fs.is_dir('./include/vulkan/include')
+   dxvk_include_dirs += ['./include/vulkan/include']
+ elif not cpp.check_header('vulkan/vulkan.h')
+@@ -92,15 +92,12 @@ if platform == 'windows'
+       ]
+     endif
+   else
+-    # setup file alignment + enable PDB output for MSVC builds
+-    # PDBs are useful for Windows consumers of DXVK 
+-    compiler_args += [
+-      '/Z7'
+-    ]
+-    link_args += [
+-      '/FILEALIGN:4096',
+-      '/DEBUG:FULL'
+-    ]
++    link_args += ['/FILEALIGN:4096']
++    # Release binaries must not embed the builder's absolute PDB path.
++    if get_option('debug')
++      compiler_args += ['/Z7']
++      link_args += ['/DEBUG:FULL', '/PDBALTPATH:%_PDB%']
++    endif
+   endif
+ 
+   lib_d3d9    = cpp.find_library('d3d9')
+@@ -206,11 +203,19 @@ glsl_generator = generator(
+   arguments : glsl_args,
+ )
+ 
+-dxvk_version = vcs_tag(
+-  command: ['git', 'describe', '--dirty=+'],
+-  input:  'version.h.in',
+-  output: 'version.h',
+-)
++if get_option('gk3hd_version') != ''
++  dxvk_version = configure_file(
++    configuration: {'VCS_TAG': get_option('gk3hd_version')},
++    input: 'version.h.in',
++    output: 'version.h',
++  )
++else
++  dxvk_version = vcs_tag(
++    command: ['git', 'describe', '--dirty=+'],
++    input: 'version.h.in',
++    output: 'version.h',
++  )
++endif
+ 
+ conf_data = configuration_data()
+ conf_data.set('BUILD_COMPILER', cpp.get_id())
+diff --git a/meson_options.txt b/meson_options.txt
+index e859cc5..2e360fa 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -5,6 +5,7 @@ option('enable_d3d9',  type : 'boolean', value : true, description: 'Build D3D9'
+ option('enable_d3d10', type : 'boolean', value : true, description: 'Build D3D10')
+ option('enable_d3d11', type : 'boolean', value : true, description: 'Build D3D11')
+ option('build_id',     type : 'boolean', value : false)
++option('gk3hd_version', type : 'string', value : '', description: 'Identity of the modified gk3hd renderer build')
+ option('native_glfw',  type : 'feature', value : 'auto', description: 'Enable GLFW WSI for DXVK Native')
+ option('native_sdl2',  type : 'feature', value : 'auto', description: 'Enable SDL2 WSI for DXVK Native')
+ option('native_sdl3',  type : 'feature', value : 'auto', description: 'Enable SDL3 WSI for DXVK Native')
+diff --git a/src/ddraw/d3d3/d3d3_texture.cpp b/src/ddraw/d3d3/d3d3_texture.cpp
+index c82305c..b1cf798 100644
+--- a/src/ddraw/d3d3/d3d3_texture.cpp
++++ b/src/ddraw/d3d3/d3d3_texture.cpp
+@@ -124,7 +124,7 @@ namespace dxvk {
+     // from IDirectDrawSurface4, though that shouldn't happen in practice
+     DDrawSurface* parentSurf = d3d3Texture->GetCommonTexture()->GetDDSurface();
+     if (likely(parentSurf != nullptr)) {
+-      parentSurf->DownloadSurfaceData();
++      if (HRESULT downloadResult = parentSurf->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     } else {
+       Logger::warn("D3D3Texture::Load: Failed to download parent surface");
+     }
+diff --git a/src/ddraw/d3d3/d3d3_viewport.cpp b/src/ddraw/d3d3/d3d3_viewport.cpp
+index d670bd4..b0e4577 100644
+--- a/src/ddraw/d3d3/d3d3_viewport.cpp
++++ b/src/ddraw/d3d3/d3d3_viewport.cpp
+@@ -300,7 +300,7 @@ namespace dxvk {
+           //Logger::debug("D3D3Viewport::Clear: Partial render target clear");
+           // Use a common surface helper, because we want to handle all
+           // possible surface interfaces that may be alive at this time
+-          rt->InitializeOrUploadD3D9();
++          if (HRESULT uploadResult = rt->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+         }
+       }
+     }
+@@ -312,7 +312,7 @@ namespace dxvk {
+           //Logger::debug("D3D3Viewport::Clear: Partial depth stencil clear");
+           // Use a common surface helper, because we want to handle all
+           // possible surface interfaces that may be alive at this time
+-          ds->InitializeOrUploadD3D9();
++          if (HRESULT uploadResult = ds->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+         }
+       }
+     }
+diff --git a/src/ddraw/d3d5/d3d5_texture.cpp b/src/ddraw/d3d5/d3d5_texture.cpp
+index 134c447..0857f50 100644
+--- a/src/ddraw/d3d5/d3d5_texture.cpp
++++ b/src/ddraw/d3d5/d3d5_texture.cpp
+@@ -130,7 +130,7 @@ namespace dxvk {
+     // because we create and cache one ourselves on creation if it doesn't exist
+     DDraw4Surface* parentSurf4 = d3d5Texture->GetCommonTexture()->GetDD4Surface();
+     if (likely(parentSurf4 != nullptr)) {
+-      parentSurf4->DownloadSurfaceData();
++      if (HRESULT downloadResult = parentSurf4->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     } else {
+       Logger::warn(str::format(m_objectType, "::Load: Failed to download parent surface"));
+     }
+diff --git a/src/ddraw/d3d5/d3d5_viewport.cpp b/src/ddraw/d3d5/d3d5_viewport.cpp
+index f004042..bf8df27 100644
+--- a/src/ddraw/d3d5/d3d5_viewport.cpp
++++ b/src/ddraw/d3d5/d3d5_viewport.cpp
+@@ -298,7 +298,7 @@ namespace dxvk {
+           //Logger::debug("D3D5Viewport::Clear: Partial render target clear");
+           // Use a common surface helper, because we want to handle all
+           // possible surface interfaces that may be alive at this time
+-          rt->InitializeOrUploadD3D9();
++          if (HRESULT uploadResult = rt->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+         }
+       }
+     }
+@@ -310,7 +310,7 @@ namespace dxvk {
+           //Logger::debug("D3D5Viewport::Clear: Partial depth stencil clear");
+           // Use a common surface helper, because we want to handle all
+           // possible surface interfaces that may be alive at this time
+-          ds->InitializeOrUploadD3D9();
++          if (HRESULT uploadResult = ds->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+         }
+       }
+     }
+diff --git a/src/ddraw/d3d6/d3d6_device.cpp b/src/ddraw/d3d6/d3d6_device.cpp
+index 1cf7606..325e70e 100644
+--- a/src/ddraw/d3d6/d3d6_device.cpp
++++ b/src/ddraw/d3d6/d3d6_device.cpp
+@@ -404,6 +404,7 @@ namespace dxvk {
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
++    m_rt->GetCommonSurface()->BeginGPUFrame();
+     m_commonD3DDevice->SetInScene(true);
+ 
+     return D3D_OK;
+@@ -1934,6 +1935,7 @@ namespace dxvk {
+ 
+       if (likely(m_textures[stage] != nullptr)) {
+         m_textures[stage] = nullptr;
++        m_textureSurfaces[stage] = nullptr;
+         m_bridge->SetColorKeyState(stage, false);
+       }
+ 
+@@ -1999,7 +2001,12 @@ namespace dxvk {
+       }
+     }
+ 
++    // Retain the incoming parent before releasing any old binding. Dropping
++    // the final application reference must not leave a live Texture2 wrapper
++    // pointing at a destroyed/reused DDrawCommonSurface.
++    Com<DDraw4Surface, false> retainedSurface = surface4;
+     m_textures[stage] = texture6;
++    m_textureSurfaces[stage] = std::move(retainedSurface);
+ 
+     return D3D_OK;
+   }
+@@ -2172,15 +2179,17 @@ namespace dxvk {
+     // Render target
+     m_rt->InitializeOrUploadD3D9();
+     // Depth stencil (if present)
+-    if (likely(m_ds != nullptr))
++    if (likely(m_ds != nullptr)) {
+       m_ds->InitializeOrUploadD3D9();
++    }
+     // Bound texture(s)
+     DDraw4Surface* surf4 = nullptr;
+     for (auto& tex : m_textures) {
+       if (tex.ptr() != nullptr) {
+         surf4 = tex->GetCommonTexture()->GetDD4Surface();
+-        if (likely(surf4 != nullptr))
++        if (likely(surf4 != nullptr)) {
+           surf4->InitializeOrUploadD3D9();
++        }
+       }
+     }
+   }
+@@ -2260,4 +2269,4 @@ namespace dxvk {
+     return D3D_OK;
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/d3d6/d3d6_device.h b/src/ddraw/d3d6/d3d6_device.h
+index a4958b2..5e06bc7 100644
+--- a/src/ddraw/d3d6/d3d6_device.h
++++ b/src/ddraw/d3d6/d3d6_device.h
+@@ -215,10 +215,14 @@ namespace dxvk {
+     VertexStream                    m_vertexStream;
+ 
+     // D3D5Texture (aka IDirect3DTexture2) is shared between D3D5 and D3D6
++    // Texture2's public refs delegate to its surface, but its private refs do
++    // not. Keep the parent alive while bound without changing public refcounts.
++    // Declare parents first so textures are released first during destruction.
++    std::array<Com<DDraw4Surface, false>, ddrawCaps::TextureStageCount> m_textureSurfaces;
+     std::array<Com<D3D5Texture, false>, ddrawCaps::TextureStageCount> m_textures;
+ 
+     std::array<Com<d3d9::IDirect3DIndexBuffer9>, ddrawCaps::IndexBufferCount> m_ib9;
+ 
+   };
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/d3d6/d3d6_viewport.cpp b/src/ddraw/d3d6/d3d6_viewport.cpp
+index 8ea6003..0ac8d32 100644
+--- a/src/ddraw/d3d6/d3d6_viewport.cpp
++++ b/src/ddraw/d3d6/d3d6_viewport.cpp
+@@ -298,7 +298,7 @@ namespace dxvk {
+           //Logger::debug("D3D6Viewport::Clear: Partial render target clear");
+           // Use a common surface helper, because we want to handle all
+           // possible surface interfaces that may be alive at this time
+-          rt->InitializeOrUploadD3D9();
++          if (HRESULT uploadResult = rt->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+         }
+       }
+     }
+@@ -310,7 +310,7 @@ namespace dxvk {
+           //Logger::debug("D3D6Viewport::Clear: Partial depth stencil clear");
+           // Use a common surface helper, because we want to handle all
+           // possible surface interfaces that may be alive at this time
+-          ds->InitializeOrUploadD3D9();
++          if (HRESULT uploadResult = ds->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+         }
+       }
+     }
+@@ -556,7 +556,7 @@ namespace dxvk {
+           //Logger::debug("D3D6Viewport::Clear2: Partial render target clear");
+           // Use a common surface helper, because we want to handle all
+           // possible surface interfaces that may be alive at this time
+-          rt->InitializeOrUploadD3D9();
++          if (HRESULT uploadResult = rt->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+         }
+       }
+     }
+@@ -568,7 +568,7 @@ namespace dxvk {
+           //Logger::debug("D3D6Viewport::Clear2: Partial depth stencil clear");
+           // Use a common surface helper, because we want to handle all
+           // possible surface interfaces that may be alive at this time
+-          ds->InitializeOrUploadD3D9();
++          if (HRESULT uploadResult = ds->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+         }
+       }
+     }
+diff --git a/src/ddraw/d3d7/d3d7_device.cpp b/src/ddraw/d3d7/d3d7_device.cpp
+index 0512670..e9b520a 100644
+--- a/src/ddraw/d3d7/d3d7_device.cpp
++++ b/src/ddraw/d3d7/d3d7_device.cpp
+@@ -361,14 +361,14 @@ namespace dxvk {
+       // If this isn't a full surface clear, we need to first upload the DDraw surface
+       if (count > 1 || !m_rt->GetCommonSurface()->IsFullSurfaceLock(reinterpret_cast<RECT*>(rects), nullptr)) {
+         //Logger::debug("D3D7Device::Clear: Partial render target clear");
+-        m_rt->InitializeOrUploadD3D9();
++        if (HRESULT uploadResult = m_rt->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+       }
+     }
+     if (unlikely(clearDepthStencil && count && m_ds != nullptr)) {
+       // If this isn't a full surface clear, we need to first upload the DDraw surface
+       if (count > 1 || !m_ds->GetCommonSurface()->IsFullSurfaceLock(reinterpret_cast<RECT*>(rects), nullptr)) {
+         //Logger::debug("D3D7Device::Clear: Partial depth stencil clear");
+-        m_ds->InitializeOrUploadD3D9();
++        if (HRESULT uploadResult = m_ds->InitializeOrUploadD3D9(); FAILED(uploadResult)) return uploadResult;
+       }
+     }
+ 
+@@ -1476,7 +1476,7 @@ namespace dxvk {
+ 
+     const RECT* sourceFullSurfaceRect = nullptr;
+     ddraw7SurfaceSrc = static_cast<DDraw7Surface*>(src_surface);
+-    ddraw7SurfaceSrc->DownloadSurfaceData();
++    if (HRESULT downloadResult = ddraw7SurfaceSrc->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     sourceFullSurfaceRect = ddraw7SurfaceSrc->GetCommonSurface()->GetFullSurfaceRect();
+ 
+     if (unlikely(!DDrawCommonInterface::IsWrappedSurface(dst_surface))) {
+@@ -1489,7 +1489,7 @@ namespace dxvk {
+         ddraw7SurfaceDst->GetCommonSurface()->IsFullSurfaceLock(src_rect, sourceFullSurfaceRect)) {
+       ddraw7SurfaceDst->GetCommonSurface()->UnDirtyD3D9Surface();
+     } else {
+-      ddraw7SurfaceDst->DownloadSurfaceData();
++      if (HRESULT downloadResult = ddraw7SurfaceDst->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     HRESULT hr = m_proxy->Load(ddraw7SurfaceDst->GetProxied(), dst_point,
+@@ -1663,4 +1663,4 @@ namespace dxvk {
+     }
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/ddraw.def b/src/ddraw/ddraw.def
+index 5b7898c..d8cbf71 100644
+--- a/src/ddraw/ddraw.def
++++ b/src/ddraw/ddraw.def
+@@ -21,3 +21,6 @@ EXPORTS
+   GetSurfaceFromDC            @20
+   RegisterSpecialCase         @21
+   ReleaseDDThreadLock         @22
++  Gk3hdSurfaceHistoryDepth    @23
++  Gk3hdAreaBlend565           @24
++  Gk3hdAreaBlt565             @25
+diff --git a/src/ddraw/ddraw.sym b/src/ddraw/ddraw.sym
+index 2117d88..112aa5b 100644
+--- a/src/ddraw/ddraw.sym
++++ b/src/ddraw/ddraw.sym
+@@ -21,6 +21,9 @@
+     GetSurfaceFromDC;
+     RegisterSpecialCase;
+     ReleaseDDThreadLock;
++    Gk3hdSurfaceHistoryDepth;
++    Gk3hdAreaBlend565;
++    Gk3hdAreaBlt565;
+ 
+   local:
+     *;
+diff --git a/src/ddraw/ddraw/ddraw_interface.cpp b/src/ddraw/ddraw/ddraw_interface.cpp
+index 791b4ca..04ea337 100644
+--- a/src/ddraw/ddraw/ddraw_interface.cpp
++++ b/src/ddraw/ddraw/ddraw_interface.cpp
+@@ -613,7 +613,18 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE DDrawInterface::SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP) {
+     Logger::debug(str::format("DDrawInterface::SetDisplayMode: ", dwWidth, "x", dwHeight, ":", dwBPP));
+ 
+-    HRESULT hr = m_proxy->SetDisplayMode(dwWidth, dwHeight, dwBPP);
++    HRESULT hr;
++    DEVMODEW mode = {};
++    mode.dmSize = sizeof(mode);
++    Com<IDirectDraw4> dd4;
++    if (m_commonIntf->GetOptions()->cpuRenderTargetBacking &&
++        EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) &&
++        SUCCEEDED(m_proxy->QueryInterface(__uuidof(IDirectDraw4), reinterpret_cast<void**>(&dd4)))) {
++      Logger::info(str::format("Preserving desktop refresh: ", mode.dmDisplayFrequency));
++      hr = dd4->SetDisplayMode(dwWidth, dwHeight, dwBPP, mode.dmDisplayFrequency, 0);
++    } else {
++      hr = m_proxy->SetDisplayMode(dwWidth, dwHeight, dwBPP);
++    }
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+@@ -662,4 +673,4 @@ namespace dxvk {
+     return DD_OK;
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/ddraw/ddraw_surface.cpp b/src/ddraw/ddraw/ddraw_surface.cpp
+index 984187c..ba17ec8 100644
+--- a/src/ddraw/ddraw/ddraw_surface.cpp
++++ b/src/ddraw/ddraw/ddraw_surface.cpp
+@@ -1,4 +1,6 @@
+ #include "ddraw_surface.h"
++#include "../private_native_copy.h"
++#include "../private_stretch.h"
+ 
+ #include "../d3d_common_device.h"
+ 
+@@ -383,19 +385,22 @@ namespace dxvk {
+       Logger::err("DDrawSurface::Blt: Received an unwrapped source surface");
+       return DDERR_UNSUPPORTED;
+     }
++    if (lpDDSrcSurface && m_commonSurf->TryGPUCopy(static_cast<DDrawSurface*>(lpDDSrcSurface)->GetCommonSurface(), lpDestRect, lpSrcRect, dwFlags, lpDDBltFx))
++      return DD_OK;
+ 
+     // Write back any dirty surface data from bound D3D9 back buffers or
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDrawSurface* sourceSurface = static_cast<DDrawSurface*>(lpDDSrcSurface);
+-      sourceSurface->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurface->DownloadSurfaceData(lpSrcRect); FAILED(downloadResult)) return downloadResult;
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if ((lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
+-         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (!(dwFlags & (DDBLT_KEYSRC | DDBLT_KEYDEST | DDBLT_KEYSRCOVERRIDE | DDBLT_KEYDESTOVERRIDE)) &&
++         m_commonSurf->GetClipper() == nullptr &&
++         (lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
++         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(lpDestRect); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -417,16 +422,59 @@ namespace dxvk {
+     }
+ 
+     HRESULT hr;
+-    if (unlikely(lpDDSrcSurface == nullptr)) {
+-      hr = GetShadowOrProxied()->Blt(lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
++    CPUStretchResult stretch;
++    if (lpDDSrcSurface && m_commonIntf->GetOptions()->cpuRenderTargetBacking && !m_commonSurf->GetClipper()) {
++      auto sourceSurface=static_cast<DDrawSurface*>(lpDDSrcSurface);
++      stretch=StretchRGB565Surface(GetShadowOrProxied(),sourceSurface->GetShadowOrProxied(),
++        lpDestRect ? *lpDestRect : *m_commonSurf->GetFullSurfaceRect(),
++        lpSrcRect ? *lpSrcRect : *sourceSurface->GetCommonSurface()->GetFullSurfaceRect(),dwFlags,lpDDBltFx);
++      if (stretch.written && FAILED(stretch.result)) m_commonSurf->DirtyDDrawSurface(lpDestRect);
++    }
++    if (stretch.handled) {
++      hr=stretch.result;
++    } else if (unlikely(lpDDSrcSurface == nullptr)) {
++      const RECT* whole=m_commonSurf->GetFullSurfaceRect();
++      const bool fullFill=m_commonIntf->GetOptions()->cpuRenderTargetBacking &&
++        m_commonSurf->IsRenderTarget() && m_commonSurf->GetCPUBacking() &&
++        !m_commonSurf->GetClipper() && !lpSrcRect && lpDDBltFx &&
++        lpDDBltFx->dwSize==sizeof(DDBLTFX) && lpDDBltFx->dwFillColor<=UINT16_MAX &&
++        (dwFlags & ~(DDBLT_COLORFILL|DDBLT_WAIT|DDBLT_ASYNC))==0 &&
++        (dwFlags & (DDBLT_COLORFILL|DDBLT_WAIT))==(DDBLT_COLORFILL|DDBLT_WAIT) &&
++        (!lpDestRect || EqualRect(lpDestRect,whole)) &&
++        uint64_t(whole->right)*whole->bottom>=1024*1024;
++      if (!(fullFill && FillLargeRGB565Surface(GetShadowOrProxied(),lpDDBltFx->dwFillColor,hr)))
++        hr = GetShadowOrProxied()->Blt(lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
+     } else {
+       DDrawSurface* sourceSurface = static_cast<DDrawSurface*>(lpDDSrcSurface);
+-      hr = GetShadowOrProxied()->Blt(lpDestRect, sourceSurface->GetShadowOrProxied(), lpSrcRect, dwFlags, lpDDBltFx);
++      auto sourceCommon=sourceSurface->GetCommonSurface();
++      const RECT* whole=m_commonSurf->GetFullSurfaceRect();
++      const RECT* sourceWhole=sourceCommon->GetFullSurfaceRect();
++      const bool fullRGBCopy=sourceCommon!=m_commonSurf.ptr() &&
++        m_commonIntf->GetOptions()->cpuRenderTargetBacking &&
++        m_commonSurf->IsRenderTarget() && m_commonSurf->GetCPUBacking() &&
++        !m_commonSurf->GetClipper() && !lpDDBltFx &&
++        (dwFlags & ~(DDBLT_WAIT|DDBLT_ASYNC))==0 && (dwFlags & DDBLT_WAIT) &&
++        (!lpDestRect || EqualRect(lpDestRect,whole)) && (!lpSrcRect || EqualRect(lpSrcRect,sourceWhole)) &&
++        EqualRect(whole,sourceWhole) && uint64_t(whole->right)*whole->bottom>=1024*1024;
++      const bool copied=fullRGBCopy && CopyLargeRGB565Surface(GetShadowOrProxied(),sourceSurface->GetShadowOrProxied(),hr);
++      if (!copied)
++        hr = GetShadowOrProxied()->Blt(lpDestRect, sourceSurface->GetShadowOrProxied(), lpSrcRect, dwFlags, lpDDBltFx);
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+-    m_commonSurf->DirtyDDrawSurface();
++    {
++      auto sourceCommon = lpDDSrcSurface ? static_cast<DDrawSurface*>(lpDDSrcSurface)->GetCommonSurface() : nullptr;
++      if (sourceCommon && m_commonSurf->GetCPUBacking() && m_commonSurf->IsRenderTarget() &&
++          m_commonSurf->GetDesc()->ddpfPixelFormat.dwFlags == DDPF_RGB && sourceCommon->GetDesc()->ddpfPixelFormat.dwFlags == DDPF_RGB &&
++          !m_commonSurf->GetClipper() && !lpDDBltFx && (dwFlags & ~(DDBLT_WAIT | DDBLT_ASYNC)) == 0 &&
++          m_commonSurf->IsFullSurfaceLock(lpDestRect,nullptr) && sourceCommon->IsFullSurfaceLock(lpSrcRect,nullptr) &&
++          EqualRect(m_commonSurf->GetFullSurfaceRect(),sourceCommon->GetFullSurfaceRect()))
++        m_commonSurf->DirtyFromFullCopy(sourceCommon);
++      else m_commonSurf->DirtyDDrawSurface(lpDestRect);
++    }
+ 
+     if (m_shadowSurf != nullptr && d3d9Device != nullptr) {
+       const bool shouldPresent = m_commonIntf->GetOptions()->legacyPresentGuard == D3DLegacyPresentGuard::Auto ?
+@@ -459,15 +507,14 @@ namespace dxvk {
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDrawSurface* sourceSurface = static_cast<DDrawSurface*>(lpDDSrcSurface);
+-      sourceSurface->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurface->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+       sourceFullSurfaceRect = sourceSurface->GetCommonSurface()->GetFullSurfaceRect();
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
+-        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
++        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -497,6 +544,8 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+     m_commonSurf->DirtyDDrawSurface();
+ 
+@@ -763,7 +812,7 @@ namespace dxvk {
+     }
+ 
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+ 
+     return GetShadowOrProxied()->GetDC(lphDC);
+   }
+@@ -828,25 +877,18 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE DDrawSurface::Lock(LPRECT lpDestRect, LPDDSURFACEDESC lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent) {
++    m_commonSurf->AccessCPU();
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(lpDestRect); FAILED(downloadResult)) return downloadResult;
+ 
+     HRESULT hr = GetShadowOrProxied()->Lock(lpDestRect, lpDDSurfaceDesc, dwFlags, hEvent);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    // For single surface locks, track the READONLY flag in order to skip dirtying
+-    // on Unlock(). Reset flag tracking in case of multiple simultaneous locks,
+-    // which are technically possible but extremely rare in practice.
+-    //
+-    // Note: Using lpDestRect as a key for tracking and/or matching Lock() to Unlock()
+-    // calls, as the documentation suggests, isn't feasible, as there are applications
+-    // which use nullptr during Lock() calls and then a non-null pointer on Unlock().
+-    if (likely(!m_readOnlyLock)) {
+-      m_readOnlyLock = (dwFlags & DDLOCK_READONLY) && !(dwFlags & DDLOCK_WRITEONLY);
+-    } else {
+-      m_readOnlyLock = false;
+-    }
++    m_commonSurf->TrackLockRegion(lpDestRect,lpDDSurfaceDesc->lpSurface,dwFlags);
++    m_commonSurf->RestoreLockCaps(*lpDDSurfaceDesc);
++
++
+ 
+     return DD_OK;
+   }
+@@ -893,19 +935,17 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE DDrawSurface::SetClipper(LPDIRECTDRAWCLIPPER lpDDClipper) {
+     // A nullptr lpDDClipper gets the current clipper detached
+     if (lpDDClipper == nullptr) {
+-      HRESULT hr = m_proxy->SetClipper(lpDDClipper);
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), nullptr);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(nullptr);
+     } else {
+       DDrawClipper* ddrawClipper = static_cast<DDrawClipper*>(lpDDClipper);
+ 
+-      HRESULT hr = m_proxy->SetClipper(ddrawClipper->GetProxied());
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), ddrawClipper);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(ddrawClipper);
+ 
+       // Retrieve a hWnd, if needed, during clipper attachment
+       HWND hWnd = nullptr;
+@@ -932,7 +972,7 @@ namespace dxvk {
+       }
+     }
+ 
+-    HRESULT hr = m_proxy->SetColorKey(dwFlags, lpDDColorKey);
++    HRESULT hr = m_commonSurf->SetColorKey(m_proxy.ptr(), dwFlags, lpDDColorKey);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+@@ -987,8 +1027,7 @@ namespace dxvk {
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    if (!m_readOnlyLock) {
+-      m_commonSurf->DirtyDDrawSurface();
++    if (m_commonSurf->CompleteLockData(lpSurfaceData)) {
+ 
+       if (m_shadowSurf != nullptr) {
+         d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -1003,8 +1042,6 @@ namespace dxvk {
+           }
+         }
+       }
+-    } else {
+-      m_readOnlyLock = false;
+     }
+ 
+     return DD_OK;
+@@ -1103,7 +1140,7 @@ namespace dxvk {
+     return UploadSurfaceData();
+   }
+ 
+-  void DDrawSurface::DownloadSurfaceData() {
++  HRESULT DDrawSurface::DownloadSurfaceData(const RECT* rect) {
+     // Some games, like The Settlers IV, use multiple devices for rendering, one to handle
+     // terrain and the overall 3D scene, and one to create textures/sprites to overlay on
+     // top of it. Since DXVK's D3D9 backend does not restrict cross-device surface/texture
+@@ -1114,17 +1151,22 @@ namespace dxvk {
+ 
+     // TODO: We are technically ignoring mip maps as is, though that will probably never be an issue
+     if (m_commonSurf->IsD3D9SurfaceDirty() && m_commonSurf->IsInitialized()) {
++      if (auto result = m_commonSurf->DownloadCPURegion(rect)) return *result;
+       //Logger::debug(str::format("DDrawSurface::DownloadSurfaceData: Downloading nr. [[1-", std::hex, this, "]]"));
+-      BlitToDDrawSurface<IDirectDrawSurface, DDSURFACEDESC>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
++      HRESULT hr = BlitToDDrawSurface<IDirectDrawSurface, DDSURFACEDESC>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
+                                                             m_commonSurf->IsDXTFormat());
++      if (FAILED(hr)) return hr;
+       m_commonSurf->UnDirtyD3D9Surface();
++      m_commonSurf->SnapshotCPUBacking();
+     }
++    return DD_OK;
+   }
+ 
+   inline HRESULT DDrawSurface::UploadSurfaceData() {
+     // Fast skip
+     if (!m_commonSurf->IsDDrawSurfaceDirty())
+       return DD_OK;
++    if (auto result = m_commonSurf->UploadCPUBacking()) return *result;
+ 
+     //Logger::debug(str::format("DDrawSurface::UploadSurfaceData: Uploading nr. [[1-", std::hex, this, "]]"));
+ 
+@@ -1135,10 +1177,12 @@ namespace dxvk {
+         BlitToD3D9Texture<IDirectDrawSurface, DDSURFACEDESC>(m_commonSurf->GetD3D9Texture(), m_proxy.ptr(),
+                                                              m_commonSurf->GetMipCount(), m_commonSurf->IsDXTFormat());
+         break;
+-      default:
+-        BlitToD3D9Surface<IDirectDrawSurface, DDSURFACEDESC>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
++      default: {
++        HRESULT hr = BlitToD3D9Surface<IDirectDrawSurface, DDSURFACEDESC>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
+                                                              m_commonSurf->IsDXTFormat());
++        if (FAILED(hr)) return hr;
+         break;
++      }
+     }
+ 
+     m_commonSurf->UnDirtyDDrawSurface();
+diff --git a/src/ddraw/ddraw/ddraw_surface.h b/src/ddraw/ddraw/ddraw_surface.h
+index 990767c..4025dcc 100644
+--- a/src/ddraw/ddraw/ddraw_surface.h
++++ b/src/ddraw/ddraw/ddraw_surface.h
+@@ -109,7 +109,7 @@ namespace dxvk {
+ 
+     HRESULT InitializeOrUploadD3D9();
+ 
+-    void DownloadSurfaceData();
++    [[nodiscard]] HRESULT DownloadSurfaceData(const RECT* rect = nullptr);
+ 
+     void SetShadowSurface(Com<DDrawSurface>&& shadowSurf) {
+       m_shadowSurf = shadowSurf;
+@@ -121,6 +121,8 @@ namespace dxvk {
+ 
+     IDirectDrawSurface* GetShadowOrProxied() {
+       d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
++      if (auto backing = m_commonSurf->GetCPUBacking())
++        return backing;
+ 
+       if (unlikely(m_shadowSurf != nullptr && d3d9Device != nullptr))
+         return m_shadowSurf->GetProxied();
+@@ -197,7 +199,6 @@ namespace dxvk {
+     inline HRESULT CreateDeviceInternal(REFIID riid, void** ppvObject);
+ 
+     bool                      m_isChildObject = false;
+-    std::atomic<bool>         m_readOnlyLock  = false;
+ 
+     Com<DDrawCommonSurface>   m_commonSurf;
+     DDrawCommonInterface*     m_commonIntf    = nullptr;
+diff --git a/src/ddraw/ddraw2/ddraw2_interface.cpp b/src/ddraw/ddraw2/ddraw2_interface.cpp
+index d9b269a..2643481 100644
+--- a/src/ddraw/ddraw2/ddraw2_interface.cpp
++++ b/src/ddraw/ddraw2/ddraw2_interface.cpp
+@@ -590,6 +590,13 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE DDraw2Interface::SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwRefreshRate, DWORD dwFlags) {
++    DEVMODEW mode = {};
++    mode.dmSize = sizeof(mode);
++    if (!dwRefreshRate && m_commonIntf->GetOptions()->cpuRenderTargetBacking &&
++        EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode)) {
++      dwRefreshRate = mode.dmDisplayFrequency;
++      Logger::info(str::format("Preserving DD2 desktop refresh: ", dwRefreshRate));
++    }
+     Logger::debug(str::format("DDraw2Interface::SetDisplayMode: ", dwWidth, "x", dwHeight, ":", dwBPP, "@", dwRefreshRate));
+ 
+     HRESULT hr = m_proxy->SetDisplayMode(dwWidth, dwHeight, dwBPP, dwRefreshRate, dwFlags);
+@@ -711,4 +718,4 @@ namespace dxvk {
+     return DD_OK;
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/ddraw2/ddraw2_surface.cpp b/src/ddraw/ddraw2/ddraw2_surface.cpp
+index 9425830..eff7434 100644
+--- a/src/ddraw/ddraw2/ddraw2_surface.cpp
++++ b/src/ddraw/ddraw2/ddraw2_surface.cpp
+@@ -1,4 +1,5 @@
+ #include "ddraw2_surface.h"
++#include "../private_stretch.h"
+ 
+ #include "../d3d_common_device.h"
+ 
+@@ -324,14 +325,15 @@ namespace dxvk {
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDraw2Surface* sourceSurf = static_cast<DDraw2Surface*>(lpDDSrcSurface);
+-      sourceSurf->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurf->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if ((lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
+-         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (!(dwFlags & (DDBLT_KEYSRC | DDBLT_KEYDEST | DDBLT_KEYSRCOVERRIDE | DDBLT_KEYDESTOVERRIDE)) &&
++         m_commonSurf->GetClipper() == nullptr &&
++         (lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
++         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -354,7 +356,17 @@ namespace dxvk {
+     }
+ 
+     HRESULT hr;
+-    if (unlikely(lpDDSrcSurface == nullptr)) {
++    CPUStretchResult stretch;
++    if (lpDDSrcSurface && m_commonIntf->GetOptions()->cpuRenderTargetBacking && !m_commonSurf->GetClipper()) {
++      auto sourceSurface=static_cast<DDraw2Surface*>(lpDDSrcSurface);
++      stretch=StretchRGB565Surface(GetShadowOrProxied(),sourceSurface->GetShadowOrProxied(),
++        lpDestRect ? *lpDestRect : *m_commonSurf->GetFullSurfaceRect(),
++        lpSrcRect ? *lpSrcRect : *sourceSurface->GetCommonSurface()->GetFullSurfaceRect(),dwFlags,lpDDBltFx);
++      if (stretch.written && FAILED(stretch.result)) m_commonSurf->DirtyDDrawSurface(lpDestRect);
++    }
++    if (stretch.handled) {
++      hr=stretch.result;
++    } else if (unlikely(lpDDSrcSurface == nullptr)) {
+       hr = GetShadowOrProxied()->Blt(lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
+     } else {
+       DDraw2Surface* sourceSurf = static_cast<DDraw2Surface*>(lpDDSrcSurface);
+@@ -362,6 +374,8 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+     m_commonSurf->DirtyDDrawSurface();
+ 
+@@ -399,15 +413,14 @@ namespace dxvk {
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDraw2Surface* sourceSurf = static_cast<DDraw2Surface*>(lpDDSrcSurface);
+-      sourceSurf->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurf->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+       sourceFullSurfaceRect = sourceSurf->GetCommonSurface()->GetFullSurfaceRect();
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
+-        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
++        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -438,6 +451,8 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+     m_commonSurf->DirtyDDrawSurface();
+ 
+@@ -671,7 +686,7 @@ namespace dxvk {
+     }
+ 
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+ 
+     return GetShadowOrProxied()->GetDC(lphDC);
+   }
+@@ -736,25 +751,16 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE DDraw2Surface::Lock(LPRECT lpDestRect, LPDDSURFACEDESC lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent) {
++    m_commonSurf->AccessCPU();
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(lpDestRect); FAILED(downloadResult)) return downloadResult;
+ 
+     HRESULT hr = GetShadowOrProxied()->Lock(lpDestRect, lpDDSurfaceDesc, dwFlags, hEvent);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    // For single surface locks, track the READONLY flag in order to skip dirtying
+-    // on Unlock(). Reset flag tracking in case of multiple simultaneous locks,
+-    // which are technically possible but extremely rare in practice.
+-    //
+-    // Note: Using lpDestRect as a key for tracking and/or matching Lock() to Unlock()
+-    // calls, as the documentation suggests, isn't feasible, as there are applications
+-    // which use nullptr during Lock() calls and then a non-null pointer on Unlock().
+-    if (likely(!m_readOnlyLock)) {
+-      m_readOnlyLock = (dwFlags & DDLOCK_READONLY) && !(dwFlags & DDLOCK_WRITEONLY);
+-    } else {
+-      m_readOnlyLock = false;
+-    }
++    m_commonSurf->TrackLockRegion(lpDestRect,lpDDSurfaceDesc->lpSurface,dwFlags);
++    m_commonSurf->RestoreLockCaps(*lpDDSurfaceDesc);
+ 
+     return DD_OK;
+   }
+@@ -801,19 +807,17 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE DDraw2Surface::SetClipper(LPDIRECTDRAWCLIPPER lpDDClipper) {
+     // A nullptr lpDDClipper gets the current clipper detached
+     if (lpDDClipper == nullptr) {
+-      HRESULT hr = m_proxy->SetClipper(lpDDClipper);
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), nullptr);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(nullptr);
+     } else {
+       DDrawClipper* ddrawClipper = static_cast<DDrawClipper*>(lpDDClipper);
+ 
+-      HRESULT hr = m_proxy->SetClipper(ddrawClipper->GetProxied());
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), ddrawClipper);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(ddrawClipper);
+ 
+       // Retrieve a hWnd, if needed, during clipper attachment
+       HWND hWnd = nullptr;
+@@ -840,7 +844,7 @@ namespace dxvk {
+       }
+     }
+ 
+-    HRESULT hr = m_proxy->SetColorKey(dwFlags, lpDDColorKey);
++    HRESULT hr = m_commonSurf->SetColorKey(m_proxy.ptr(), dwFlags, lpDDColorKey);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+@@ -895,8 +899,7 @@ namespace dxvk {
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    if (!m_readOnlyLock) {
+-      m_commonSurf->DirtyDDrawSurface();
++    if (m_commonSurf->CompleteLockData(lpSurfaceData)) {
+ 
+       if (m_shadowSurf != nullptr) {
+         d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -911,8 +914,6 @@ namespace dxvk {
+           }
+         }
+       }
+-    } else {
+-      m_readOnlyLock = false;
+     }
+ 
+     return DD_OK;
+@@ -999,7 +1000,7 @@ namespace dxvk {
+     return UploadSurfaceData();
+   }
+ 
+-  void DDraw2Surface::DownloadSurfaceData() {
++  HRESULT DDraw2Surface::DownloadSurfaceData(const RECT* rect) {
+     // Some games, like The Settlers IV, use multiple devices for rendering, one to handle
+     // terrain and the overall 3D scene, and one to create textures/sprites to overlay on
+     // top of it. Since DXVK's D3D9 backend does not restrict cross-device surface/texture
+@@ -1010,17 +1011,22 @@ namespace dxvk {
+ 
+     // TODO: We are technically ignoring mip maps as is, though that will probably never be an issue
+     if (m_commonSurf->IsD3D9SurfaceDirty() && m_commonSurf->IsInitialized()) {
++      if (auto result = m_commonSurf->DownloadCPURegion(rect)) return *result;
+       //Logger::debug(str::format("DDraw2Surface::DownloadSurfaceData: Downloading nr. [[2-", std::hex, this, "]]"));
+-      BlitToDDrawSurface<IDirectDrawSurface2, DDSURFACEDESC>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
++      HRESULT hr = BlitToDDrawSurface<IDirectDrawSurface2, DDSURFACEDESC>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
+                                                              m_commonSurf->IsDXTFormat());
++      if (FAILED(hr)) return hr;
+       m_commonSurf->UnDirtyD3D9Surface();
++      m_commonSurf->SnapshotCPUBacking();
+     }
++    return DD_OK;
+   }
+ 
+   inline HRESULT DDraw2Surface::UploadSurfaceData() {
+     // Fast skip
+     if (!m_commonSurf->IsDDrawSurfaceDirty())
+       return DD_OK;
++    if (auto result = m_commonSurf->UploadCPUBacking()) return *result;
+ 
+     //Logger::debug(str::format("DDraw2Surface::UploadSurfaceData: Uploading nr. [[2-", std::hex, this, "]]"));
+ 
+@@ -1031,10 +1037,12 @@ namespace dxvk {
+         BlitToD3D9Texture<IDirectDrawSurface2, DDSURFACEDESC>(m_commonSurf->GetD3D9Texture(), m_proxy.ptr(),
+                                                               m_commonSurf->GetMipCount(), m_commonSurf->IsDXTFormat());
+         break;
+-      default:
+-        BlitToD3D9Surface<IDirectDrawSurface2, DDSURFACEDESC>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
++      default: {
++        HRESULT hr = BlitToD3D9Surface<IDirectDrawSurface2, DDSURFACEDESC>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
+                                                               m_commonSurf->IsDXTFormat());
++        if (FAILED(hr)) return hr;
+         break;
++      }
+     }
+ 
+     m_commonSurf->UnDirtyDDrawSurface();
+diff --git a/src/ddraw/ddraw2/ddraw2_surface.h b/src/ddraw/ddraw2/ddraw2_surface.h
+index 4000c54..cbb19d9 100644
+--- a/src/ddraw/ddraw2/ddraw2_surface.h
++++ b/src/ddraw/ddraw2/ddraw2_surface.h
+@@ -106,7 +106,7 @@ namespace dxvk {
+ 
+     HRESULT InitializeOrUploadD3D9();
+ 
+-    void DownloadSurfaceData();
++    [[nodiscard]] HRESULT DownloadSurfaceData(const RECT* rect = nullptr);
+ 
+     void SetShadowSurface(Com<DDraw2Surface>&& shadowSurf) {
+       m_shadowSurf = shadowSurf;
+@@ -118,6 +118,8 @@ namespace dxvk {
+ 
+     IDirectDrawSurface2* GetShadowOrProxied() {
+       d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
++      if (auto backing = m_commonSurf->GetCPUBacking2())
++        return backing;
+ 
+       if (unlikely(m_shadowSurf != nullptr && d3d9Device != nullptr))
+         return m_shadowSurf->GetProxied();
+@@ -171,7 +173,6 @@ namespace dxvk {
+ 
+     inline HRESULT UploadSurfaceData();
+ 
+-    std::atomic<bool>        m_readOnlyLock = false;
+ 
+     Com<DDrawCommonSurface>  m_commonSurf;
+ 
+diff --git a/src/ddraw/ddraw2/ddraw3_surface.cpp b/src/ddraw/ddraw2/ddraw3_surface.cpp
+index ad18fa8..d91b605 100644
+--- a/src/ddraw/ddraw2/ddraw3_surface.cpp
++++ b/src/ddraw/ddraw2/ddraw3_surface.cpp
+@@ -1,4 +1,5 @@
+ #include "ddraw3_surface.h"
++#include "../private_stretch.h"
+ 
+ #include "../d3d_common_device.h"
+ 
+@@ -325,14 +326,15 @@ namespace dxvk {
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDraw3Surface* sourceSurf = static_cast<DDraw3Surface*>(lpDDSrcSurface);
+-      sourceSurf->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurf->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if ((lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
+-         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (!(dwFlags & (DDBLT_KEYSRC | DDBLT_KEYDEST | DDBLT_KEYSRCOVERRIDE | DDBLT_KEYDESTOVERRIDE)) &&
++         m_commonSurf->GetClipper() == nullptr &&
++         (lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
++         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -355,7 +357,17 @@ namespace dxvk {
+     }
+ 
+     HRESULT hr;
+-    if (unlikely(lpDDSrcSurface == nullptr)) {
++    CPUStretchResult stretch;
++    if (lpDDSrcSurface && m_commonIntf->GetOptions()->cpuRenderTargetBacking && !m_commonSurf->GetClipper()) {
++      auto sourceSurface=static_cast<DDraw3Surface*>(lpDDSrcSurface);
++      stretch=StretchRGB565Surface(GetShadowOrProxied(),sourceSurface->GetShadowOrProxied(),
++        lpDestRect ? *lpDestRect : *m_commonSurf->GetFullSurfaceRect(),
++        lpSrcRect ? *lpSrcRect : *sourceSurface->GetCommonSurface()->GetFullSurfaceRect(),dwFlags,lpDDBltFx);
++      if (stretch.written && FAILED(stretch.result)) m_commonSurf->DirtyDDrawSurface(lpDestRect);
++    }
++    if (stretch.handled) {
++      hr=stretch.result;
++    } else if (unlikely(lpDDSrcSurface == nullptr)) {
+       hr = GetShadowOrProxied()->Blt(lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
+     } else {
+       DDraw3Surface* sourceSurf = static_cast<DDraw3Surface*>(lpDDSrcSurface);
+@@ -363,6 +375,8 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+     m_commonSurf->DirtyDDrawSurface();
+ 
+@@ -401,15 +415,14 @@ namespace dxvk {
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDraw3Surface* sourceSurf = static_cast<DDraw3Surface*>(lpDDSrcSurface);
+-      sourceSurf->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurf->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+       sourceFullSurfaceRect = sourceSurf->GetCommonSurface()->GetFullSurfaceRect();
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
+-        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
++        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -440,6 +453,8 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+     m_commonSurf->DirtyDDrawSurface();
+ 
+@@ -673,7 +688,7 @@ namespace dxvk {
+     }
+ 
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+ 
+     return GetShadowOrProxied()->GetDC(lphDC);
+   }
+@@ -738,25 +753,16 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE DDraw3Surface::Lock(LPRECT lpDestRect, LPDDSURFACEDESC lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent) {
++    m_commonSurf->AccessCPU();
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(lpDestRect); FAILED(downloadResult)) return downloadResult;
+ 
+     HRESULT hr = GetShadowOrProxied()->Lock(lpDestRect, lpDDSurfaceDesc, dwFlags, hEvent);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    // For single surface locks, track the READONLY flag in order to skip dirtying
+-    // on Unlock(). Reset flag tracking in case of multiple simultaneous locks,
+-    // which are technically possible but extremely rare in practice.
+-    //
+-    // Note: Using lpDestRect as a key for tracking and/or matching Lock() to Unlock()
+-    // calls, as the documentation suggests, isn't feasible, as there are applications
+-    // which use nullptr during Lock() calls and then a non-null pointer on Unlock().
+-    if (likely(!m_readOnlyLock)) {
+-      m_readOnlyLock = (dwFlags & DDLOCK_READONLY) && !(dwFlags & DDLOCK_WRITEONLY);
+-    } else {
+-      m_readOnlyLock = false;
+-    }
++    m_commonSurf->TrackLockRegion(lpDestRect,lpDDSurfaceDesc->lpSurface,dwFlags);
++    m_commonSurf->RestoreLockCaps(*lpDDSurfaceDesc);
+ 
+     return DD_OK;
+   }
+@@ -803,19 +809,17 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE DDraw3Surface::SetClipper(LPDIRECTDRAWCLIPPER lpDDClipper) {
+     // A nullptr lpDDClipper gets the current clipper detached
+     if (lpDDClipper == nullptr) {
+-      HRESULT hr = m_proxy->SetClipper(lpDDClipper);
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), nullptr);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(nullptr);
+     } else {
+       DDrawClipper* ddrawClipper = static_cast<DDrawClipper*>(lpDDClipper);
+ 
+-      HRESULT hr = m_proxy->SetClipper(ddrawClipper->GetProxied());
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), ddrawClipper);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(ddrawClipper);
+ 
+       // Retrieve a hWnd, if needed, during clipper attachment
+       HWND hWnd = nullptr;
+@@ -842,7 +846,7 @@ namespace dxvk {
+       }
+     }
+ 
+-    HRESULT hr = m_proxy->SetColorKey(dwFlags, lpDDColorKey);
++    HRESULT hr = m_commonSurf->SetColorKey(m_proxy.ptr(), dwFlags, lpDDColorKey);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+@@ -897,8 +901,7 @@ namespace dxvk {
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    if (!m_readOnlyLock) {
+-      m_commonSurf->DirtyDDrawSurface();
++    if (m_commonSurf->CompleteLockData(lpSurfaceData)) {
+ 
+       if (m_shadowSurf != nullptr) {
+         d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -913,8 +916,6 @@ namespace dxvk {
+           }
+         }
+       }
+-    } else {
+-      m_readOnlyLock = false;
+     }
+ 
+     return DD_OK;
+@@ -1020,7 +1021,7 @@ namespace dxvk {
+     return UploadSurfaceData();
+   }
+ 
+-  void DDraw3Surface::DownloadSurfaceData() {
++  HRESULT DDraw3Surface::DownloadSurfaceData(const RECT* rect) {
+     // Some games, like The Settlers IV, use multiple devices for rendering, one to handle
+     // terrain and the overall 3D scene, and one to create textures/sprites to overlay on
+     // top of it. Since DXVK's D3D9 backend does not restrict cross-device surface/texture
+@@ -1031,17 +1032,22 @@ namespace dxvk {
+ 
+     // TODO: We are technically ignoring mip maps as is, though that will probably never be an issue
+     if (m_commonSurf->IsD3D9SurfaceDirty() && m_commonSurf->IsInitialized()) {
++      if (auto result = m_commonSurf->DownloadCPURegion(rect)) return *result;
+       //Logger::debug(str::format("DDraw3Surface::DownloadSurfaceData: Downloading nr. [[3-", std::hex, this, "]]"));
+-      BlitToDDrawSurface<IDirectDrawSurface3, DDSURFACEDESC>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
++      HRESULT hr = BlitToDDrawSurface<IDirectDrawSurface3, DDSURFACEDESC>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
+                                                              m_commonSurf->IsDXTFormat());
++      if (FAILED(hr)) return hr;
+       m_commonSurf->UnDirtyD3D9Surface();
++      m_commonSurf->SnapshotCPUBacking();
+     }
++    return DD_OK;
+   }
+ 
+   inline HRESULT DDraw3Surface::UploadSurfaceData() {
+     // Fast skip
+     if (!m_commonSurf->IsDDrawSurfaceDirty())
+       return DD_OK;
++    if (auto result = m_commonSurf->UploadCPUBacking()) return *result;
+ 
+     //Logger::debug(str::format("DDraw3Surface::UploadSurfaceData: Uploading nr. [[3-", std::hex, this, "]]"));
+ 
+@@ -1052,10 +1058,12 @@ namespace dxvk {
+         BlitToD3D9Texture<IDirectDrawSurface3, DDSURFACEDESC>(m_commonSurf->GetD3D9Texture(), m_proxy.ptr(),
+                                                               m_commonSurf->GetMipCount(), m_commonSurf->IsDXTFormat());
+         break;
+-      default:
+-        BlitToD3D9Surface<IDirectDrawSurface3, DDSURFACEDESC>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
++      default: {
++        HRESULT hr = BlitToD3D9Surface<IDirectDrawSurface3, DDSURFACEDESC>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
+                                                               m_commonSurf->IsDXTFormat());
++        if (FAILED(hr)) return hr;
+         break;
++      }
+     }
+ 
+     m_commonSurf->UnDirtyDDrawSurface();
+diff --git a/src/ddraw/ddraw2/ddraw3_surface.h b/src/ddraw/ddraw2/ddraw3_surface.h
+index c576353..fe56e0a 100644
+--- a/src/ddraw/ddraw2/ddraw3_surface.h
++++ b/src/ddraw/ddraw2/ddraw3_surface.h
+@@ -108,7 +108,7 @@ namespace dxvk {
+ 
+     HRESULT InitializeOrUploadD3D9();
+ 
+-    void DownloadSurfaceData();
++    [[nodiscard]] HRESULT DownloadSurfaceData(const RECT* rect = nullptr);
+ 
+     void SetShadowSurface(Com<DDraw3Surface>&& shadowSurf) {
+       m_shadowSurf = shadowSurf;
+@@ -120,6 +120,8 @@ namespace dxvk {
+ 
+     IDirectDrawSurface3* GetShadowOrProxied() {
+       d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
++      if (auto backing = m_commonSurf->GetCPUBacking3())
++        return backing;
+ 
+       if (unlikely(m_shadowSurf != nullptr && d3d9Device != nullptr))
+         return m_shadowSurf->GetProxied();
+@@ -173,7 +175,6 @@ namespace dxvk {
+ 
+     inline HRESULT UploadSurfaceData();
+ 
+-    std::atomic<bool>        m_readOnlyLock = false;
+ 
+     Com<DDrawCommonSurface>  m_commonSurf;
+ 
+diff --git a/src/ddraw/ddraw4/ddraw4_interface.cpp b/src/ddraw/ddraw4/ddraw4_interface.cpp
+index 29eed46..848a971 100644
+--- a/src/ddraw/ddraw4/ddraw4_interface.cpp
++++ b/src/ddraw/ddraw4/ddraw4_interface.cpp
+@@ -608,6 +608,13 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE DDraw4Interface::SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwRefreshRate, DWORD dwFlags) {
++    DEVMODEW mode = {};
++    mode.dmSize = sizeof(mode);
++    if (!dwRefreshRate && m_commonIntf->GetOptions()->cpuRenderTargetBacking &&
++        EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode)) {
++      dwRefreshRate = mode.dmDisplayFrequency;
++      Logger::info(str::format("Preserving DD4 desktop refresh: ", dwRefreshRate));
++    }
+     Logger::debug(str::format("DDraw4Interface::SetDisplayMode: ", dwWidth, "x", dwHeight, ":", dwBPP, "@", dwRefreshRate));
+ 
+     HRESULT hr = m_proxy->SetDisplayMode(dwWidth, dwHeight, dwBPP, dwRefreshRate, dwFlags);
+@@ -809,4 +816,4 @@ namespace dxvk {
+     return DD_OK;
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/ddraw4/ddraw4_surface.cpp b/src/ddraw/ddraw4/ddraw4_surface.cpp
+index 2659118..c81152e 100644
+--- a/src/ddraw/ddraw4/ddraw4_surface.cpp
++++ b/src/ddraw/ddraw4/ddraw4_surface.cpp
+@@ -1,4 +1,5 @@
+ #include "ddraw4_surface.h"
++#include "../private_stretch.h"
+ 
+ #include "../d3d_common_device.h"
+ 
+@@ -310,19 +311,22 @@ namespace dxvk {
+       Logger::err("DDraw4Surface::Blt: Received an unwrapped source surface");
+       return DDERR_UNSUPPORTED;
+     }
++    if (lpDDSrcSurface && m_commonSurf->TryGPUCopy(static_cast<DDraw4Surface*>(lpDDSrcSurface)->GetCommonSurface(), lpDestRect, lpSrcRect, dwFlags, lpDDBltFx))
++      return DD_OK;
+ 
+     // Write back any dirty surface data from bound D3D9 back buffers or
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDraw4Surface* sourceSurface = static_cast<DDraw4Surface*>(lpDDSrcSurface);
+-      sourceSurface->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurface->DownloadSurfaceData(lpSrcRect); FAILED(downloadResult)) return downloadResult;
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if ((lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
+-         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (!(dwFlags & (DDBLT_KEYSRC | DDBLT_KEYDEST | DDBLT_KEYSRCOVERRIDE | DDBLT_KEYDESTOVERRIDE)) &&
++         m_commonSurf->GetClipper() == nullptr &&
++         (lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
++         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(lpDestRect); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -344,7 +348,17 @@ namespace dxvk {
+     }
+ 
+     HRESULT hr;
+-    if (unlikely(lpDDSrcSurface == nullptr)) {
++    CPUStretchResult stretch;
++    if (lpDDSrcSurface && m_commonIntf->GetOptions()->cpuRenderTargetBacking && !m_commonSurf->GetClipper()) {
++      auto sourceSurface=static_cast<DDraw4Surface*>(lpDDSrcSurface);
++      stretch=StretchRGB565Surface(GetShadowOrProxied(),sourceSurface->GetShadowOrProxied(),
++        lpDestRect ? *lpDestRect : *m_commonSurf->GetFullSurfaceRect(),
++        lpSrcRect ? *lpSrcRect : *sourceSurface->GetCommonSurface()->GetFullSurfaceRect(),dwFlags,lpDDBltFx);
++      if (stretch.written && FAILED(stretch.result)) m_commonSurf->DirtyDDrawSurface(lpDestRect);
++    }
++    if (stretch.handled) {
++      hr=stretch.result;
++    } else if (unlikely(lpDDSrcSurface == nullptr)) {
+       hr = GetShadowOrProxied()->Blt(lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
+     } else {
+       DDraw4Surface* sourceSurface = static_cast<DDraw4Surface*>(lpDDSrcSurface);
+@@ -352,8 +366,10 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+-    m_commonSurf->DirtyDDrawSurface();
++    m_commonSurf->DirtyDDrawSurface(lpDestRect);
+ 
+     if (m_shadowSurf != nullptr && d3d9Device != nullptr) {
+       const bool shouldPresent = m_commonIntf->GetOptions()->legacyPresentGuard == D3DLegacyPresentGuard::Auto ?
+@@ -386,15 +402,14 @@ namespace dxvk {
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDraw4Surface* sourceSurface = static_cast<DDraw4Surface*>(lpDDSrcSurface);
+-      sourceSurface->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurface->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+       sourceFullSurfaceRect = sourceSurface->GetCommonSurface()->GetFullSurfaceRect();
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
+-        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
++        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -424,6 +439,8 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+     m_commonSurf->DirtyDDrawSurface();
+ 
+@@ -726,7 +743,7 @@ namespace dxvk {
+     }
+ 
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+ 
+     return GetShadowOrProxied()->GetDC(lphDC);
+   }
+@@ -791,25 +808,18 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE DDraw4Surface::Lock(LPRECT lpDestRect, LPDDSURFACEDESC2 lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent) {
++    m_commonSurf->AccessCPU();
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(lpDestRect); FAILED(downloadResult)) return downloadResult;
+ 
+     HRESULT hr = GetShadowOrProxied()->Lock(lpDestRect, lpDDSurfaceDesc, dwFlags, hEvent);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    // For single surface locks, track the READONLY flag in order to skip dirtying
+-    // on Unlock(). Reset flag tracking in case of multiple simultaneous locks,
+-    // which are technically possible but extremely rare in practice.
+-    //
+-    // Note: Using lpDestRect as a key for tracking and/or matching Lock() to Unlock()
+-    // calls, as the documentation suggests, isn't feasible, as there are applications
+-    // which use nullptr during Lock() calls and then a non-null pointer on Unlock().
+-    if (likely(!m_readOnlyLock)) {
+-      m_readOnlyLock = (dwFlags & DDLOCK_READONLY) && !(dwFlags & DDLOCK_WRITEONLY);
+-    } else {
+-      m_readOnlyLock = false;
+-    }
++    m_commonSurf->TrackLockRegion(lpDestRect,lpDDSurfaceDesc->lpSurface,dwFlags);
++    m_commonSurf->RestoreLockCaps(*lpDDSurfaceDesc);
++
++
+ 
+     return DD_OK;
+   }
+@@ -856,19 +866,17 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE DDraw4Surface::SetClipper(LPDIRECTDRAWCLIPPER lpDDClipper) {
+     // A nullptr lpDDClipper gets the current clipper detached
+     if (lpDDClipper == nullptr) {
+-      HRESULT hr = m_proxy->SetClipper(lpDDClipper);
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), nullptr);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(nullptr);
+     } else {
+       DDrawClipper* ddrawClipper = static_cast<DDrawClipper*>(lpDDClipper);
+ 
+-      HRESULT hr = m_proxy->SetClipper(ddrawClipper->GetProxied());
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), ddrawClipper);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(ddrawClipper);
+ 
+       // Retrieve a hWnd, if needed, during clipper attachment
+       HWND hWnd = nullptr;
+@@ -895,7 +903,7 @@ namespace dxvk {
+       }
+     }
+ 
+-    HRESULT hr = m_proxy->SetColorKey(dwFlags, lpDDColorKey);
++    HRESULT hr = m_commonSurf->SetColorKey(m_proxy.ptr(), dwFlags, lpDDColorKey);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+@@ -950,8 +958,7 @@ namespace dxvk {
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    if (!m_readOnlyLock) {
+-      m_commonSurf->DirtyDDrawSurface();
++    if (m_commonSurf->CompleteLockRect(lpSurfaceData)) {
+ 
+       if (m_shadowSurf != nullptr) {
+         d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -966,8 +973,6 @@ namespace dxvk {
+           }
+         }
+       }
+-    } else {
+-      m_readOnlyLock = false;
+     }
+ 
+     return DD_OK;
+@@ -1136,7 +1141,7 @@ namespace dxvk {
+     return UploadSurfaceData();
+   }
+ 
+-  void DDraw4Surface::DownloadSurfaceData() {
++  HRESULT DDraw4Surface::DownloadSurfaceData(const RECT* rect) {
+     // Some games, like The Settlers IV, use multiple devices for rendering, one to handle
+     // terrain and the overall 3D scene, and one to create textures/sprites to overlay on
+     // top of it. Since DXVK's D3D9 backend does not restrict cross-device surface/texture
+@@ -1147,17 +1152,22 @@ namespace dxvk {
+ 
+     // TODO: We are technically ignoring mip maps as is, though that will probably never be an issue
+     if (m_commonSurf->IsD3D9SurfaceDirty() && m_commonSurf->IsInitialized()) {
++      if (auto result = m_commonSurf->DownloadCPURegion(rect)) return *result;
+       //Logger::debug(str::format("DDraw4Surface::DownloadSurfaceData: Downloading nr. [[4-", std::hex, this, "]]"));
+-      BlitToDDrawSurface<IDirectDrawSurface4, DDSURFACEDESC2>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
+-                                                              m_commonSurf->IsDXTFormat());
++      HRESULT hr = BlitToDDrawSurface<IDirectDrawSurface4, DDSURFACEDESC2>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
++                                                            m_commonSurf->IsDXTFormat());
++      if (FAILED(hr)) return hr;
+       m_commonSurf->UnDirtyD3D9Surface();
++      m_commonSurf->SnapshotCPUBacking();
+     }
++    return DD_OK;
+   }
+ 
+   inline HRESULT DDraw4Surface::UploadSurfaceData() {
+     // Fast skip
+     if (!m_commonSurf->IsDDrawSurfaceDirty())
+       return DD_OK;
++    if (auto result = m_commonSurf->UploadCPUBacking()) return *result;
+ 
+     //Logger::debug(str::format("DDraw4Surface::UploadSurfaceData: Uploading nr. [[4-", std::hex, this, "]]"));
+ 
+@@ -1168,10 +1178,12 @@ namespace dxvk {
+         BlitToD3D9Texture<IDirectDrawSurface4, DDSURFACEDESC2>(m_commonSurf->GetD3D9Texture(), m_proxy.ptr(),
+                                                                m_commonSurf->GetMipCount(), m_commonSurf->IsDXTFormat());
+         break;
+-      default:
+-        BlitToD3D9Surface<IDirectDrawSurface4, DDSURFACEDESC2>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
++      default: {
++        HRESULT hr = BlitToD3D9Surface<IDirectDrawSurface4, DDSURFACEDESC2>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
+                                                                m_commonSurf->IsDXTFormat());
++        if (FAILED(hr)) return hr;
+         break;
++      }
+     }
+ 
+     m_commonSurf->UnDirtyDDrawSurface();
+diff --git a/src/ddraw/ddraw4/ddraw4_surface.h b/src/ddraw/ddraw4/ddraw4_surface.h
+index 3c2a83e..0dab55b 100644
+--- a/src/ddraw/ddraw4/ddraw4_surface.h
++++ b/src/ddraw/ddraw4/ddraw4_surface.h
+@@ -123,7 +123,7 @@ namespace dxvk {
+ 
+     HRESULT InitializeOrUploadD3D9();
+ 
+-    void DownloadSurfaceData();
++    [[nodiscard]] HRESULT DownloadSurfaceData(const RECT* rect = nullptr);
+ 
+     void SetShadowSurface(Com<DDraw4Surface>&& shadowSurf) {
+       m_shadowSurf = shadowSurf;
+@@ -135,6 +135,8 @@ namespace dxvk {
+ 
+     IDirectDrawSurface4* GetShadowOrProxied() {
+       d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
++      if (auto backing = m_commonSurf->GetCPUBacking4())
++        return backing;
+ 
+       if (unlikely(m_shadowSurf != nullptr && d3d9Device != nullptr))
+         return m_shadowSurf->GetProxied();
+@@ -193,7 +195,6 @@ namespace dxvk {
+     inline HRESULT UploadSurfaceData();
+ 
+     bool                    m_isChildObject = false;
+-    std::atomic<bool>       m_readOnlyLock  = false;
+ 
+     Com<DDrawCommonSurface> m_commonSurf;
+     DDrawCommonInterface*   m_commonIntf    = nullptr;
+diff --git a/src/ddraw/ddraw7/ddraw7_surface.cpp b/src/ddraw/ddraw7/ddraw7_surface.cpp
+index ba2b575..b5494f6 100644
+--- a/src/ddraw/ddraw7/ddraw7_surface.cpp
++++ b/src/ddraw/ddraw7/ddraw7_surface.cpp
+@@ -1,4 +1,5 @@
+ #include "ddraw7_surface.h"
++#include "../private_stretch.h"
+ 
+ #include "../d3d_common_device.h"
+ 
+@@ -269,14 +270,15 @@ namespace dxvk {
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDraw7Surface* sourceSurface = static_cast<DDraw7Surface*>(lpDDSrcSurface);
+-      sourceSurface->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurface->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if ((lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
+-         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (!(dwFlags & (DDBLT_KEYSRC | DDBLT_KEYDEST | DDBLT_KEYSRCOVERRIDE | DDBLT_KEYDESTOVERRIDE)) &&
++         m_commonSurf->GetClipper() == nullptr &&
++         (lpDDBltFx == nullptr || (dwFlags & DDBLT_COLORFILL) || (dwFlags & DDBLT_DEPTHFILL)) &&
++         m_commonSurf->IsFullSurfaceLock(lpDestRect, nullptr));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -298,7 +300,17 @@ namespace dxvk {
+     }
+ 
+     HRESULT hr;
+-    if (unlikely(lpDDSrcSurface == nullptr)) {
++    CPUStretchResult stretch;
++    if (lpDDSrcSurface && m_commonIntf->GetOptions()->cpuRenderTargetBacking && !m_commonSurf->GetClipper()) {
++      auto sourceSurface=static_cast<DDraw7Surface*>(lpDDSrcSurface);
++      stretch=StretchRGB565Surface(GetShadowOrProxied(),sourceSurface->GetShadowOrProxied(),
++        lpDestRect ? *lpDestRect : *m_commonSurf->GetFullSurfaceRect(),
++        lpSrcRect ? *lpSrcRect : *sourceSurface->GetCommonSurface()->GetFullSurfaceRect(),dwFlags,lpDDBltFx);
++      if (stretch.written && FAILED(stretch.result)) m_commonSurf->DirtyDDrawSurface(lpDestRect);
++    }
++    if (stretch.handled) {
++      hr=stretch.result;
++    } else if (unlikely(lpDDSrcSurface == nullptr)) {
+       hr = GetShadowOrProxied()->Blt(lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
+     } else {
+       DDraw7Surface* sourceSurface = static_cast<DDraw7Surface*>(lpDDSrcSurface);
+@@ -306,6 +318,8 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+     m_commonSurf->DirtyDDrawSurface();
+ 
+@@ -340,15 +354,14 @@ namespace dxvk {
+     // depth stencils, for both the source surface and the current surface
+     if (likely(lpDDSrcSurface != nullptr)) {
+       DDraw7Surface* sourceSurface = static_cast<DDraw7Surface*>(lpDDSrcSurface);
+-      sourceSurface->DownloadSurfaceData();
++      if (HRESULT downloadResult = sourceSurface->DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+       sourceFullSurfaceRect = sourceSurface->GetCommonSurface()->GetFullSurfaceRect();
+     }
+     // No point in downloading the destination surface if it's going to be overwritten
+-    if (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
+-        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect)) {
+-      m_commonSurf->UnDirtyD3D9Surface();
+-    } else {
+-      DownloadSurfaceData();
++    const bool fullOverwrite = (dwX == 0 && dwY == 0 && (dwTrans & DDBLTFAST_NOCOLORKEY) &&
++        m_commonSurf->IsFullSurfaceLock(lpSrcRect, sourceFullSurfaceRect));
++    if (!fullOverwrite) {
++      if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+     }
+ 
+     d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -378,6 +391,8 @@ namespace dxvk {
+     }
+     if (unlikely(FAILED(hr)))
+       return hr;
++    // Keep the GPU image authoritative until replacement actually succeeds.
++    if (fullOverwrite) m_commonSurf->UnDirtyD3D9Surface();
+ 
+     m_commonSurf->DirtyDDrawSurface();
+ 
+@@ -664,7 +679,7 @@ namespace dxvk {
+     }
+ 
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(); FAILED(downloadResult)) return downloadResult;
+ 
+     return GetShadowOrProxied()->GetDC(lphDC);
+   }
+@@ -729,25 +744,16 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE DDraw7Surface::Lock(LPRECT lpDestRect, LPDDSURFACEDESC2 lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent) {
++    m_commonSurf->AccessCPU();
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+-    DownloadSurfaceData();
++    if (HRESULT downloadResult = DownloadSurfaceData(lpDestRect); FAILED(downloadResult)) return downloadResult;
+ 
+     HRESULT hr = GetShadowOrProxied()->Lock(lpDestRect, lpDDSurfaceDesc, dwFlags, hEvent);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    // For single surface locks, track the READONLY flag in order to skip dirtying
+-    // on Unlock(). Reset flag tracking in case of multiple simultaneous locks,
+-    // which are technically possible but extremely rare in practice.
+-    //
+-    // Note: Using lpDestRect as a key for tracking and/or matching Lock() to Unlock()
+-    // calls, as the documentation suggests, isn't feasible, as there are applications
+-    // which use nullptr during Lock() calls and then a non-null pointer on Unlock().
+-    if (likely(!m_readOnlyLock)) {
+-      m_readOnlyLock = (dwFlags & DDLOCK_READONLY) && !(dwFlags & DDLOCK_WRITEONLY);
+-    } else {
+-      m_readOnlyLock = false;
+-    }
++    m_commonSurf->TrackLockRegion(lpDestRect,lpDDSurfaceDesc->lpSurface,dwFlags);
++    m_commonSurf->RestoreLockCaps(*lpDDSurfaceDesc);
+ 
+     return DD_OK;
+   }
+@@ -794,19 +800,17 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE DDraw7Surface::SetClipper(LPDIRECTDRAWCLIPPER lpDDClipper) {
+     // A nullptr lpDDClipper gets the current clipper detached
+     if (lpDDClipper == nullptr) {
+-      HRESULT hr = m_proxy->SetClipper(lpDDClipper);
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), nullptr);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(nullptr);
+     } else {
+       DDrawClipper* ddrawClipper = static_cast<DDrawClipper*>(lpDDClipper);
+ 
+-      HRESULT hr = m_proxy->SetClipper(ddrawClipper->GetProxied());
++      HRESULT hr = m_commonSurf->SetClipper(m_proxy.ptr(), ddrawClipper);
+       if (unlikely(FAILED(hr)))
+         return hr;
+ 
+-      m_commonSurf->SetClipper(ddrawClipper);
+ 
+       // Retrieve a hWnd, if needed, during clipper attachment
+       HWND hWnd = nullptr;
+@@ -833,7 +837,7 @@ namespace dxvk {
+       }
+     }
+ 
+-    HRESULT hr = m_proxy->SetColorKey(dwFlags, lpDDColorKey);
++    HRESULT hr = m_commonSurf->SetColorKey(m_proxy.ptr(), dwFlags, lpDDColorKey);
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+@@ -888,8 +892,7 @@ namespace dxvk {
+     if (unlikely(FAILED(hr)))
+       return hr;
+ 
+-    if (!m_readOnlyLock) {
+-      m_commonSurf->DirtyDDrawSurface();
++    if (m_commonSurf->CompleteLockRect(lpSurfaceData)) {
+ 
+       if (m_shadowSurf != nullptr) {
+         d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
+@@ -904,8 +907,6 @@ namespace dxvk {
+           }
+         }
+       }
+-    } else {
+-      m_readOnlyLock = false;
+     }
+ 
+     return DD_OK;
+@@ -1166,7 +1167,7 @@ namespace dxvk {
+     return UploadSurfaceData();
+   }
+ 
+-  void DDraw7Surface::DownloadSurfaceData() {
++  HRESULT DDraw7Surface::DownloadSurfaceData(const RECT* rect) {
+     // Some games, like The Settlers IV, use multiple devices for rendering, one to handle
+     // terrain and the overall 3D scene, and one to create textures/sprites to overlay on
+     // top of it. Since DXVK's D3D9 backend does not restrict cross-device surface/texture
+@@ -1177,11 +1178,15 @@ namespace dxvk {
+ 
+     // TODO: We are technically ignoring mip maps as is, though that will probably never be an issue
+     if (m_commonSurf->IsD3D9SurfaceDirty() && m_commonSurf->IsInitialized()) {
++      if (auto result = m_commonSurf->DownloadCPURegion(rect)) return *result;
+       //Logger::debug(str::format("DDraw7Surface::DownloadSurfaceData: Downloading nr. [[7-", std::hex, this, "]]"));
+-      BlitToDDrawSurface<IDirectDrawSurface7, DDSURFACEDESC2>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
++      HRESULT hr = BlitToDDrawSurface<IDirectDrawSurface7, DDSURFACEDESC2>(GetShadowOrProxied(), m_commonSurf->GetD3D9Surface(),
+                                                               m_commonSurf->IsDXTFormat());
++      if (FAILED(hr)) return hr;
+       m_commonSurf->UnDirtyD3D9Surface();
++      m_commonSurf->SnapshotCPUBacking();
+     }
++    return DD_OK;
+   }
+ 
+   inline void DDraw7Surface::InitializeAndAttachCubeFace(
+@@ -1251,6 +1256,7 @@ namespace dxvk {
+     //Fast skip
+     if (!m_commonSurf->IsDDrawSurfaceDirty())
+       return DD_OK;
++    if (auto result = m_commonSurf->UploadCPUBacking()) return *result;
+ 
+     //Logger::debug(str::format("DDraw7Surface::UploadSurfaceData: Uploading nr. [[7-", std::hex, this, "]]"));
+ 
+@@ -1286,10 +1292,12 @@ namespace dxvk {
+         BlitToD3D9Texture<IDirectDrawSurface7, DDSURFACEDESC2>(m_commonSurf->GetD3D9Texture(), m_proxy.ptr(),
+                                                                m_commonSurf->GetMipCount(), m_commonSurf->IsDXTFormat());
+         break;
+-      default:
+-        BlitToD3D9Surface<IDirectDrawSurface7, DDSURFACEDESC2>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
++      default: {
++        HRESULT hr = BlitToD3D9Surface<IDirectDrawSurface7, DDSURFACEDESC2>(m_commonSurf->GetD3D9Surface(), GetShadowOrProxied(),
+                                                                m_commonSurf->IsDXTFormat());
++        if (FAILED(hr)) return hr;
+         break;
++      }
+     }
+ 
+     m_commonSurf->UnDirtyDDrawSurface();
+diff --git a/src/ddraw/ddraw7/ddraw7_surface.h b/src/ddraw/ddraw7/ddraw7_surface.h
+index 8177dfb..82428ec 100644
+--- a/src/ddraw/ddraw7/ddraw7_surface.h
++++ b/src/ddraw/ddraw7/ddraw7_surface.h
+@@ -132,7 +132,7 @@ namespace dxvk {
+ 
+     HRESULT InitializeOrUploadD3D9();
+ 
+-    void DownloadSurfaceData();
++    [[nodiscard]] HRESULT DownloadSurfaceData(const RECT* rect = nullptr);
+ 
+     void SetShadowSurface(Com<DDraw7Surface>&& shadowSurf) {
+       m_shadowSurf = shadowSurf;
+@@ -144,6 +144,8 @@ namespace dxvk {
+ 
+     IDirectDrawSurface7* GetShadowOrProxied() {
+       d3d9::IDirect3DDevice9* d3d9Device = m_commonSurf->GetRefreshedD3D9Device();
++      if (auto backing = m_commonSurf->GetCPUBacking7())
++        return backing;
+ 
+       if (unlikely(m_shadowSurf != nullptr && d3d9Device != nullptr))
+         return m_shadowSurf->GetProxied();
+@@ -209,7 +211,6 @@ namespace dxvk {
+     inline HRESULT UploadSurfaceData();
+ 
+     bool                                m_isChildObject = false;
+-    std::atomic<bool>                   m_readOnlyLock  = false;
+ 
+     Com<DDrawCommonSurface>             m_commonSurf;
+     DDrawCommonInterface*               m_commonIntf    = nullptr;
+diff --git a/src/ddraw/ddraw_common_surface.cpp b/src/ddraw/ddraw_common_surface.cpp
+index a6b33d1..a092060 100644
+--- a/src/ddraw/ddraw_common_surface.cpp
++++ b/src/ddraw/ddraw_common_surface.cpp
+@@ -5,6 +5,7 @@
+ #include "ddraw2/ddraw3_surface.h"
+ #include "ddraw2/ddraw2_surface.h"
+ #include "ddraw/ddraw_surface.h"
++#include "ddraw/ddraw_interface.h"
+ 
+ namespace dxvk {
+ 
+@@ -20,6 +21,269 @@ namespace dxvk {
+       m_palette->SetCommonSurface(nullptr);
+   }
+ 
++  IDirectDrawSurface* DDrawCommonSurface::GetCPUBacking() {
++    if (!m_commonIntf->GetOptions()->cpuRenderTargetBacking ||
++        !m_commonD3DDevice || !(m_isRenderTarget || IsDepthStencil()) ||
++        IsBindableAsTexture() || SkipD3D9Operations())
++      return nullptr;
++    if (m_cpuBacking != nullptr)
++      return m_cpuBacking.ptr();
++    DDrawInterface* owner = m_commonIntf->GetDDInterface();
++    if (!owner)
++      return nullptr;
++    DDSURFACEDESC desc = {};
++    desc.dwSize = sizeof(desc);
++    desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
++    desc.dwWidth = m_rect.right;
++    desc.dwHeight = m_rect.bottom;
++    desc.ddpfPixelFormat = m_isDesc2Set ? m_desc2.ddpfPixelFormat : m_desc.ddpfPixelFormat;
++    desc.ddsCaps.dwCaps = DDSCAPS_SYSTEMMEMORY |
++      (IsDepthStencil() ? DDSCAPS_ZBUFFER : DDSCAPS_OFFSCREENPLAIN);
++    Com<IDirectDrawSurface> candidate;
++    HRESULT hr = owner->GetProxied()->CreateSurface(&desc, &candidate, nullptr);
++    if (FAILED(hr)) {
++      Logger::err(str::format("CPU backing allocation failed: ", hr));
++      return nullptr;
++    }
++    Com<IDirectDrawSurface> origin;
++    if (!m_origin || FAILED(m_origin->QueryInterface(__uuidof(IDirectDrawSurface), reinterpret_cast<void**>(&origin))))
++      return nullptr;
++    auto wrapped = static_cast<DDrawSurface*>(origin.ptr());
++    // Publish the backing only once its pixels and native state are complete.
++    // Copy before attaching the clipper: the initial snapshot is not a draw.
++    if (FAILED(candidate->Blt(nullptr, wrapped->GetProxied(), nullptr, DDBLT_WAIT, nullptr)))
++      return nullptr;
++    DDCOLORKEY key;
++    for (DWORD flags : { DWORD(DDCKEY_SRCBLT), DWORD(DDCKEY_DESTBLT) }) {
++      if (SUCCEEDED(wrapped->GetProxied()->GetColorKey(flags, &key)) &&
++          FAILED(candidate->SetColorKey(flags | (key.dwColorSpaceLowValue!=key.dwColorSpaceHighValue ? DDCKEY_COLORSPACE : 0), &key)))
++        return nullptr;
++    }
++    if (m_clipper!=nullptr && FAILED(candidate->SetClipper(m_clipper->GetProxied())))
++      return nullptr;
++    m_cpuBacking=std::move(candidate);
++    return m_cpuBacking.ptr();
++  }
++
++  void DDrawCommonSurface::SnapshotCPUBacking() {
++    auto backing = GetCPUBacking();
++    if (!backing || IsDepthStencil()) return;
++    DDSURFACEDESC desc = {};
++    desc.dwSize = sizeof(desc);
++    if (FAILED(backing->Lock(nullptr, &desc, DDLOCK_READONLY | DDLOCK_WAIT, nullptr))) return;
++    const size_t pitch = size_t(m_rect.right) * desc.ddpfPixelFormat.dwRGBBitCount / 8;
++    m_cpuReferenceValid = false;
++    if (!desc.lpSurface || !pitch || desc.lPitch <= 0 || size_t(desc.lPitch) < pitch) {
++      backing->Unlock(nullptr);
++      return;
++    }
++    m_cpuReference.resize(pitch * m_rect.bottom);
++    for (LONG y = 0; y < m_rect.bottom; ++y)
++      memcpy(m_cpuReference.data() + y * pitch, static_cast<uint8_t*>(desc.lpSurface) + y * desc.lPitch, pitch);
++    m_cpuReferenceValid = SUCCEEDED(backing->Unlock(nullptr));
++  }
++
++  HRESULT DDrawCommonSurface::UploadCPURegions() {
++    auto backing = GetCPUBacking();
++    if (!backing || !IsRenderTarget() || !IsInitialized() || m_cpuDirtyRegions.empty() ||
++        m_commonD3DDevice->GetMultiSampleType() != d3d9::D3DMULTISAMPLE_NONE) return DDERR_UNSUPPORTED;
++    auto dev = GetRefreshedD3D9Device();
++    if (!dev || !IsInitialized()) return DDERR_SURFACELOST;
++    HRESULT hr = DD_OK;
++    if (m_cpuUpload == nullptr) {
++      hr = dev->CreateOffscreenPlainSurface(m_rect.right,m_rect.bottom,m_format9,
++        d3d9::D3DPOOL_SYSTEMMEM,&m_cpuUpload,nullptr);
++      if (FAILED(hr)) return hr;
++    }
++    DDSURFACEDESC desc = {};
++    desc.dwSize = sizeof(desc);
++    hr = backing->Lock(nullptr,&desc,DDLOCK_READONLY | DDLOCK_WAIT,nullptr);
++    if (FAILED(hr)) return hr;
++    const size_t pixelBytes = desc.ddpfPixelFormat.dwRGBBitCount/8;
++    const size_t rowBytes = size_t(m_rect.right)*pixelBytes;
++    const size_t fullBytes = rowBytes*m_rect.bottom;
++    const auto fail = [&](HRESULT result) {
++      m_cpuReferenceValid = false;
++      backing->Unlock(nullptr);
++      return result;
++    };
++    if (!desc.lpSurface || !pixelBytes || desc.lPitch <= 0 || size_t(desc.lPitch)<rowBytes)
++      return fail(DDERR_INVALIDPARAMS);
++    if (m_cpuReference.size()!=fullBytes) m_cpuReferenceValid=false;
++    for (RECT region : m_cpuDirtyRegions) {
++      if (m_cpuReferenceValid) {
++        RECT changed{};
++        for (LONG y=region.top;y<region.bottom;++y) {
++          if (memcmp(m_cpuReference.data()+y*rowBytes+region.left*pixelBytes,
++              static_cast<uint8_t*>(desc.lpSurface)+y*desc.lPitch+region.left*pixelBytes,
++              (region.right-region.left)*pixelBytes)) {
++            RECT row{region.left,y,region.right,y+1};
++            UnionRect(&changed,&changed,&row);
++          }
++        }
++        region=changed;
++      }
++      if (IsRectEmpty(&region)) continue;
++      d3d9::D3DLOCKED_RECT mapped;
++      hr = m_cpuUpload->LockRect(&mapped,&region,0);
++      if (FAILED(hr)) return fail(hr);
++      if (!mapped.pBits || mapped.Pitch <= 0 || size_t(mapped.Pitch)<size_t(region.right-region.left)*pixelBytes) {
++        m_cpuUpload->UnlockRect();
++        return fail(DDERR_INVALIDPARAMS);
++      }
++      for (LONG y=region.top;y<region.bottom;++y)
++        memcpy(static_cast<uint8_t*>(mapped.pBits)+(y-region.top)*mapped.Pitch,
++          static_cast<uint8_t*>(desc.lpSurface)+y*desc.lPitch+region.left*pixelBytes,
++          (region.right-region.left)*pixelBytes);
++      hr = m_cpuUpload->UnlockRect();
++      if (FAILED(hr)) return fail(hr);
++      POINT origin = {region.left,region.top};
++      hr = dev->UpdateSurface(m_cpuUpload.ptr(),&region,m_surface9.ptr(),&origin);
++      if (FAILED(hr)) return fail(hr);
++      if (m_cpuReferenceValid) {
++        for (LONG y=region.top;y<region.bottom;++y)
++          memcpy(m_cpuReference.data()+y*rowBytes+region.left*pixelBytes,
++            static_cast<uint8_t*>(desc.lpSurface)+y*desc.lPitch+region.left*pixelBytes,
++            (region.right-region.left)*pixelBytes);
++      }
++    }
++    if (!m_cpuReferenceValid && SubtractRegions({m_rect},m_cpuValidRegions).empty()) {
++      m_cpuReference.resize(fullBytes);
++      for (LONG y=0;y<m_rect.bottom;++y)
++        memcpy(m_cpuReference.data()+y*rowBytes,static_cast<uint8_t*>(desc.lpSurface)+y*desc.lPitch,rowBytes);
++      m_cpuReferenceValid=true;
++    }
++    hr = backing->Unlock(nullptr);
++    if (FAILED(hr)) {
++      m_cpuReferenceValid = false;
++      return hr;
++    }
++    UnDirtyDDrawSurface();
++    return DD_OK;
++  }
++
++  std::optional<HRESULT> DDrawCommonSurface::DownloadCPURegion(const RECT* requested) {
++    if (!IsRenderTarget() || !IsInitialized() || !IsD3D9SurfaceDirty() || IsDepthStencil()) return std::nullopt;
++    auto backing = GetCPUBacking();
++    if (!backing) return std::nullopt;
++    RECT region = requested ? *requested : m_rect;
++    IntersectRect(&region,&region,&m_rect);
++    // Batch nearby CPU reads: GK3 draws text one character at a time. Reading
++    // one small tile per glyph would introduce many GPU synchronization points.
++    if (requested && !IsRectEmpty(&region)) {
++      region.left = 0;
++      region.right = m_rect.right;
++      constexpr LONG readbackBandHeight = 256;
++      region.top = (region.top / readbackBandHeight) * readbackBandHeight;
++      region.bottom = std::min(m_rect.bottom, ((region.bottom + readbackBandHeight - 1) / readbackBandHeight) * readbackBandHeight);
++    }
++    auto missing = SubtractRegions({region},m_cpuValidRegions);
++    if (missing.empty()) return DD_OK;
++    if (EqualRect(&region,&m_rect)) {
++      // Preserve writes made in earlier partial locks before fetching the rest.
++      if (IsDDrawSurfaceDirty()) {
++        HRESULT hr = UploadCPURegions();
++        if (FAILED(hr)) return hr;
++      }
++      HRESULT hr = BlitToDDrawSurface<IDirectDrawSurface,DDSURFACEDESC>(backing,m_surface9.ptr(),false);
++      if (FAILED(hr)) return hr;
++      UnDirtyD3D9Surface();
++      m_cpuValidRegions = {m_rect};
++      return DD_OK;
++    }
++    auto dev = GetRefreshedD3D9Device();
++    if (!dev || !IsInitialized()) return DDERR_SURFACELOST;
++    for (const RECT& part : missing) {
++      const LONG width = part.right-part.left, height = part.bottom-part.top;
++      auto found = std::find_if(m_cpuReadbacks.begin(),m_cpuReadbacks.end(),[&](const CPUReadback& r){return r.width==width && r.height==height;});
++      if (found == m_cpuReadbacks.end()) {
++        CPUReadback entry = {width,height,{}};
++        HRESULT hr = dev->CreateRenderTarget(width,height,m_format9,d3d9::D3DMULTISAMPLE_NONE,0,TRUE,&entry.surface,nullptr);
++        if (FAILED(hr)) return hr;
++        if (m_cpuReadbacks.size() == 4) m_cpuReadbacks.erase(m_cpuReadbacks.begin());
++        m_cpuReadbacks.push_back(std::move(entry));
++        found = m_cpuReadbacks.end()-1;
++      }
++      HRESULT hr = dev->StretchRect(m_surface9.ptr(),&part,found->surface.ptr(),nullptr,d3d9::D3DTEXF_POINT);
++      if (FAILED(hr)) return hr;
++      d3d9::D3DLOCKED_RECT mapped;
++      hr = found->surface->LockRect(&mapped,nullptr,D3DLOCK_READONLY);
++      if (FAILED(hr)) return hr;
++      DDSURFACEDESC desc = {};
++      desc.dwSize = sizeof(desc);
++      RECT lockRect = part;
++      hr = backing->Lock(&lockRect,&desc,DDLOCK_WRITEONLY | DDLOCK_WAIT,nullptr);
++      if (FAILED(hr)) {
++        found->surface->UnlockRect();
++        return hr;
++      }
++      const size_t bytes = size_t(width)*desc.ddpfPixelFormat.dwRGBBitCount/8;
++      if (!desc.lpSurface || !mapped.pBits || !bytes || desc.lPitch <= 0 || mapped.Pitch <= 0 ||
++          size_t(desc.lPitch)<bytes || size_t(mapped.Pitch)<bytes) {
++        backing->Unlock(desc.lpSurface);
++        found->surface->UnlockRect();
++        return DDERR_INVALIDPARAMS;
++      }
++      for (LONG y=0;y<height;++y)
++        memcpy(static_cast<uint8_t*>(desc.lpSurface)+y*desc.lPitch,static_cast<uint8_t*>(mapped.pBits)+y*mapped.Pitch,bytes);
++      hr = backing->Unlock(desc.lpSurface);
++      HRESULT hr9 = found->surface->UnlockRect();
++      if (FAILED(hr)) return hr;
++      if (FAILED(hr9)) return hr9;
++      AddRegion(m_cpuValidRegions,part);
++    }
++    return DD_OK;
++  }
++
++  std::optional<HRESULT> DDrawCommonSurface::UploadCPUBacking() {
++    if (!IsRenderTarget() || !IsInitialized() || !IsDDrawSurfaceDirty() ||
++        m_commonD3DDevice->GetMultiSampleType() != d3d9::D3DMULTISAMPLE_NONE)
++      return std::nullopt;
++    if (!GetCPUBacking()) return std::nullopt;
++    if (m_cpuDirtyRegions.empty()) {
++      UnDirtyDDrawSurface();
++      return DD_OK;
++    }
++    return UploadCPURegions();
++  }
++
++  IDirectDrawSurface4* DDrawCommonSurface::GetCPUBacking4() {
++    return GetCPUBackingView(m_cpuBacking4);
++  }
++
++  bool DDrawCommonSurface::TryGPUCopy(DDrawCommonSurface* source, RECT* destRect, RECT* srcRect, DWORD flags, DDBLTFX* fx) {
++    if (PreferCPUThisFrame() || (source && source->PreferCPUThisFrame())) return false;
++    if (source && !IsRenderTarget() && !source->IsRenderTarget() && !source->IsD3D9SurfaceDirty())
++      return false;
++    if (!m_commonIntf->GetOptions()->cpuRenderTargetBacking || !source || source == this ||
++        flags & ~(DDBLT_ROP | DDBLT_WAIT | DDBLT_ASYNC) || ((flags & DDBLT_ROP) && (!fx || fx->dwROP != SRCCOPY)) ||
++        m_clipper != nullptr ||
++        IsDepthStencil() || source->IsDepthStencil() ||
++        IsPrimarySurface() || source->IsPrimarySurface() || m_format9 != source->m_format9)
++      return false;
++    auto dev = GetRefreshedD3D9Device();
++    if (!dev || dev != source->GetRefreshedD3D9Device() || m_commonD3DDevice->IsInScene())
++      return false;
++    if (IsBindableAsTexture() || source->IsBindableAsTexture())
++      return false;
++    RECT dst = destRect ? *destRect : m_rect;
++    RECT src = srcRect ? *srcRect : source->m_rect;
++    if (dst.right-dst.left != src.right-src.left || dst.bottom-dst.top != src.bottom-src.top ||
++        dst.left < 0 || dst.top < 0 || dst.right > m_rect.right || dst.bottom > m_rect.bottom ||
++        src.left < 0 || src.top < 0 || src.right > source->m_rect.right || src.bottom > source->m_rect.bottom)
++      return false;
++    auto hr = source->InitializeOrUploadD3D9();
++    if (FAILED(hr)) return false;
++    hr = InitializeOrUploadD3D9();
++    if (FAILED(hr)) return false;
++    hr = dev->StretchRect(source->m_surface9.ptr(), &src, m_surface9.ptr(), &dst, d3d9::D3DTEXF_POINT);
++    if (FAILED(hr)) return false;
++    DirtyD3D9Surface();
++    UnDirtyDDrawSurface();
++    return true;
++  }
++
++
+   IUnknown* DDrawCommonSurface::GetShadowSurfaceProxied() {
+     if (m_surf7 != nullptr) {
+       DDraw7Surface* shadow7 = m_surf7->GetShadowSurface();
+@@ -115,16 +379,9 @@ namespace dxvk {
+ 
+   void DDrawCommonSurface::RefreshD3D9Device() {
+     D3DCommonDevice* commonD3DDevice = m_commonIntf->GetCommonD3DDevice();
+-
+-    if (unlikely(m_commonD3DDevice != commonD3DDevice)) {
+-      // Check if the device has been recreated and reset all D3D9 resources
+-      if (m_commonD3DDevice != nullptr) {
+-        Logger::debug("DDrawCommonSurface: Device has changed, clearing all D3D9 resources");
+-        ResetD3D9Objects();
+-      }
+-
+-      m_commonD3DDevice = commonD3DDevice;
+-    }
++    // Compare the live D3D9 device too: a destroyed legacy wrapper's address
++    // can be reused for a new device while cached resources still own the old one.
++    SetCommonD3DDevice(commonD3DDevice);
+   }
+ 
+   d3d9::IDirect3DDevice9* DDrawCommonSurface::GetRefreshedD3D9Device() {
+@@ -267,6 +524,8 @@ namespace dxvk {
+         break;
+       }
+       case D3D9SurfaceType::OffscreenPlainSurface: {
++        if (m_commonIntf->GetOptions()->cpuRenderTargetBacking)
++          pool = d3d9::D3DPOOL_DEFAULT;
+         HRESULT hr = d3d9Device->CreateOffscreenPlainSurface(dwWidth, dwHeight, m_format9,
+                                                              pool, &m_surface9, nullptr);
+         if (unlikely(FAILED(hr))) {
+@@ -314,4 +573,4 @@ namespace dxvk {
+     return DDERR_GENERIC;
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/ddraw_common_surface.h b/src/ddraw/ddraw_common_surface.h
+index 6b84cd0..397993a 100644
+--- a/src/ddraw/ddraw_common_surface.h
++++ b/src/ddraw/ddraw_common_surface.h
+@@ -2,6 +2,9 @@
+ 
+ #include "ddraw_include.h"
+ #include "ddraw_format.h"
++#include "private_regions.h"
++#include "private_locks.h"
++#include <optional>
+ 
+ #include "ddraw_common_interface.h"
+ #include "d3d_common_device.h"
+@@ -37,6 +40,51 @@ namespace dxvk {
+ 
+     ~DDrawCommonSurface();
+ 
++    IDirectDrawSurface* GetCPUBacking();
++    bool HasRetainedCPUBacking() const {
++      return m_cpuBacking != nullptr && m_surface9 != nullptr && m_commonD3DDevice != nullptr
++          && m_commonD3DDevice->GetD3D9Device() != nullptr && !IsOverlay();
++    }
++    template<typename Interface> Interface* GetCPUBackingView(Com<Interface>& view) {
++      auto backing = GetCPUBacking();
++      if (!backing) return nullptr;
++      if (view == nullptr && FAILED(backing->QueryInterface(__uuidof(Interface), reinterpret_cast<void**>(&view))))
++        return nullptr;
++      return view.ptr();
++    }
++    IDirectDrawSurface2* GetCPUBacking2() { return GetCPUBackingView(m_cpuBacking2); }
++    IDirectDrawSurface3* GetCPUBacking3() { return GetCPUBackingView(m_cpuBacking3); }
++    IDirectDrawSurface4* GetCPUBacking4();
++    IDirectDrawSurface7* GetCPUBacking7() { return GetCPUBackingView(m_cpuBacking7); }
++    // nullopt means this path is unsupported; a failed HRESULT must not fall
++    // through to a full copy that could overwrite authoritative partial writes.
++    std::optional<HRESULT> UploadCPUBacking();
++    void SnapshotCPUBacking();
++    bool TryGPUCopy(DDrawCommonSurface* source, RECT* destRect, RECT* srcRect, DWORD flags, DDBLTFX* fx);
++    bool PreferCPUThisFrame() const { return IsRenderTarget() && m_cpuAccessThisFrame; }
++    void BeginGPUFrame() { m_cpuAccessThisFrame = false; }
++    void AccessCPU() { m_cpuAccessThisFrame = true; }
++    std::optional<HRESULT> DownloadCPURegion(const RECT* rect);
++    HRESULT UploadCPURegions();
++    void TrackLockRegion(const RECT* rect, void* data, DWORD flags) { m_locks.add(rect,m_rect,data,flags); }
++    bool CompleteLockData(void* data) { return DirtyCompletedLocks(m_locks.byData(data)); }
++    bool CompleteLockRect(const RECT* rect) { return DirtyCompletedLocks(m_locks.byRect(rect)); }
++    bool DirtyCompletedLocks(const std::vector<RECT>& regions) {
++      for (const RECT& region:regions) DirtyDDrawSurface(&region);
++      return !regions.empty();
++    }
++    void RestoreLockCaps(DDSURFACEDESC& description) const {
++      if (m_cpuBacking != nullptr)
++        description.ddsCaps.dwCaps=(m_desc2.dwFlags&DDSD_CAPS)?m_desc2.ddsCaps.dwCaps:m_desc.ddsCaps.dwCaps;
++    }
++    void RestoreLockCaps(DDSURFACEDESC2& description) const {
++      if (m_cpuBacking != nullptr) {
++        description.ddsCaps={};
++        if (m_desc2.dwFlags&DDSD_CAPS) description.ddsCaps=m_desc2.ddsCaps;
++        else description.ddsCaps.dwCaps=m_desc.ddsCaps.dwCaps;
++      }
++    }
++
+     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) {
+       *ppvObject = this;
+       return S_OK;
+@@ -61,6 +109,11 @@ namespace dxvk {
+     }
+ 
+     void SetCommonD3DDevice(D3DCommonDevice* commonD3DDevice) {
++      auto device=commonD3DDevice ? commonD3DDevice->GetD3D9Device() : nullptr;
++      if (m_resourceDevice.ptr()!=device) {
++        if (m_resourceDevice!=nullptr) ResetD3D9Objects();
++        m_resourceDevice=device;
++      }
+       m_commonD3DDevice = commonD3DDevice;
+     }
+ 
+@@ -100,6 +153,23 @@ namespace dxvk {
+       m_cubeMap9 = nullptr;
+       m_texture9 = nullptr;
+       m_surface9 = nullptr;
++      m_cpuUpload = nullptr;
++      m_cpuReadbacks.clear();
++      m_cpuReference.clear();
++      m_cpuReferenceValid = false;
++      m_baselineDamage.invalidate();
++      ++m_contentVersion;
++      // CPU backing is authoritative only in its known-valid regions. A new
++      // GPU allocation must receive those again, even if the old mirror was clean.
++      if (m_cpuBacking!=nullptr) {
++        m_cpuDirtyRegions=m_cpuValidRegions;
++        m_dirtyDDraw=!m_cpuDirtyRegions.empty();
++        m_cpuDirtyRect={};
++        for (const RECT& region:m_cpuDirtyRegions) UnionRect(&m_cpuDirtyRect,&m_cpuDirtyRect,&region);
++      } else {
++        // Ordinary native offscreen/texture storage remains authoritative.
++        DirtyDDrawSurface();
++      }
+       // Also reset all D3D9 related tracking flags
+       m_d3d9SurfaceType = D3D9SurfaceType::None;
+       m_dirtyD3D9 = false;
+@@ -197,12 +267,42 @@ namespace dxvk {
+       return m_dirtyDDraw;
+     }
+ 
+-    void DirtyDDrawSurface() {
++    void DirtyDDrawSurface(const RECT* rect = nullptr) {
++      ++m_contentVersion;
++      AccessCPU();
++      RECT changed = rect ? *rect : m_rect;
++      IntersectRect(&changed, &changed, &m_rect);
++      m_baselineDamage.write(changed,m_rect.bottom);
++        AddRegion(m_cpuDirtyRegions, changed);
++        AddRegion(m_cpuValidRegions, changed);
++        CoalesceCovered(m_cpuDirtyRegions, m_cpuValidRegions);
++      if (m_dirtyDDraw)
++        UnionRect(&m_cpuDirtyRect, &m_cpuDirtyRect, &changed);
++      else
++        m_cpuDirtyRect = changed;
+       m_dirtyDDraw = true;
+     }
+ 
++    void DirtyFromFullCopy(DDrawCommonSurface* source) {
++      ++m_contentVersion;
++      AccessCPU();
++      m_cpuValidRegions = {m_rect};
++      // Only previously UPLOADED edits need restoring. A complete copy cancels
++      // pending CPU writes (including GK3's full-screen clear before each copy).
++      m_cpuDirtyRegions = m_baselineDamage.copy(source->m_identity,source->m_contentVersion,m_rect);
++      CoalesceCovered(m_cpuDirtyRegions,m_cpuValidRegions);
++      m_dirtyDDraw = !m_cpuDirtyRegions.empty();
++      if (!m_cpuDirtyRegions.empty()) {
++        m_cpuDirtyRect = m_cpuDirtyRegions.front();
++        for (const RECT& part : m_cpuDirtyRegions) UnionRect(&m_cpuDirtyRect,&m_cpuDirtyRect,&part);
++        m_dirtyDDraw = true;
++      }
++    }
++
+     void UnDirtyDDrawSurface() {
++      if (m_dirtyDDraw) m_baselineDamage.uploaded();
+       m_dirtyDDraw = false;
++      m_cpuDirtyRegions.clear();
+     }
+ 
+     bool IsD3D9SurfaceDirty() const {
+@@ -210,7 +310,11 @@ namespace dxvk {
+     }
+ 
+     void DirtyD3D9Surface() {
++      ++m_contentVersion;
++      m_baselineDamage.invalidate();
+       m_dirtyD3D9 = true;
++      m_cpuValidRegions.clear();
++      m_cpuReferenceValid = false;
+     }
+ 
+     void UnDirtyD3D9Surface() {
+@@ -229,8 +333,36 @@ namespace dxvk {
+       m_hasTextureHandle = true;
+     }
+ 
+-    void SetClipper(DDrawClipper* clipper) {
+-      m_clipper = clipper;
++    template<typename Interface> HRESULT SetClipper(Interface* native, DDrawClipper* clipper) {
++      auto proxied=clipper ? clipper->GetProxied() : nullptr;
++      HRESULT hr=native->SetClipper(proxied);
++      if (FAILED(hr)) return hr;
++      if (m_cpuBacking!=nullptr) {
++        hr=m_cpuBacking->SetClipper(proxied);
++        if (FAILED(hr)) {
++          native->SetClipper(m_clipper!=nullptr ? m_clipper->GetProxied() : nullptr);
++          return hr;
++        }
++      }
++      m_clipper=clipper;
++      return DD_OK;
++    }
++
++    template<typename Interface> HRESULT SetColorKey(Interface* native, DWORD flags, DDCOLORKEY* key) {
++      DDCOLORKEY previous{};
++      const DWORD kind=flags & ~DDCKEY_COLORSPACE;
++      const HRESULT previousResult=native->GetColorKey(kind,&previous);
++      HRESULT hr=native->SetColorKey(flags,key);
++      if (FAILED(hr)) return hr;
++      if (m_cpuBacking!=nullptr) {
++        hr=m_cpuBacking->SetColorKey(flags,key);
++        if (FAILED(hr)) {
++          native->SetColorKey(kind | (previous.dwColorSpaceLowValue!=previous.dwColorSpaceHighValue ? DDCKEY_COLORSPACE : 0),
++            SUCCEEDED(previousResult) ? &previous : nullptr);
++          return hr;
++        }
++      }
++      return DD_OK;
+     }
+ 
+     DDrawClipper* GetClipper() const {
+@@ -596,6 +728,7 @@ namespace dxvk {
+     Com<DDrawCommonInterface>        m_commonIntf;
+ 
+     D3DCommonDevice*                 m_commonD3DDevice  = nullptr;
++    Com<d3d9::IDirect3DDevice9>       m_resourceDevice;
+ 
+     uint32_t                         m_mipCount         = 1;
+     uint32_t                         m_backBufferIndex  = 0;
+@@ -626,6 +759,27 @@ namespace dxvk {
+     // that gets created through a CreateSurface call
+     IUnknown*                        m_origin           = nullptr;
+ 
++    // All COM surface views must share the same CPU-facing storage.
++    Com<IDirectDrawSurface>          m_cpuBacking;
++    Com<IDirectDrawSurface2>         m_cpuBacking2;
++    Com<IDirectDrawSurface3>         m_cpuBacking3;
++    Com<IDirectDrawSurface4>         m_cpuBacking4;
++    Com<IDirectDrawSurface7>         m_cpuBacking7;
++    Com<d3d9::IDirect3DSurface9>      m_cpuUpload;
++    inline static std::atomic<uint64_t> m_nextIdentity{1};
++    const uint64_t                  m_identity = m_nextIdentity.fetch_add(1);
++    uint64_t                        m_contentVersion = 0;
++    BaselineDamage                 m_baselineDamage;
++    RECT                            m_cpuDirtyRect = {};
++    std::vector<uint8_t>             m_cpuReference;
++    bool                            m_cpuReferenceValid = false;
++    bool                            m_cpuAccessThisFrame = false;
++    std::vector<RECT>               m_cpuDirtyRegions;
++    std::vector<RECT>               m_cpuValidRegions;
++    SurfaceLockRegions             m_locks;
++    struct CPUReadback { LONG width, height; Com<d3d9::IDirect3DSurface9> surface; };
++    std::vector<CPUReadback>        m_cpuReadbacks;
++
+   };
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/ddraw_format.h b/src/ddraw/ddraw_format.h
+index a56a925..942e64b 100644
+--- a/src/ddraw/ddraw_format.h
++++ b/src/ddraw/ddraw_format.h
+@@ -900,7 +900,7 @@ namespace dxvk {
+   }
+ 
+   template <typename SurfaceType, typename DescType>
+-  inline void BlitToD3D9Surface(
++  inline HRESULT BlitToD3D9Surface(
+         d3d9::IDirect3DSurface9* surface9,
+         SurfaceType* surface,
+         const bool isDXTFormat) {
+@@ -935,18 +935,20 @@ namespace dxvk {
+           memcpy(rect9.pBits, desc.lpSurface, size);
+           //Logger::debug("BlitToD3D9Surface: Done blitting surface");
+         }
+-        surface->Unlock(NULL);
++        hr = surface->Unlock(NULL);
+       } else {
+         Logger::warn("BlitToD3D9Surface: Failed to lock surface");
+       }
+-      surface9->UnlockRect();
++      hr9 = surface9->UnlockRect();
++      return FAILED(hr) ? hr : hr9;
+     } else {
+       Logger::warn("BlitToD3D9Surface: Failed to lock D3D9 surface");
+     }
++    return hr9;
+   }
+ 
+   template <typename SurfaceType, typename DescType>
+-  inline void BlitToDDrawSurface(
++  inline HRESULT BlitToDDrawSurface(
+         SurfaceType* surface,
+         d3d9::IDirect3DSurface9* surface9,
+         const bool isDXTFormat) {
+@@ -980,14 +982,16 @@ namespace dxvk {
+           memcpy(desc.lpSurface, rect9.pBits, size);
+           //Logger::debug("BlitToDDrawSurface: Done blitting surface");
+         }
+-        surface9->UnlockRect();
++        hr9 = surface9->UnlockRect();
+       } else {
+         Logger::warn("BlitToDDrawSurface: Failed to lock D3D9 surface");
+       }
+-      surface->Unlock(NULL);
++      hr = surface->Unlock(NULL);
++      return FAILED(hr9) ? hr9 : hr;
+     } else {
+       Logger::warn("BlitToDDrawSurface: Failed to lock surface");
+     }
++    return hr;
+   }
+ 
+   inline DDCOLORKEY GetColorChannel(DWORD pixel, DWORD mask) {
+@@ -1047,4 +1051,4 @@ namespace dxvk {
+     return rgbColorKey;
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/ddraw/ddraw_main.cpp b/src/ddraw/ddraw_main.cpp
+index d6fc34b..bf41997 100644
+--- a/src/ddraw/ddraw_main.cpp
++++ b/src/ddraw/ddraw_main.cpp
+@@ -3,6 +3,9 @@
+ #include "ddraw_class_factory.h"
+ 
+ #include "ddraw_clipper.h"
++#include "ddraw/ddraw_surface.h"
++#include "private_area_blend.h"
++#include "private_area_blt.h"
+ #include "ddraw/ddraw_interface.h"
+ #include "ddraw7/ddraw7_interface.h"
+ 
+@@ -283,6 +286,40 @@ namespace dxvk {
+ 
+ extern "C" {
+ 
++  // Optional, side-effect-free Surface1 capability query. Zero means unknown:
++  // callers must preserve native rotating-page semantics in that case.
++  DLLEXPORT DWORD __stdcall Gk3hdSurfaceHistoryDepth(IDirectDrawSurface* surface) {
++    if (!surface || !dxvk::DDrawCommonInterface::IsWrappedSurface(surface))
++      return 0;
++    auto wrapped = static_cast<dxvk::DDrawSurface*>(surface);
++    if (FAILED(wrapped->IsLost()))
++      return 0;
++    return wrapped->GetCommonSurface()->HasRetainedCPUBacking() ? 1 : 0;
++  }
++
++  DLLEXPORT DWORD __stdcall Gk3hdAreaBlend565(const dxvk::AreaBlend565Args* request) {
++    if (!request)
++      return 0;
++    return dxvk::AreaBlend565(*request) ? 1 : 0;
++  }
++
++  DLLEXPORT DWORD __stdcall Gk3hdAreaBlt565(dxvk::AreaBlt565Args* request) {
++    if (!request || request->size!=sizeof(*request) ||
++        !request->destination || !request->source ||
++        !dxvk::DDrawCommonInterface::IsWrappedSurface(request->destination) ||
++        !dxvk::DDrawCommonInterface::IsWrappedSurface(request->source)) return 0;
++    const auto dst=static_cast<dxvk::DDrawSurface*>(request->destination)->GetCommonSurface();
++    const auto src=static_cast<dxvk::DDrawSurface*>(request->source)->GetCommonSurface();
++    // Lock bypasses Blt's clipper handling. Never bypass an attached clipper,
++    // or confuse different interface views of the same underlying allocation.
++    if (dst==src || dst->GetClipper() || src->GetClipper()) return 0;
++    const auto result=dxvk::AreaBlt565Surface(request->destination,request->source,
++      request->destinationRect,request->sourceRect);
++    if (!result.handled) return 0;
++    request->result=result.result;
++    return 1;
++  }
++
+   DLLEXPORT HRESULT __stdcall AcquireDDThreadLock() {
+     typedef HRESULT (__stdcall *AcquireDDThreadLock_t)();
+     static AcquireDDThreadLock_t ProxiedAcquireDDThreadLock = nullptr;
+diff --git a/src/ddraw/ddraw_options.cpp b/src/ddraw/ddraw_options.cpp
+index 03f644a..4641140 100644
+--- a/src/ddraw/ddraw_options.cpp
++++ b/src/ddraw/ddraw_options.cpp
+@@ -18,6 +18,7 @@ namespace dxvk {
+     this->cpuProcessVertices     = config.getOption<bool>   ("ddraw.cpuProcessVertices",      true);
+     this->backBufferResize       = config.getOption<bool>   ("ddraw.backBufferResize",        true);
+     this->forceLegacyPresent     = config.getOption<bool>   ("ddraw.forceLegacyPresent",     false);
++    this->cpuRenderTargetBacking = config.getOption<bool>   ("ddraw.cpuRenderTargetBacking", false);
+     this->forceRTFlip            = config.getOption<bool>   ("ddraw.forceRTFlip",            false);
+     this->forceDCForwarding      = config.getOption<bool>   ("ddraw.forceDCForwarding",      false);
+     this->emulateFrontBuffer     = config.getOption<bool>   ("ddraw.emulateFrontBuffer",     false);
+diff --git a/src/ddraw/ddraw_options.h b/src/ddraw/ddraw_options.h
+index 1d00e21..e815579 100644
+--- a/src/ddraw/ddraw_options.h
++++ b/src/ddraw/ddraw_options.h
+@@ -73,6 +73,9 @@ namespace dxvk {
+     /// Blits back to the proxied flippable surface and back again for presentation
+     bool forceLegacyPresent;
+ 
++    /// Keep CPU-facing render-target pixels out of native DirectDraw video memory.
++    bool cpuRenderTargetBacking;
++
+     /// Explicitly flip the RT swapchain, even if the primary surface is not part of it
+     bool forceRTFlip;
+ 
+diff --git a/src/ddraw/private_area_blend.h b/src/ddraw/private_area_blend.h
+new file mode 100644
+index 0000000..aed1570
+--- /dev/null
++++ b/src/ddraw/private_area_blend.h
+@@ -0,0 +1,117 @@
++#pragma once
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++
++namespace dxvk {
++// Versioned, process-local view of already locked RGB565/L8 surfaces. The
++// caller owns lock lifetime and validates their actual allocation extents.
++// No resource identities, game object layouts, or retained pointers cross this API.
++struct AreaBlend565Args {
++  uint32_t size;
++  const uint16_t* source;
++  const uint8_t* alpha;
++  uint16_t* destination;
++  int32_t sourcePitch, alphaPitch, destinationPitch;
++  int32_t sourceWidth, sourceHeight, destinationWidth, destinationHeight;
++  int32_t tileX, tileY, tileWidth, tileHeight;
++  uint32_t sourceKey; // A value above 65535 disables the source key.
++  uint32_t opacity; // GK3's mask-compensated 16.16 weight: opaque = 65794.
++};
++
++inline uint32_t AreaBlendChannel(double value, double denominator, double inverse) {
++  // Every sum/product is an integer below 2^40 (376*376*65536*63).
++  // Binary64 therefore preserves it exactly. Correct the approximate quotient
++  // at integer boundaries to retain the original integer-reference floor.
++  uint32_t result = int32_t(value * inverse);
++  const double product = double(result) * denominator;
++  if (product > value) --result;
++  else if (value - product >= denominator) ++result;
++  return result;
++}
++
++inline bool AreaBlend565(const AreaBlend565Args& a) {
++  // This bounded entry point is for shrinking dense inventory artwork only.
++  // Native/pixel-art and enlarged surfaces must retain their original sampler.
++  constexpr int32_t maxSource = 376, maxDestination = 32768;
++  if (a.size != sizeof(a) || !a.source || !a.alpha || !a.destination ||
++      a.sourceWidth <= 0 || a.sourceHeight <= 0 ||
++      a.sourceWidth > maxSource || a.sourceHeight > maxSource ||
++      a.destinationWidth <= 0 || a.destinationHeight <= 0 ||
++      a.destinationWidth > maxDestination || a.destinationHeight > maxDestination ||
++      (a.sourceWidth <= a.destinationWidth && a.sourceHeight <= a.destinationHeight) ||
++      a.sourcePitch < a.sourceWidth * 2 || a.alphaPitch < a.sourceWidth ||
++      a.sourcePitch % 2 || a.destinationPitch <= 0 || a.destinationPitch % 2 ||
++      reinterpret_cast<uintptr_t>(a.source) % 2 || reinterpret_cast<uintptr_t>(a.destination) % 2 ||
++      a.tileWidth <= 0 || a.tileHeight <= 0 || a.tileX < 0 || a.tileY < 0 ||
++      a.tileWidth > a.destinationWidth || a.tileHeight > a.destinationHeight ||
++      a.tileX > a.destinationWidth - a.tileWidth || a.tileY > a.destinationHeight - a.tileHeight ||
++      a.destinationPitch < a.tileWidth * 2 || a.opacity > 65794)
++    return false;
++  // Refuse overlapping views, including padded rows. Avoid wrapping pointer
++  // arithmetic on x86; rejected requests have made no writes.
++  const auto span = [](const void* p, int32_t pitch, int32_t height, int32_t rowBytes,
++                       uint64_t& first, uint64_t& last) {
++    first = reinterpret_cast<uintptr_t>(p);
++    last = first + uint64_t(pitch) * (height - 1) + rowBytes;
++    return last >= first && last <= uint64_t(std::numeric_limits<uintptr_t>::max());
++  };
++  uint64_t s0, s1, a0, a1, d0, d1;
++  if (!span(a.source, a.sourcePitch, a.sourceHeight, a.sourceWidth * 2, s0, s1) ||
++      !span(a.alpha, a.alphaPitch, a.sourceHeight, a.sourceWidth, a0, a1) ||
++      !span(a.destination, a.destinationPitch, a.tileHeight, a.tileWidth * 2, d0, d1) ||
++      (s0 < d1 && d0 < s1) || (a0 < d1 && d0 < a1))
++    return false;
++
++  const double denominator = double(a.sourceWidth * a.sourceHeight) * 65536.0;
++  const double inverse = 1.0 / (double(a.sourceWidth) * a.sourceHeight * 65536.0);
++  struct Footprint { int32_t start, end, first, last; };
++  Footprint horizontal[maxSource];
++  const auto footprint = [](int32_t index, int32_t source, int32_t destination) {
++    const int32_t start = index * source, end = start + source;
++    return Footprint{start, end, start / destination, (end + destination - 1) / destination};
++  };
++  if (a.tileWidth <= maxSource)
++    for (int32_t x = 0; x < a.tileWidth; ++x)
++      horizontal[x] = footprint(a.tileX + x, a.sourceWidth, a.destinationWidth);
++  for (int32_t y = 0; y < a.tileHeight; ++y) {
++    auto out = reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(a.destination) + size_t(y) * a.destinationPitch);
++    const int32_t y0 = (a.tileY + y) * a.sourceHeight, y1 = y0 + a.sourceHeight;
++    const int32_t sy0 = y0 / a.destinationHeight;
++    const int32_t sy1 = (y1 + a.destinationHeight - 1) / a.destinationHeight;
++    for (int32_t x = 0; x < a.tileWidth; ++x) {
++      const auto f = a.tileWidth <= maxSource ? horizontal[x] : footprint(a.tileX + x, a.sourceWidth, a.destinationWidth);
++      const int32_t x0 = f.start, x1 = f.end, sx0 = f.first, sx1 = f.last;
++      double alphaSum = 0, red = 0, green = 0, blue = 0;
++      for (int32_t sy = sy0; sy < sy1; ++sy) {
++        auto row = reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(a.source) + size_t(sy) * a.sourcePitch);
++        const auto mask = a.alpha + size_t(sy) * a.alphaPitch;
++        const uint32_t wy = std::min(y1, (sy + 1) * a.destinationHeight) - std::max(y0, sy * a.destinationHeight);
++        for (int32_t sx = sx0; sx < sx1; ++sx) {
++          if (!mask[sx]) continue;
++          const uint32_t pixel = row[sx];
++          if (pixel == a.sourceKey) continue;
++          const uint32_t wx = std::min(x1, (sx + 1) * a.destinationWidth) - std::max(x0, sx * a.destinationWidth);
++          // Truncate each native mask weight BEFORE averaging; 65794*255>>8
++          // is exactly65536. Averaging first changes native fades and can
++          // produce weights above one at fully opaque pixels.
++          const double weight = double(wx * wy) * ((mask[sx] * a.opacity) >> 8);
++          alphaSum += weight;
++          red += (pixel >> 11) * weight;
++          green += ((pixel >> 5) & 63) * weight;
++          blue += (pixel & 31) * weight;
++        }
++      }
++      if (alphaSum == 0) continue;
++      const uint32_t previous = out[x];
++      const double remain = denominator - alphaSum;
++      const auto r = AreaBlendChannel(red + (previous >> 11) * remain, denominator, inverse);
++      const auto g = AreaBlendChannel(green + ((previous >> 5) & 63) * remain, denominator, inverse);
++      const auto b = AreaBlendChannel(blue + (previous & 31) * remain, denominator, inverse);
++      out[x] = uint16_t((r << 11) | (g << 5) | b);
++    }
++  }
++  return true;
++}
++}
+diff --git a/src/ddraw/private_area_blt.h b/src/ddraw/private_area_blt.h
+new file mode 100644
+index 0000000..e435d16
+--- /dev/null
++++ b/src/ddraw/private_area_blt.h
+@@ -0,0 +1,73 @@
++#pragma once
++#include "private_stretch.h"
++
++namespace dxvk {
++// An explicit opaque operation, not a new default for ordinary DirectDraw Blt.
++// Rectangles are copied into the request; no caller pointers are retained.
++struct AreaBlt565Args {
++  uint32_t size;
++  IDirectDrawSurface* destination;
++  IDirectDrawSurface* source;
++  RECT destinationRect, sourceRect;
++  HRESULT result; // Written only when the export returns 1 (handled).
++};
++
++template<typename Surface>
++inline CPUStretchResult AreaBlt565Surface(Surface* destination, Surface* source, RECT dst, RECT src) {
++  if (!destination || !source || destination==source ||
++      src.left<0 || src.top<0 || src.right<=src.left || src.bottom<=src.top ||
++      dst.left<0 || dst.top<0 || dst.right<=dst.left || dst.bottom<=dst.top) return {};
++  const LONG sw=src.right-src.left,sh=src.bottom-src.top,dw=dst.right-dst.left,dh=dst.bottom-dst.top;
++  // Bound both work and integer products. At most 1024^2*63 fits uint32_t.
++  if (sw>1024 || sh>1024 || dw>sw || dh>sh || (dw==sw && dh==sh)) return {};
++  DDSURFACEDESC input{},output{};input.dwSize=output.dwSize=sizeof(input);
++  const auto rgb565=[](const DDPIXELFORMAT& p) {
++    return p.dwSize==sizeof(p) && p.dwFlags==DDPF_RGB && p.dwRGBBitCount==16 &&
++      p.dwRBitMask==0xf800 && p.dwGBitMask==0x7e0 && p.dwBBitMask==0x1f;
++  };
++  if (FAILED(source->GetSurfaceDesc(&input)) || FAILED(destination->GetSurfaceDesc(&output)) ||
++      !rgb565(input.ddpfPixelFormat) || !rgb565(output.ddpfPixelFormat) ||
++      uint64_t(src.right)>input.dwWidth || uint64_t(src.bottom)>input.dwHeight ||
++      uint64_t(dst.right)>output.dwWidth || uint64_t(dst.bottom)>output.dwHeight) return {};
++  HRESULT hr=source->Lock(&src,&input,DDLOCK_READONLY|DDLOCK_WAIT,nullptr);
++  if (FAILED(hr)) return {true,hr,false};
++  hr=destination->Lock(&dst,&output,DDLOCK_WRITEONLY|DDLOCK_WAIT,nullptr);
++  if (FAILED(hr)) {
++    source->Unlock(input.lpSurface);
++    return {true,hr,false};
++  }
++  input.dwWidth=sw;input.dwHeight=sh;output.dwWidth=dw;output.dwHeight=dh;
++  const bool valid=rgb565(input.ddpfPixelFormat) && rgb565(output.ddpfPixelFormat) &&
++    input.lpSurface && output.lpSurface && input.lPitch>=int64_t(sw)*2 && output.lPitch>=int64_t(dw)*2 &&
++    input.lPitch%2==0 && output.lPitch%2==0 &&
++    reinterpret_cast<uintptr_t>(input.lpSurface)%2==0 && reinterpret_cast<uintptr_t>(output.lpSurface)%2==0 &&
++    DisjointRGB565Storage(input,output);
++  if (valid) {
++    const uint32_t denominator=sw*sh;
++    for (LONG y=0;y<dh;++y) {
++      auto out=reinterpret_cast<uint16_t*>(static_cast<char*>(output.lpSurface)+size_t(y)*output.lPitch);
++      const LONG y0=y*sh,y1=y0+sh;
++      for (LONG x=0;x<dw;++x) {
++        const LONG x0=x*sw,x1=x0+sw;
++        uint32_t red=0,green=0,blue=0;
++        for (LONG sy=y0/dh;sy<(y1+dh-1)/dh;++sy) {
++          const auto in=reinterpret_cast<const uint16_t*>(static_cast<const char*>(input.lpSurface)+size_t(sy)*input.lPitch);
++          const LONG wy=std::min(y1,(sy+1)*dh)-std::max(y0,sy*dh);
++          for (LONG sx=x0/dw;sx<(x1+dw-1)/dw;++sx) {
++            const uint32_t weight=wy*(std::min(x1,(sx+1)*dw)-std::max(x0,sx*dw));
++            const uint16_t pixel=in[sx];
++            red+=(pixel>>11)*weight;green+=((pixel>>5)&63)*weight;blue+=(pixel&31)*weight;
++          }
++        }
++        out[x]=uint16_t((((red+denominator/2)/denominator)<<11)|
++          (((green+denominator/2)/denominator)<<5)|((blue+denominator/2)/denominator));
++      }
++    }
++  }
++  hr=destination->Unlock(output.lpSurface);
++  const HRESULT sourceResult=source->Unlock(input.lpSurface);
++  if (SUCCEEDED(hr)) hr=sourceResult;
++  // Completed writes cannot be retried via a different sampler after failure.
++  return {valid || FAILED(hr),hr,valid};
++}
++}
+diff --git a/src/ddraw/private_locks.h b/src/ddraw/private_locks.h
+new file mode 100644
+index 0000000..00493b3
+--- /dev/null
++++ b/src/ddraw/private_locks.h
+@@ -0,0 +1,49 @@
++#pragma once
++#include <windows.h>
++#include <ddraw.h>
++#include <algorithm>
++#include <vector>
++
++namespace dxvk {
++// Lock state belongs to the surface, not to an individual COM interface view.
++class SurfaceLockRegions {
++  struct Entry { RECT region; void* data; bool writable; bool full; };
++  std::vector<Entry> entries;
++  size_t ambiguousUnlocks=0;
++
++  template<typename Predicate> std::vector<RECT> complete(Predicate match) {
++    auto found=std::find_if(entries.begin(),entries.end(),match);
++    // Native DirectDraw accepts some single-lock calls with a different/NULL
++    // token. Honor a successful native Unlock without inventing a second lock.
++    if (found==entries.end() && entries.size()==1) found=entries.begin();
++    std::vector<RECT> dirty;
++    if (found!=entries.end()) {
++      if (found->writable) dirty.push_back(found->region);
++      entries.erase(found);
++    } else if (!entries.empty()) {
++      // If native code accepts an ambiguous token, conservatively retain every
++      // possible written region until all outstanding unlocks are accounted for.
++      for (const auto& entry:entries) if (entry.writable) dirty.push_back(entry.region);
++      ++ambiguousUnlocks;
++    }
++    if (ambiguousUnlocks>=entries.size()) {
++      entries.clear();
++      ambiguousUnlocks=0;
++    }
++    return dirty;
++  }
++public:
++  void add(const RECT* region,const RECT& full,void* data,DWORD flags) {
++    entries.push_back({region?*region:full,data,
++      !(flags&DDLOCK_READONLY) || bool(flags&DDLOCK_WRITEONLY),region==nullptr});
++  }
++  std::vector<RECT> byData(void* data) {
++    return complete([&](const Entry& entry){return data ? entry.data==data : entry.full;});
++  }
++  std::vector<RECT> byRect(const RECT* region) {
++    return complete([&](const Entry& entry){return region ? EqualRect(region,&entry.region) : entry.full;});
++  }
++  bool empty() const { return entries.empty(); }
++  void clear() { entries.clear(); ambiguousUnlocks=0; }
++};
++}
+diff --git a/src/ddraw/private_native_copy.h b/src/ddraw/private_native_copy.h
+new file mode 100644
+index 0000000..c29fdd1
+--- /dev/null
++++ b/src/ddraw/private_native_copy.h
+@@ -0,0 +1,69 @@
++#pragma once
++#include <windows.h>
++#include <ddraw.h>
++#include <cstring>
++#include <cstdint>
++#include <algorithm>
++
++namespace dxvk {
++template<typename Input,typename Output>
++inline bool DisjointRGB565Storage(const Input& input, const Output& output) {
++  if (!input.dwWidth || !input.dwHeight || !output.dwWidth || !output.dwHeight) return false;
++  const uint64_t inputStart = reinterpret_cast<uintptr_t>(input.lpSurface);
++  const uint64_t outputStart = reinterpret_cast<uintptr_t>(output.lpSurface);
++  const uint64_t inputEnd = inputStart + uint64_t(input.lPitch) * (input.dwHeight-1) + uint64_t(input.dwWidth)*2;
++  const uint64_t outputEnd = outputStart + uint64_t(output.lPitch) * (output.dwHeight-1) + uint64_t(output.dwWidth)*2;
++  const uint64_t addressLimit = uint64_t(UINTPTR_MAX);
++  return inputEnd>inputStart && outputEnd>outputStart && inputEnd-1<=addressLimit && outputEnd-1<=addressLimit &&
++    (inputEnd<=outputStart || outputEnd<=inputStart);
++}
++// The caller has already checked format, flags, full rectangles and ownership.
++// Returning false leaves the destination unmodified for native Blt fallback.
++inline bool CopyLargeRGB565Surface(IDirectDrawSurface* destination, IDirectDrawSurface* source, HRESULT& result) {
++  DDSURFACEDESC input{},output{};
++  input.dwSize=output.dwSize=sizeof(input);
++  if (FAILED(source->Lock(nullptr,&input,DDLOCK_READONLY|DDLOCK_WAIT,nullptr))) return false;
++  if (FAILED(destination->Lock(nullptr,&output,DDLOCK_WRITEONLY|DDLOCK_WAIT,nullptr))) {
++    source->Unlock(nullptr);
++    return false;
++  }
++  const auto rgb565=[](const DDPIXELFORMAT& p) {
++    return p.dwFlags==DDPF_RGB && p.dwRGBBitCount==16 &&
++      p.dwRBitMask==0xf800 && p.dwGBitMask==0x7e0 && p.dwBBitMask==0x1f;
++  };
++  const bool valid=rgb565(input.ddpfPixelFormat) && rgb565(output.ddpfPixelFormat) &&
++    input.dwWidth==output.dwWidth && input.dwHeight==output.dwHeight &&
++    input.lpSurface && output.lpSurface && input.lpSurface!=output.lpSurface &&
++    input.lPitch>=int64_t(input.dwWidth)*2 && output.lPitch>=int64_t(output.dwWidth)*2 &&
++    DisjointRGB565Storage(input,output);
++  if (valid) {
++    for (DWORD y=0;y<output.dwHeight;++y)
++      memcpy(static_cast<char*>(output.lpSurface)+size_t(y)*output.lPitch,
++             static_cast<char*>(input.lpSurface)+size_t(y)*input.lPitch,size_t(output.dwWidth)*2);
++  }
++  result=destination->Unlock(nullptr);
++  const HRESULT sourceUnlock=source->Unlock(nullptr);
++  if (SUCCEEDED(result)) result=sourceUnlock;
++  return valid;
++}
++
++// Only an unclipped full-surface RGB565 fill may use this helper.
++inline bool FillLargeRGB565Surface(IDirectDrawSurface* destination, DWORD color, HRESULT& result) {
++  if (color>UINT16_MAX) return false;
++  DDSURFACEDESC output{};
++  output.dwSize=sizeof(output);
++  if (FAILED(destination->Lock(nullptr,&output,DDLOCK_WRITEONLY|DDLOCK_WAIT,nullptr))) return false;
++  const auto& p=output.ddpfPixelFormat;
++  const bool valid=p.dwFlags==DDPF_RGB && p.dwRGBBitCount==16 &&
++    p.dwRBitMask==0xf800 && p.dwGBitMask==0x7e0 && p.dwBBitMask==0x1f &&
++    output.dwWidth && output.dwHeight && output.lpSurface &&
++    reinterpret_cast<uintptr_t>(output.lpSurface)%alignof(uint16_t)==0 && output.lPitch%2==0 &&
++    output.lPitch>=int64_t(output.dwWidth)*2;
++  if (valid) {
++    for (DWORD y=0;y<output.dwHeight;++y)
++      std::fill_n(reinterpret_cast<uint16_t*>(static_cast<char*>(output.lpSurface)+size_t(y)*output.lPitch),output.dwWidth,uint16_t(color));
++  }
++  result=destination->Unlock(nullptr);
++  return valid;
++}
++}
+diff --git a/src/ddraw/private_regions.h b/src/ddraw/private_regions.h
+new file mode 100644
+index 0000000..b2cfbc3
+--- /dev/null
++++ b/src/ddraw/private_regions.h
+@@ -0,0 +1,78 @@
++#pragma once
++#include <windows.h>
++#include <vector>
++
++namespace dxvk {
++inline std::vector<RECT> SubtractRegions(std::vector<RECT> pending, const std::vector<RECT>& covered) {
++  for (const RECT& known : covered) {
++    std::vector<RECT> next;
++    for (const RECT& part : pending) {
++      RECT intersection;
++      if (!IntersectRect(&intersection, &part, &known)) {
++        next.push_back(part);
++        continue;
++      }
++      const RECT pieces[] = {
++        {part.left,part.top,part.right,intersection.top},
++        {part.left,intersection.bottom,part.right,part.bottom},
++        {part.left,intersection.top,intersection.left,intersection.bottom},
++        {intersection.right,intersection.top,part.right,intersection.bottom}
++      };
++      for (const RECT& piece : pieces) if (!IsRectEmpty(&piece)) next.push_back(piece);
++    }
++    pending = std::move(next);
++    if (pending.empty()) break;
++  }
++  return pending;
++}
++
++inline void AddRegion(std::vector<RECT>& regions, const RECT& added) {
++  if (IsRectEmpty(&added)) return;
++  auto uncovered = SubtractRegions({added}, regions);
++  regions.insert(regions.end(), uncovered.begin(), uncovered.end());
++}
++
++inline void CoalesceCovered(std::vector<RECT>& dirty, const std::vector<RECT>& valid) {
++  if (dirty.size() < 2) return;
++  RECT bounds = dirty.front();
++  int64_t area = 0;
++  for (const RECT& part : dirty) UnionRect(&bounds, &bounds, &part);
++  for (const RECT& part : dirty) area += int64_t(part.right-part.left)*(part.bottom-part.top);
++  if (int64_t(bounds.right-bounds.left)*(bounds.bottom-bounds.top) > 2*area) return;
++  // Uploading an unchanged gap is safe only when its CPU pixels are current.
++  if (SubtractRegions({bounds}, valid).empty()) dirty = {bounds};
++}
++
++class BaselineDamage {
++  bool valid = false, gpuValid = false;
++  uint64_t identity = 0, version = 0;
++  std::vector<RECT> pending, visible;
++public:
++  void write(const RECT& rect, LONG height) {
++    if (!valid || IsRectEmpty(&rect)) return;
++    pending.resize((height+127)/128);
++    for (LONG row=rect.top/128;row<=(rect.bottom-1)/128;++row) {
++      RECT band{rect.left,std::max(rect.top,row*128),rect.right,std::min(rect.bottom,(row+1)*128)};
++      UnionRect(&pending[row],&pending[row],&band);
++    }
++  }
++  std::vector<RECT> copy(uint64_t sourceIdentity, uint64_t sourceVersion, const RECT& whole) {
++    const bool same = valid && identity==sourceIdentity && version==sourceVersion;
++    std::vector<RECT> damage;
++    if (!same || !gpuValid) damage.push_back(whole);
++    else for (const RECT& rect : visible) if (!IsRectEmpty(&rect)) damage.push_back(rect);
++    valid = true;
++    gpuValid = same && gpuValid;
++    identity = sourceIdentity;
++    version = sourceVersion;
++    pending.clear();
++    return damage;
++  }
++  void uploaded() {
++    if (!valid) return;
++    visible = pending;
++    gpuValid = true;
++  }
++  void invalidate() { valid = gpuValid = false; }
++};
++}
+diff --git a/src/ddraw/private_stretch.h b/src/ddraw/private_stretch.h
+new file mode 100644
+index 0000000..1c9cebd
+--- /dev/null
++++ b/src/ddraw/private_stretch.h
+@@ -0,0 +1,69 @@
++#pragma once
++#include "private_native_copy.h"
++#include <type_traits>
++
++namespace dxvk {
++struct CPUStretchResult { bool handled=false; HRESULT result=DD_OK; bool written=false; };
++
++// A single fixed-point pixel-center rule for both enlarging and shrinking.
++// Native Windows stretching uses different rules for the two axes/scale
++// directions: scaling a 4x exact replica can change the original glyph shape.
++template<typename Surface>
++inline CPUStretchResult StretchRGB565Surface(Surface* destination,
++    Surface* source, RECT dst, RECT src, DWORD flags, const DDBLTFX* fx) {
++  if (!destination || !source || source==destination || !(flags&DDBLT_WAIT) ||
++      flags&~(DDBLT_WAIT|DDBLT_ASYNC|DDBLT_ROP|DDBLT_KEYSRC) ||
++      ((flags&DDBLT_ROP) ? (!fx || fx->dwSize!=sizeof(*fx) || fx->dwROP!=SRCCOPY) : fx!=nullptr)) return {};
++  if (src.left<0 || src.top<0 || src.right<=src.left || src.bottom<=src.top ||
++      dst.left<0 || dst.top<0 || dst.right<=dst.left || dst.bottom<=dst.top) return {};
++  const LONG sw=src.right-src.left,sh=src.bottom-src.top,dw=dst.right-dst.left,dh=dst.bottom-dst.top;
++  if (sw==dw && sh==dh) return {};
++  using Desc=std::conditional_t<std::is_same_v<Surface,IDirectDrawSurface4> ||
++    std::is_same_v<Surface,IDirectDrawSurface7>,DDSURFACEDESC2,DDSURFACEDESC>;
++  const auto unlock=[](Surface* surface,void* data,RECT* rect) {
++    if constexpr(std::is_same_v<Desc,DDSURFACEDESC>) return surface->Unlock(data);
++    else return surface->Unlock(rect);
++  };
++  Desc input{},output{}; input.dwSize=output.dwSize=sizeof(input);
++  if (FAILED(source->GetSurfaceDesc(&input)) || FAILED(destination->GetSurfaceDesc(&output))) return {};
++  const auto eligible=[](const Desc& d,RECT r) {
++    const auto& p=d.ddpfPixelFormat;
++    return p.dwFlags==DDPF_RGB && p.dwRGBBitCount==16 && p.dwRBitMask==0xf800 &&
++      p.dwGBitMask==0x7e0 && p.dwBBitMask==0x1f &&
++      r.left>=0 && r.top>=0 && uint64_t(r.right)<=d.dwWidth && uint64_t(r.bottom)<=d.dwHeight;
++  };
++  if (!eligible(input,src) || !eligible(output,dst)) return {};
++  DDCOLORKEY key{};
++  if ((flags&DDBLT_KEYSRC) && (FAILED(source->GetColorKey(DDCKEY_SRCBLT,&key)) ||
++      key.dwColorSpaceLowValue>key.dwColorSpaceHighValue || key.dwColorSpaceHighValue>0xffff)) return {};
++  HRESULT hr=source->Lock(&src,&input,DDLOCK_READONLY|DDLOCK_WAIT,nullptr);
++  if (FAILED(hr)) return {true,hr,false};
++  hr=destination->Lock(&dst,&output,DDLOCK_WRITEONLY|DDLOCK_WAIT,nullptr);
++  if (FAILED(hr)) { unlock(source,input.lpSurface,&src); return {true,hr,false}; }
++  input.dwWidth=sw; input.dwHeight=sh; output.dwWidth=dw; output.dwHeight=dh;
++  const bool valid=input.lpSurface && output.lpSurface &&
++    input.lPitch>=int64_t(sw)*2 && output.lPitch>=int64_t(dw)*2 &&
++    input.lPitch%2==0 && output.lPitch%2==0 &&
++    reinterpret_cast<uintptr_t>(input.lpSurface)%2==0 && reinterpret_cast<uintptr_t>(output.lpSurface)%2==0 &&
++    DisjointRGB565Storage(input,output);
++  if (valid) {
++    const uint64_t stepX=(uint64_t(sw)<<16)/dw,stepY=(uint64_t(sh)<<16)/dh;
++    uint64_t sampleY=stepY/2;
++    for (LONG y=0;y<dh;++y,sampleY+=stepY) {
++      const auto in=reinterpret_cast<const uint16_t*>(static_cast<const char*>(input.lpSurface)+(sampleY>>16)*input.lPitch);
++      auto out=reinterpret_cast<uint16_t*>(static_cast<char*>(output.lpSurface)+size_t(y)*output.lPitch);
++      uint64_t sampleX=stepX/2;
++      for (LONG x=0;x<dw;++x,sampleX+=stepX) {
++        const uint16_t pixel=in[sampleX>>16];
++        if (!(flags&DDBLT_KEYSRC) || pixel<key.dwColorSpaceLowValue || pixel>key.dwColorSpaceHighValue) out[x]=pixel;
++      }
++    }
++  }
++  hr=unlock(destination,output.lpSurface,&dst);
++  HRESULT sourceResult=unlock(source,input.lpSurface,&src);
++  if (SUCCEEDED(hr)) hr=sourceResult;
++  // Do not fall back after an unlock failure; any completed writes still
++  // belong to the CPU, even when the API reports that failure to the caller.
++  return {valid || FAILED(hr),hr,valid};
++}
++}

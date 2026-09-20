@@ -1,0 +1,43 @@
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.codex-*/
+
+# Private game and generated media data.
+*.exe
+*.dll
+*.brn
+*.gk3
+*.bmp
+*.png
+*.webp
+*.zip
+*.7z
+*.pt
+*.pth
+*.safetensors
+*.ttf
+*.otf
+downloads/
+/models/
+captures/
+references/
+/docs/
+texture-pack-build/
+
+# The small README gallery is the only tracked image exception.
+!gallery/
+!gallery/*.webp
+
+# Explicitly reviewed, small replacement texture shipped with the package.
+!src/gk3hd/assets/textures/LHO_CHST.PNG

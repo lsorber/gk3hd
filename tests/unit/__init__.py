@@ -1,0 +1,1 @@
+"""Isolated component specifications."""

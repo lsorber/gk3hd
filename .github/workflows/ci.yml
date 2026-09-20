@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - name: Lint and type-check
+        run: uv run --locked poe lint
+      - name: Test (fast and slow, no game required)
+        run: uv run --locked poe test --slow
+      - name: Build and check installed CLI
+        shell: bash
+        run: |
+          uv build
+          uvx --quiet --no-cache --from "$(find dist -name '*.whl' -print -quit)" gk3hd --version
