@@ -141,8 +141,9 @@ def _kscreen_output_mode(output: dict[str, object]) -> DisplayMode | None:
         width, height, refresh = size.get("width"), size.get("height"), mode.get("refreshRate", 60)
         if not isinstance(width, int) or not isinstance(height, int) or min(width, height) <= 0:
             return None
-        # KScreen rotation is a bit flag; quarter turns exchange physical axes.
-        if output.get("rotation") in {2, 8}:
+        # KScreen's quarter-turn orientations exchange the panel's axes,
+        # including the flipped variants (Flipped90 and Flipped270).
+        if output.get("rotation") in {2, 8, 32, 128}:
             width, height = height, width
         hz = round(refresh) if isinstance(refresh, (int, float)) else 60
         return DisplayMode(
@@ -162,6 +163,9 @@ def _xrandr_mode(text: str) -> DisplayMode | None:
         elif active is not None and (refresh := re.search(r"(\d+(?:\.\d+)?)\*", line)):
             primary, width, height = active
             hz = round(float(refresh[1]))
-            candidates.append((not primary, DisplayMode(width, height, hz)))
+            valid_refresh = _MINIMUM_REFRESH_HZ <= hz <= _MAXIMUM_REFRESH_HZ
+            candidates.append(
+                (not primary, DisplayMode(width, height, hz if valid_refresh else 60))
+            )
             active = None
     return min(candidates, key=lambda candidate: candidate[0])[1] if candidates else None
