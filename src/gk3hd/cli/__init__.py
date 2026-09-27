@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import platform
+import re
 from pathlib import Path  # noqa: TC003 - Typer resolves command annotations at runtime.
 from typing import Annotated
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 import gk3hd.install as installation
@@ -33,6 +36,8 @@ from gk3hd.renderer.state import STATE_FILENAME as RENDERER_STATE_FILENAME
 from gk3hd.system.discovery import discover_game
 from gk3hd.system.display import current_display_mode
 from gk3hd.system.files import sha256_file
+from gk3hd.system.proton import ProtonError, discover_proton
+from gk3hd.system.steam import game_launch_options
 from gk3hd.textures.install.service import STATE_FILENAME, TextureInstallRequest
 
 app = typer.Typer(
@@ -51,6 +56,38 @@ def _version_callback(value: bool) -> None:
     if value:
         console.print(f"gk3hd {__version__}")
         raise typer.Exit
+
+
+def _warn_about_steam_setup(exe: Path) -> None:
+    """Flag conflicting Steam settings without changing any user configuration."""
+    if platform.system() != "Linux":
+        return
+    try:
+        context = discover_proton(exe, use_override=False)
+    except (ProtonError, OSError, ValueError):
+        return  # A failed advisory lookup must not prevent installation.
+    name = context.executable.parent.name
+    normalized = name.casefold().replace("-", "").replace("_", "").replace(" ", "")
+    if "experimental" in normalized or "geproton832" in normalized:
+        console.print(
+            f"[yellow]Compatibility note:[/] {escape(name)} caused launch or display failures "
+            "in testing. Select Proton 9.0 in GK3's Steam Compatibility settings; "
+            "gk3hd does not change Steam's selection."
+        )
+    try:
+        options = game_launch_options(context.game.root)
+    except (OSError, ValueError):
+        return  # Steam's optional user metadata must not block installation.
+    if any(
+        re.search(r"\bWINEDLLOVERRIDES\s*=", value, re.IGNORECASE)
+        and re.search(r"\b(?:ddraw|d3dimm)(?:\.dll)?\b", value, re.IGNORECASE)
+        for value in options
+    ):
+        console.print(
+            "[yellow]Compatibility note:[/] GK3's Steam Launch Options set a "
+            "ddraw/d3dimm DLL override. gk3hd already configures ddraw for this game; "
+            "the Launch Options override is usually unnecessary and can be removed."
+        )
 
 
 @app.callback()
@@ -89,6 +126,13 @@ def install(
     ] = False,
 ) -> None:
     """Install recommended patches, the D7VK renderer and high-resolution textures."""
+    if platform.system() == "Linux":
+        try:
+            target = discover_game(game_dir=game_dir, exe=exe)
+        except CLI_ERRORS:
+            pass  # The installer reports an invalid target through its normal error path.
+        else:
+            _warn_about_steam_setup(target.exe)
     try:
         with _texture_install_progress() as (progress, callback):
             task = progress.add_task(
@@ -206,4 +250,11 @@ def doctor(game_dir: GameDirOption = None, exe: ExeOption = None) -> None:
     table.add_row("INI", target.ini.name if target.ini is not None else "will create GK3.ini")
     table.add_row("Display", f"{display.width}x{display.height} @ {display.refresh_hz} Hz")
     table.add_row("Graphics proxies", ", ".join(proxies) if proxies else "none")
+    if platform.system() == "Linux":
+        try:
+            selected = discover_proton(target.exe, use_override=False).executable.parent.name
+        except (ProtonError, OSError, ValueError):
+            selected = "not found for this game"
+        table.add_row("Steam Proton", selected)
     console.print(table)
+    _warn_about_steam_setup(target.exe)

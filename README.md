@@ -35,9 +35,8 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 > `gk3hd` is currently considered beta software.
 
 > [!TIP]
-> On Linux, install/select Proton in Steam first and close GK3 before
-> running the command in Desktop Mode. Settings are written through that game's
-> Proton registry, including its `ddraw` override.
+> On Linux, select *Proton 9.0* in GK3's Steam *Properties → Compatibility*.
+> Close GK3 and exit Steam, then run the commands below (in Desktop Mode on Steam Deck).
 
 [Install uv](https://docs.astral.sh/uv/), then run this from a terminal on
 Windows or on Linux with Steam and Proton:

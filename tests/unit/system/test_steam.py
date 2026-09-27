@@ -82,3 +82,25 @@ def test_duplicate_prefixes_are_not_silently_chosen(tmp_path: Path) -> None:
     game = steam.SteamGame(tmp_path, other, other / "steamapps/common/GK3")
     with pytest.raises(ValueError, match="multiple GK3 Proton prefixes"):
         _ = game.compatdata
+
+
+def test_game_launch_options_read_only_gk3_accounts(tmp_path: Path) -> None:
+    """Read GK3 options across accounts without confusing other games."""
+    first = tmp_path / "userdata/123/config"
+    second = tmp_path / "userdata/456/config"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "localconfig.vdf").write_text(
+        '"UserLocalConfigStore" { "Software" { "Valve" { "Steam" { "apps" '
+        '{ "497360" { "LaunchOptions" "PROTON_LOG=1 %command%" } '
+        '"12345" { "LaunchOptions" "unrelated %command%" } } } } } }'
+    )
+    (second / "localconfig.vdf").write_text(
+        '"UserLocalConfigStore" { "Software" { "Valve" { "Steam" { "apps" '
+        '{ "497360" { "LaunchOptions" "WINEDLLOVERRIDES=ddraw=b %command%" } } } } } }'
+    )
+
+    assert steam.game_launch_options(tmp_path) == (
+        "PROTON_LOG=1 %command%",
+        "WINEDLLOVERRIDES=ddraw=b %command%",
+    )

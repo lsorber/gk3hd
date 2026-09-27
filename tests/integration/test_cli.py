@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from importlib.resources import files
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
+import pytest
 from PIL import Image
 from typer.testing import CliRunner
 
@@ -29,8 +31,6 @@ from tests.unit.textures.test_extraction import _write_barn_fixture
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def test_every_command_group_renders_help() -> None:
@@ -262,6 +262,134 @@ def test_root_install_renders_composed_report(monkeypatch: pytest.MonkeyPatch) -
 
     assert result.exit_code == 0, result.output
     assert "8 patches, 6658 textures" in result.output
+
+
+def test_linux_install_flags_a_known_failing_proton_without_changing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tested-bad Steam selection is flagged before installation begins."""
+    exe = tmp_path / "GK3.exe"
+    monkeypatch.setattr("gk3hd.cli.platform.system", lambda: "Linux")
+    monkeypatch.setattr("gk3hd.cli.discover_game", lambda **_kwargs: SimpleNamespace(exe=exe))
+    monkeypatch.setattr(
+        "gk3hd.cli.discover_proton",
+        lambda _exe, **_kwargs: SimpleNamespace(
+            executable=tmp_path / "Proton Experimental" / "proton",
+            game=SimpleNamespace(root=tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        installation,
+        "install",
+        lambda *_args, **_kwargs: CompositeReport(patches=8, textures=6658, changed=True),
+    )
+
+    result = CliRunner().invoke(app, ["install"])
+
+    assert result.exit_code == 0, result.output
+    assert "Installed gk3hd" in result.output
+    assert "Proton Experimental" in result.output
+    assert "Select Proton 9.0" in result.output
+    assert result.output.index("Proton Experimental") < result.output.index("Installed gk3hd")
+
+
+@pytest.mark.parametrize(
+    ("options", "warns"),
+    [
+        ('WINEDLLOVERRIDES="d3d9,d3d8,ddraw=n,b;d3dimm=n,b" %command%', True),
+        ("PROTON_LOG=1 %command%", False),
+    ],
+)
+def test_linux_install_warns_only_for_conflicting_launch_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, options: str, warns: bool
+) -> None:
+    """A renderer override is flagged before installation; unrelated options stay quiet."""
+    monkeypatch.setattr("gk3hd.cli.platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "gk3hd.cli.discover_game", lambda **_kwargs: SimpleNamespace(exe=tmp_path / "GK3.exe")
+    )
+    monkeypatch.setattr(
+        "gk3hd.cli.discover_proton",
+        lambda _exe, **_kwargs: SimpleNamespace(
+            executable=tmp_path / "Proton 9" / "proton",
+            game=SimpleNamespace(root=tmp_path),
+        ),
+    )
+    monkeypatch.setattr("gk3hd.cli.game_launch_options", lambda _root: (options,))
+    monkeypatch.setattr(
+        installation,
+        "install",
+        lambda *_args, **_kwargs: CompositeReport(patches=8, textures=6658, changed=True),
+    )
+
+    result = CliRunner().invoke(app, ["install"])
+
+    assert result.exit_code == 0, result.output
+    assert ("Launch Options set a" in result.output) is warns
+    if warns:
+        assert result.output.index("Launch Options set a") < result.output.index("Installed gk3hd")
+
+
+def test_linux_install_does_not_depend_on_advisory_steam_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed optional Steam metadata cannot block the actual install."""
+    monkeypatch.setattr("gk3hd.cli.platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "gk3hd.cli.discover_game", lambda **_kwargs: SimpleNamespace(exe=tmp_path / "GK3.exe")
+    )
+
+    def malformed_metadata(*_args: object, **_kwargs: object) -> None:
+        msg = "unbalanced Steam configuration"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("gk3hd.cli.discover_proton", malformed_metadata)
+    monkeypatch.setattr(
+        installation,
+        "install",
+        lambda *_args, **_kwargs: CompositeReport(patches=8, textures=6658, changed=True),
+    )
+
+    result = CliRunner().invoke(app, ["install"])
+
+    assert result.exit_code == 0, result.output
+    assert "Installed gk3hd" in result.output
+
+
+def test_linux_doctor_reports_existing_steam_renderer_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed game gets the same compatibility warning without reinstalling."""
+    exe = tmp_path / "GK3.exe"
+    exe.write_bytes(b"fixture")
+    monkeypatch.setattr("gk3hd.cli.platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "gk3hd.cli.discover_game",
+        lambda **_kwargs: SimpleNamespace(exe=exe, game_dir=tmp_path, data_dir=tmp_path, ini=None),
+    )
+    monkeypatch.setattr(
+        "gk3hd.cli.current_display_mode",
+        lambda: SimpleNamespace(width=1280, height=800, refresh_hz=60),
+    )
+    monkeypatch.setattr(
+        "gk3hd.cli.discover_proton",
+        lambda _exe, **_kwargs: SimpleNamespace(
+            executable=tmp_path / "Proton 9" / "proton",
+            game=SimpleNamespace(root=tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        "gk3hd.cli.game_launch_options",
+        lambda _root: ('WINEDLLOVERRIDES="ddraw=n,b" %command%',),
+    )
+
+    result = CliRunner().invoke(app, ["doctor"])
+
+    assert result.exit_code == 0, result.output
+    assert "gk3hd doctor" in result.output
+    assert "Steam Proton" in result.output
+    assert "Proton 9" in result.output
+    assert "Launch Options set a" in result.output
 
 
 def test_read_only_and_empty_uninstall_commands_accept_explicit_fixture(

@@ -152,3 +152,30 @@ def steam_games() -> tuple[SteamGame, ...]:
             if (directory := installed_app(library, GK3_APP_ID)) is not None
         )
     return tuple(games)
+
+
+def game_launch_options(root: Path) -> tuple[str, ...]:
+    """Read GK3 Launch Options from each account without modifying Steam state."""
+    accounts = root / "userdata"
+    if not accounts.is_dir():
+        return ()
+    options = []
+    for account in sorted(accounts.iterdir()):
+        if not account.name.isdecimal():
+            continue
+        config = account / "config/localconfig.vdf"
+        if not config.is_file():
+            continue
+        value = vdf_value(
+            read_vdf(config),
+            "UserLocalConfigStore",
+            "Software",
+            "Valve",
+            "Steam",
+            "apps",
+            GK3_APP_ID,
+            "LaunchOptions",
+        )
+        if isinstance(value, str) and value:
+            options.append(value)
+    return tuple(options)
