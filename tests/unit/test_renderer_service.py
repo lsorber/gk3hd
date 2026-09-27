@@ -80,6 +80,43 @@ def test_install_preserves_unmanaged_renderer(
     assert dll.read_bytes() == b"user renderer"
 
 
+def test_uninstall_preserves_later_registry_edits(
+    environment: tuple[Path, RendererService, MemoryRegistry],
+) -> None:
+    exe, renderer, registry = environment
+    renderer.install(exe=exe)
+    registry.values[str(exe.resolve())] = "new user compatibility settings"
+    renderer.uninstall(exe=exe)
+    assert registry.values == {str(exe.resolve()): "new user compatibility settings"}
+    assert not exe.with_name("ddraw.dll").exists()
+    assert not exe.with_name("dxvk.conf").exists()
+    assert not exe.with_name(STATE_FILENAME).exists()
+    assert not exe.with_name(JOURNAL_FILENAME).exists()
+
+
+def test_interrupted_uninstall_retains_newer_registry_values_on_retry(
+    environment: tuple[Path, RendererService, MemoryRegistry], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exe, renderer, registry = environment
+    renderer.install(exe=exe)
+    registry.values[str(exe.resolve())] = "new user compatibility settings"
+    write = renderer._write_state
+
+    def interrupt(target: Path, state: RendererState | None) -> None:
+        del target, state
+        msg = "interrupted uninstall"
+        raise OSError(msg)
+
+    monkeypatch.setattr(renderer, "_write_state", interrupt)
+    with pytest.raises(OSError, match="interrupted uninstall"):
+        renderer.uninstall(exe=exe)
+    monkeypatch.setattr(renderer, "_write_state", write)
+    renderer.recover(exe=exe)
+    assert registry.values == {str(exe.resolve()): "new user compatibility settings"}
+    assert not exe.with_name(STATE_FILENAME).exists()
+    assert not exe.with_name(JOURNAL_FILENAME).exists()
+
+
 def test_local_install_selects_the_target_games_build(
     environment: tuple[Path, RendererService, MemoryRegistry],
     monkeypatch: pytest.MonkeyPatch,

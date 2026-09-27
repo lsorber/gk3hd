@@ -55,6 +55,12 @@ class InstallConfiguration(Protocol):
         """Restore prior values only from recognizable partial apply states."""
         ...
 
+    def prepare_restore(
+        self, *, exe: Path, changes: tuple[ExternalChange, ...], force: bool = False
+    ) -> tuple[ExternalChange, ...]:
+        """Select owned values to restore, excluding newer registry edits."""
+        ...
+
     def restore(
         self,
         *,
@@ -110,6 +116,14 @@ class NoopConfiguration:
         """Accept an empty interrupted-install change set."""
         del exe
         self._require_empty(changes)
+
+    def prepare_restore(
+        self, *, exe: Path, changes: tuple[ExternalChange, ...], force: bool = False
+    ) -> tuple[ExternalChange, ...]:
+        """Accept an empty restore plan."""
+        del exe, force
+        self._require_empty(changes)
+        return ()
 
     def restore(
         self,

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from gk3hd.patch.builds import BuildProfile
+from gk3hd.patch.install import transaction
 from gk3hd.patch.install.configuration import GraphicsBackend
 from gk3hd.patch.install.journal import ApplyJournal, install_journal_path
 from gk3hd.patch.install.transaction import (
@@ -18,9 +19,11 @@ from gk3hd.patch.install.transaction import (
     PreparedInstall,
     VerificationReport,
 )
+from gk3hd.patch.install.windows import WindowsInstallConfiguration
 from gk3hd.patch.manifest import ExternalChange, manifest_path_for_exe
 from gk3hd.patch.model import BuildContext, BuildId, DisplayMode, PatchId, PatchPlan
 from gk3hd.system.locking import ExclusiveFileLock, LockError, executable_lock_path
+from tests.unit.patch.test_windows_install_configuration import MemoryRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,6 +69,12 @@ class TransactionConfiguration:
         del exe, changes
         self.value = "before"
         self.rollback_count += 1
+
+    def prepare_restore(
+        self, *, exe: Path, changes: tuple[ExternalChange, ...], force: bool = False
+    ) -> tuple[ExternalChange, ...]:
+        del exe, force
+        return changes
 
     def restore(
         self,
@@ -160,6 +169,44 @@ def test_apply_rolls_back_every_surface_when_installed_verification_fails(
     assert not exe.with_suffix(f"{exe.suffix}.bak").exists()
     assert configuration.value == "before"
     assert configuration.rollback_count == 1
+
+
+def test_failed_uninstall_preserves_newer_registry_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rollback reapplies only removed values, never the retained user edit."""
+    exe = tmp_path / "GK3.exe"
+    original, patched = b"pristine fixture", b"patched fixture"
+    exe.write_bytes(original)
+    registry = MemoryRegistry()
+    configuration = WindowsInstallConfiguration(registry)
+    installer = PassingVerificationInstaller(
+        configuration=configuration, process_probe=lambda: False
+    )
+    prepared = _prepared(exe, original, patched)
+    installer.apply(exe=exe, prepared=prepared)
+    registry.values["Game Width"] = '{"type":4,"value":1280}'
+    expected = dict(registry.values)
+    monkeypatch.setattr(transaction, "profile_for_sha256", lambda _digest: prepared.profile)
+    path_type = type(exe)
+    unlink = path_type.unlink
+
+    def fail_cleanup(path: Path, *, missing_ok: bool = False) -> None:
+        if path == manifest_path_for_exe(exe):
+            msg = "injected uninstall failure"
+            raise OSError(msg)
+        unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(path_type, "unlink", fail_cleanup)
+    with pytest.raises(OSError, match="injected uninstall failure"):
+        installer.restore(exe=exe)
+    assert registry.values == expected
+    assert exe.read_bytes() == patched
+    assert manifest_path_for_exe(exe).is_file()
+    monkeypatch.setattr(path_type, "unlink", unlink)
+    installer.restore(exe=exe)
+    assert exe.read_bytes() == original
+    assert registry.values == {"Game Width": expected["Game Width"]}
 
 
 def test_apply_refuses_a_plan_prepared_for_another_target(tmp_path: Path) -> None:

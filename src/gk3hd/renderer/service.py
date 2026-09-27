@@ -196,8 +196,8 @@ class RendererService:
             state = RendererState.load(target)
             if state is None:
                 return
-            self._adapter(target).verify(exe=target, changes=state.changes)
-            self._journal(target, "uninstall", state, state)
+            changes = self._adapter(target).prepare_restore(exe=target, changes=state.changes)
+            self._journal(target, "uninstall", state, replace(state, changes=changes))
             self._recover(target)
 
     @staticmethod

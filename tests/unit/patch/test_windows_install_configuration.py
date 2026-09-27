@@ -392,21 +392,25 @@ def test_required_appcompat_policy_is_idempotent() -> None:
     assert required_gk3_appcompat_layers(original) == original
 
 
-def test_restore_protects_post_install_user_changes(tmp_path: Path) -> None:
-    """A normal restore refuses to overwrite a setting edited after apply."""
+@pytest.mark.parametrize("new_value", ['{"type":4,"value":1280}', None])
+def test_restore_protects_post_install_user_changes(tmp_path: Path, new_value: str | None) -> None:
+    """Uninstall retains newer edits/deletions and restores unchanged settings."""
     exe = tmp_path / "GK3.exe"
     exe.write_bytes(b"fixture")
     registry = MemoryRegistry()
     configuration = WindowsInstallConfiguration(registry)
     changes = configuration.prepare(exe=exe, width=1920, height=1080)
     configuration.apply(exe=exe, changes=changes)
-    registry.values["Game Width"] = '{"type":4,"value":1280}'
-
-    with pytest.raises(ConfigurationError, match="no longer matches"):
-        configuration.restore(exe=exe, changes=changes, force=False)
+    registry.write("Game Width", new_value)
+    registry.values["Unrelated"] = "keep"
+    configuration.restore(exe=exe, changes=changes, force=False)
+    expected = {"Unrelated": "keep"}
+    if new_value is not None:
+        expected["Game Width"] = new_value
+    assert registry.values == expected
 
     configuration.restore(exe=exe, changes=changes, force=True)
-    assert registry.values == {}
+    assert registry.values == {"Unrelated": "keep"}
 
 
 def test_failed_configuration_apply_rolls_back_completed_values(tmp_path: Path) -> None:

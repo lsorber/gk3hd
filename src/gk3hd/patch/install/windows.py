@@ -162,6 +162,10 @@ class ConfigurationError(Exception):
     """Report conflicting, failed, or unverifiable external configuration."""
 
 
+class UnsupportedRegistryValueError(ConfigurationError):
+    """Identify an existing value that cannot be safely captured or restored."""
+
+
 class RegistryBackend(Protocol):
     """Read and write serialized values under GK3's engine registry key."""
 
@@ -188,6 +192,9 @@ class WindowsRegistryBackend:
                 value, value_type = winreg.QueryValueEx(key, name)
         except FileNotFoundError:
             return None
+        if isinstance(value, bytes):
+            msg = f"unsupported binary registry value {name!r}; refusing to replace it"
+            raise UnsupportedRegistryValueError(msg)
         return json.dumps(
             {"type": int(value_type), "value": value}, separators=(",", ":"), sort_keys=True
         )
@@ -215,6 +222,9 @@ class WindowsAppCompatRegistryBackend:
                 value, value_type = winreg.QueryValueEx(key, name)
         except FileNotFoundError:
             return None
+        if isinstance(value, bytes):
+            msg = f"unsupported binary registry value {name!r}; refusing to replace it"
+            raise UnsupportedRegistryValueError(msg)
         return json.dumps(
             {"type": int(value_type), "value": value}, separators=(",", ":"), sort_keys=True
         )
@@ -400,6 +410,34 @@ class WindowsInstallConfiguration:
                 raise ConfigurationError(msg)
         self._set_values(exe=exe, changes=changes, installed=False)
 
+    def prepare_restore(
+        self, *, exe: Path, changes: tuple[ExternalChange, ...], force: bool = False
+    ) -> tuple[ExternalChange, ...]:
+        """Retain newer registry values, but still protect changed managed files.
+
+        Games and compatibility tools legitimately update registry settings.
+        Those edits, including deletions, cease to be installer-owned. Return
+        the exact remaining changes so transaction rollback cannot overwrite
+        the retained edits either.
+        """
+        if force:
+            return changes
+        selected = tuple(
+            change
+            for change in changes
+            if not change.surface.startswith("registry:")
+            or self._registry_value_matches(exe=exe, change=change)
+        )
+        self._require_values(exe=exe, changes=selected, installed=True)
+        return selected
+
+    def _registry_value_matches(self, *, exe: Path, change: ExternalChange) -> bool:
+        """Retain a newer unsupported type without swallowing registry access failures."""
+        try:
+            return self._read_value(exe=exe, change=change) == change.installed
+        except UnsupportedRegistryValueError:
+            return False
+
     def restore(
         self,
         *,
@@ -408,8 +446,7 @@ class WindowsInstallConfiguration:
         force: bool,
     ) -> None:
         """Restore captured values unless a later user edit must be protected."""
-        if not force:
-            self._require_values(exe=exe, changes=changes, installed=True)
+        changes = self.prepare_restore(exe=exe, changes=changes, force=force)
         self._set_values(exe=exe, changes=changes, installed=False)
 
     def reinstall(self, *, exe: Path, changes: tuple[ExternalChange, ...]) -> None:

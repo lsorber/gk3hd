@@ -333,11 +333,14 @@ class Installer:
             )
             raise InstallError(detail)
         current = exe.read_bytes()
+        restore_changes = self._configuration_for(exe).prepare_restore(
+            exe=exe, changes=metadata.external_changes, force=force
+        )
         configuration_restored = False
         try:
             self._configuration_for(exe).restore(
                 exe=exe,
-                changes=metadata.external_changes,
+                changes=restore_changes,
                 force=force,
             )
             configuration_restored = True
@@ -349,9 +352,7 @@ class Installer:
                 atomic_write(exe, current)
             finally:
                 if configuration_restored:
-                    self._configuration_for(exe).reinstall(
-                        exe=exe, changes=metadata.external_changes
-                    )
+                    self._configuration_for(exe).reinstall(exe=exe, changes=restore_changes)
             raise
         if metadata.backup_created:
             try:

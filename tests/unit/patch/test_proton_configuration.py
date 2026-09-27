@@ -73,3 +73,38 @@ def test_proton_configuration_restores_only_its_values(
     override = next(change for change in d7vk if change.key == "ddraw")
     assert override.surface.endswith(r"Software\Wine\AppDefaults\GK3.exe\DllOverrides")
     assert json.loads(override.installed or "null")["value"] == "native,builtin"
+
+
+def test_proton_uninstall_keeps_newer_resolution_and_dll_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Game settings and compatibility tools can both change after installation."""
+    exe = tmp_path / "GK3.exe"
+    values: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(
+        ProtonRegistryBackend, "read", lambda self, name: values.get((self.key_path, name))
+    )
+
+    def write(backend: ProtonRegistryBackend, name: str, value: str | None) -> None:
+        if value is None:
+            values.pop((backend.key_path, name), None)
+        else:
+            values[backend.key_path, name] = value
+
+    monkeypatch.setattr(ProtonRegistryBackend, "write", write)
+    configuration = ProtonInstallConfiguration(Mock(spec=ProtonContext))
+    changes = configuration.prepare(exe=exe, width=1280, height=800)
+    override = next(
+        change
+        for change in configuration.prepare_renderer(exe=exe, digest="a" * 64)
+        if change.key == "ddraw"
+    )
+    changes = (*changes, override)
+    configuration.apply(exe=exe, changes=changes)
+    width = next(key for key in values if key[1] == "Game Width")
+    dll = next(key for key in values if key[1] == "ddraw")
+    values[width] = '{"type":4,"value":1024}'
+    values[dll] = '{"type":1,"value":"native"}'
+    expected = {width: values[width], dll: values[dll]}
+    configuration.restore(exe=exe, changes=changes, force=False)
+    assert values == expected

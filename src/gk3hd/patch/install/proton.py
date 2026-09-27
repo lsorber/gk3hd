@@ -11,6 +11,7 @@ from gk3hd.patch.install.windows import (
     ENGINE_KEY,
     HARDWARE_KEY,
     ConfigurationError,
+    UnsupportedRegistryValueError,
     WindowsInstallConfiguration,
 )
 from gk3hd.patch.manifest import ExternalChange
@@ -42,9 +43,12 @@ class ProtonRegistryBackend:
         match = re.search(
             r"^\s*" + re.escape(name) + r"\s+(REG_\w+)\s*(.*?)\r?$", result.stdout, re.MULTILINE
         )
-        if match is None or match[1] not in _REGISTRY_TYPES:
-            msg = f"unsupported Proton registry value {name!r}; refusing to replace it"
+        if match is None:
+            msg = f"could not parse Proton registry value {name!r}: {result.stdout.strip()}"
             raise ConfigurationError(msg)
+        if match[1] not in _REGISTRY_TYPES:
+            msg = f"unsupported Proton registry value {name!r}; refusing to replace it"
+            raise UnsupportedRegistryValueError(msg)
         value = int(match[2], 0) if match[1] == "REG_DWORD" else match[2]
         return json.dumps(
             {"type": _REGISTRY_TYPES[match[1]], "value": value},

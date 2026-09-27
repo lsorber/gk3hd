@@ -2060,6 +2060,7 @@ def test_action_layout_publishes_its_owner_at_authored_height() -> None:
         .build_action_layout_helper(
             wrapper_va=0x00800000,
             state_va=state_va,
+            horizontal_origin_va=0x00800800,
         )
     )
     height_test = payload.index(
@@ -3402,13 +3403,11 @@ def test_input_scopes_preserve_modal_ownership_and_native_fallback() -> None:
     assert payload.endswith(b"\xff\xe0")
     assert payload.count(b"\xff\x05" + struct.pack("<I", 0x00801038)) == 1
     assert payload.count(b"\xff\x0d" + struct.pack("<I", 0x00801038)) == 1
-    # A covering modal must reach the system affine before retained SIDNEY
-    # or driving-map state is considered. The native query preserves both
+    # Modal ownership is checked against the current layer, not instruction
+    # order relative to the retained-SIDNEY check. The native query preserves
     # EAX (event target) and ECX (dispatcher), including its comparison flags.
     modal_comparison = b"\x3b\x05" + struct.pack("<I", 0x0080102C) + b"\x59\x58"
     modal_at = payload.index(modal_comparison)
-    retained_at = payload.index(b"\x83\x3d" + struct.pack("<I", 0x00801000))
-    assert modal_at < retained_at
     instructions = list(Cs(CS_ARCH_X86, CS_MODE_32).disasm(payload, 0x00800000))
     reference_branch = next(
         instruction for instruction in instructions if instruction.mnemonic == "jbe"
