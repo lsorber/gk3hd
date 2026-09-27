@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from gk3hd.system.appinfo import read_appinfo
@@ -22,6 +22,11 @@ from gk3hd.system.steam import (
 
 _PROC_COMM_LIMIT = 15
 _STEAM_PLAY_APP_ID = 891390
+_REGISTRY_WRITES = frozenset({"add", "delete", "import", "copy", "restore"})
+_WAIT_FOR_REGISTRY = (
+    '"$@"; result=$?; '
+    'WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx" "$GK3HD_WINESERVER" -w || exit $?; exit "$result"'
+)
 
 
 class ProtonError(RuntimeError):
@@ -35,6 +40,7 @@ class ProtonContext:
     game: SteamGame
     executable: Path
     runtime: Path | None = None
+    _prepared: bool = field(default=False, init=False, repr=False, compare=False)
 
     def run(self, arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         """Run a Windows utility without leaking Wine diagnostics into the CLI."""
@@ -57,10 +63,31 @@ class ProtonContext:
                 "LC_ALL": "C.UTF-8",
             }
         )
-        # Proton's 'run' initializes a new prefix; 'runinprefix' preserves an
-        # existing one. Never invoke a system Wine binary against Steam state.
-        verb = "runinprefix" if (prefix / "pfx/system.reg").is_file() else "run"
-        command = [str(self.executable), verb, *arguments]
+        # Proton's `run` starts its Steam game stub, even when given reg.exe.
+        # `getcompatpath` initializes or migrates the selected tool's prefix
+        # without starting the game. `runinprefix` skips that migration, which
+        # can otherwise erase our settings on Steam's next launch after a
+        # Proton downgrade. Prepare once before any reads/writes in this context.
+        command = [str(self.executable), "runinprefix", *arguments]
+        if (
+            len(arguments) > 1
+            and arguments[0].casefold() == "reg.exe"
+            and arguments[1].casefold() in _REGISTRY_WRITES
+        ):
+            # Steam's container tears down background Wine processes when its
+            # foreground command exits. Wait inside it for registry persistence,
+            # not merely reg.exe's successful in-memory update. Reads must not
+            # wait for a running game to exit.
+            servers = (
+                self.executable.parent / "files/bin/wineserver",
+                self.executable.parent / "dist/bin/wineserver",
+            )
+            server = next((path for path in servers if path.is_file()), None)
+            if server is None:
+                msg = "could not find the selected Proton's registry persistence helper"
+                raise ProtonError(msg)
+            environment["GK3HD_WINESERVER"] = str(server)
+            command = ["sh", "-c", _WAIT_FOR_REGISTRY, "gk3hd-registry", *command]
         tool_paths = [self.executable.parent]
         if self.runtime is not None:
             command = [str(self.runtime), "--verb=run", "--", *command]
@@ -68,6 +95,25 @@ class ProtonContext:
         environment["STEAM_COMPAT_TOOL_PATHS"] = ":".join(str(path) for path in tool_paths)
         prefix.mkdir(parents=True, exist_ok=True)
         try:
+            if not self._prepared:
+                bootstrap = [str(self.executable), "getcompatpath", str(self.game.directory)]
+                if self.runtime is not None:
+                    bootstrap = [str(self.runtime), "--verb=run", "--", *bootstrap]
+                initialized = subprocess.run(  # noqa: S603 - resolved installed Proton.
+                    bootstrap,
+                    env=environment,
+                    cwd=self.game.directory,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
+                    check=False,
+                )
+                if initialized.returncode != 0 or not (prefix / "pfx/system.reg").is_file():
+                    msg = "could not initialize GK3's Proton prefix"
+                    raise ProtonError(msg)
+                object.__setattr__(self, "_prepared", True)
             return subprocess.run(  # noqa: S603 - resolved installed Proton, argument vector only.
                 command,
                 env=environment,
@@ -84,15 +130,15 @@ class ProtonContext:
             raise ProtonError(msg) from exc
 
 
-def discover_proton(exe: Path) -> ProtonContext:
-    """Resolve one app's selected tool; never guess a prefix from a username."""
+def discover_proton(exe: Path, *, use_override: bool = True) -> ProtonContext:
+    """Resolve the game's Proton tool, optionally ignoring the CLI-only override."""
     target = exe.resolve()
     games = [game for game in steam_games() if target.is_relative_to(game.directory.resolve())]
     if len(games) != 1:
         msg = "could not identify a unique Steam library/prefix for this GK3 installation"
         raise ProtonError(msg)
     game = games[0]
-    if override := os.environ.get("GK3HD_PROTON"):
+    if use_override and (override := os.environ.get("GK3HD_PROTON")):
         tool = Path(override).expanduser().resolve()
         executable = tool / "proton" if tool.is_dir() else tool
     else:

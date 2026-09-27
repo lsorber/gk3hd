@@ -114,6 +114,21 @@ def test_missing_explicit_tool_never_falls_back(game: SteamGame) -> None:
         discover_proton(game.directory / "GK3.exe")
 
 
+def test_steam_selection_can_be_inspected_despite_cli_override(
+    game: SteamGame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selected = install_app(game.library, "200", "Proton Experimental")
+    override = game.root / "compatibilitytools.d/Private Test/proton"
+    override.parent.mkdir(parents=True)
+    override.touch()
+    metadata(game)
+    settings(game, explicit="proton-experimental")
+    monkeypatch.setenv("GK3HD_PROTON", str(override))
+
+    assert discover_proton(game.directory / "GK3.exe").executable == override
+    assert discover_proton(game.directory / "GK3.exe", use_override=False).executable == selected
+
+
 def test_missing_required_runtime_is_actionable_before_mutation(game: SteamGame) -> None:
     executable = install_app(game.library, "100", "Proton")
     (executable.parent / "toolmanifest.vdf").write_text(
@@ -162,16 +177,33 @@ def test_run_uses_runtime_and_quiet_target_environment(
         (game.compatdata / "pfx").mkdir(parents=True)
         (game.compatdata / "pfx/system.reg").touch()
     monkeypatch.setenv("PROTON_LOG", "1")
-    runner = Mock(return_value=subprocess.CompletedProcess([], 0, "registry output", ""))
+
+    def complete(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "getcompatpath" in command:
+            (game.compatdata / "pfx").mkdir(parents=True, exist_ok=True)
+            (game.compatdata / "pfx/system.reg").touch()
+            return subprocess.CompletedProcess(command, 0, "Z:\\game", "")
+        return subprocess.CompletedProcess(command, 0, "registry output", "")
+
+    runner = Mock(side_effect=complete)
     monkeypatch.setattr(proton.subprocess, "run", runner)
     result = ProtonContext(game, executable, runtime).run(("reg.exe", "query", r"HKCU\Space Here"))
     assert result.stdout == "registry output"
+    assert runner.call_count == 2
+    assert runner.call_args_list[0].args[0] == [
+        str(runtime),
+        "--verb=run",
+        "--",
+        str(executable),
+        "getcompatpath",
+        str(game.directory),
+    ]
     assert runner.call_args.args[0] == [
         str(runtime),
         "--verb=run",
         "--",
         str(executable),
-        "runinprefix" if existing else "run",
+        "runinprefix",
         "reg.exe",
         "query",
         r"HKCU\Space Here",
@@ -185,6 +217,82 @@ def test_run_uses_runtime_and_quiet_target_environment(
     assert options["env"]["PROTON_LOG"] == "0"
     assert options["env"]["WINEDEBUG"] == "-all"
     assert os.environ["PROTON_LOG"] == "1"
+
+
+def test_existing_prefix_migrates_before_changes_and_only_once(
+    game: SteamGame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older Proton must not erase installed settings on the next game launch."""
+    registry = game.compatdata / "pfx/system.reg"
+    registry.parent.mkdir(parents=True)
+    registry.touch()
+    executable = install_app(game.library, "100", "Proton")
+    server = executable.parent / "files/bin/wineserver"
+    server.parent.mkdir(parents=True)
+    server.touch()
+    state = {"migrated": False, "override": False}
+
+    def complete(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "getcompatpath" in command:
+            state.update(migrated=True, override=False)
+        else:
+            assert state["migrated"]
+            if "add" in command:
+                state["override"] = True
+            else:
+                assert state["override"]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(proton.subprocess, "run", complete)
+    context = ProtonContext(game, executable)
+    context.run(("reg.exe", "add", "HKCU", "/v", "ddraw"))
+    context.run(("reg.exe", "query", "HKCU", "/v", "ddraw"))
+    assert state["override"]
+
+
+def test_registry_write_waits_for_persistence_inside_runtime(
+    game: SteamGame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = install_app(game.library, "100", "Proton")
+    server = executable.parent / "files/bin/wineserver"
+    server.parent.mkdir(parents=True)
+    server.touch()
+    runtime = install_app(game.root, "300", "Runtime", "_v2-entry-point")
+
+    def complete(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "getcompatpath" in command:
+            registry = game.compatdata / "pfx/system.reg"
+            registry.parent.mkdir(parents=True)
+            registry.touch()
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    runner = Mock(side_effect=complete)
+    monkeypatch.setattr(proton.subprocess, "run", runner)
+    ProtonContext(game, executable, runtime).run(("reg.exe", "add", "HKCU", "/v", "ddraw"))
+    command = runner.call_args.args[0]
+    assert command[:5] == [str(runtime), "--verb=run", "--", "sh", "-c"]
+    assert '"$GK3HD_WINESERVER" -w' in command[5]
+    assert runner.call_args.kwargs["env"]["GK3HD_WINESERVER"] == str(server)
+
+
+@pytest.mark.parametrize(("exit_code", "prefix_created"), [(1, False), (1, True), (0, False)])
+def test_failed_prefix_bootstrap_does_not_run_registry_command(
+    game: SteamGame,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    prefix_created: bool,
+) -> None:
+    def bootstrap(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if prefix_created:
+            (game.compatdata / "pfx").mkdir(parents=True)
+            (game.compatdata / "pfx/system.reg").touch()
+        return subprocess.CompletedProcess(command, exit_code, "", "failed")
+
+    runner = Mock(side_effect=bootstrap)
+    monkeypatch.setattr(proton.subprocess, "run", runner)
+    with pytest.raises(ProtonError, match="initialize"):
+        ProtonContext(game, Path("proton")).run(("reg.exe", "query", "HKCU"))
+    assert runner.call_count == 1
 
 
 @pytest.mark.parametrize("failure", [OSError("missing"), subprocess.TimeoutExpired("proton", 60)])
