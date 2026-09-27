@@ -307,6 +307,16 @@ _SHARED_SITES = MappingProxyType(
             va=0x00591FE0,
             original=bytes.fromhex("53 56 8b f1 bb 01 00 00 00 8b"),
         ),
+        "movies.initial_layout": PatchSite(
+            symbol="movies.initial_layout",
+            va=0x004D827C,
+            original=bytes.fromhex("e8 5a 05 00 00"),
+        ),
+        "movies.resize_layout": PatchSite(
+            symbol="movies.resize_layout",
+            va=0x004D85DB,
+            original=bytes.fromhex("e8 fb 01 00 00"),
+        ),
         "movies.bink_open_call": PatchSite(
             symbol="movies.bink_open_call",
             va=0x00591B2B,
@@ -1255,6 +1265,9 @@ _SHARED_SITES = MappingProxyType(
 _SHARED_SYMBOLS = MappingProxyType(
     {
         "movies.complete": 0x00591880,
+        "movies.layout": 0x004D87DB,
+        "movies.bink_vtable": 0x00698ED0,
+        "movies.set_rect": 0x00591790,
         "movies.update": 0x00591FE0,
         # Same variadic formatting ABI as the modal reporter used by
         # persistence, but dispatches directly through GK3's generic output

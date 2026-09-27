@@ -16,6 +16,7 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     FONT_BANK_SEGMENT,
     LOAD_SAVE_BUTTON_SEGMENT,
     LOAD_SAVE_SEGMENT,
+    MOVIE_SEGMENT,
     SYSTEM_ACTION_LAYOUT_STATE_END_OFFSET,
     SYSTEM_CONTROL_HD_FONT_ACTIVE_OFFSET,
     SYSTEM_CONTROL_HD_FONT_STATE_END_OFFSET,
@@ -35,6 +36,7 @@ from gk3hd.patch.definitions.runtime2d.system.fixed_screens import FixedScreenFe
 from gk3hd.patch.definitions.runtime2d.system.load_save import LoadSaveFeatureCompiler
 from gk3hd.patch.definitions.runtime2d.system.load_save_buttons import LoadSaveButtonCompiler
 from gk3hd.patch.definitions.runtime2d.system.menus import MenuFeatureCompiler
+from gk3hd.patch.definitions.runtime2d.system.movies import MovieFeatureCompiler
 from gk3hd.patch.definitions.runtime2d.system.room_status import RoomStatusFeatureCompiler
 from gk3hd.patch.definitions.runtime2d.system.shared import SystemCompilerContext
 from gk3hd.patch.definitions.runtime2d.system.zodiac import ZodiacFeatureCompiler
@@ -152,6 +154,7 @@ class SystemScreenCompiler(SystemCompilerContext):
             ZODIAC_SEGMENT,
             CURSOR_BLEND_SEGMENT,
             FONT_BANK_SEGMENT,
+            MOVIE_SEGMENT,
         ):
             if pe.get_section(segment.logical_name) is not None:
                 msg = f"{self.id} requires a pristine {segment.logical_name} section"
@@ -523,6 +526,12 @@ class SystemScreenCompiler(SystemCompilerContext):
             room_rendering_abi=self.room_rendering_abi,
             transition_abi=self.transition_abi,
         ).apply(pe)
+        MovieFeatureCompiler(
+            symbols=self.symbols,
+            profile=self.profile,
+            room_rendering_abi=self.room_rendering_abi,
+            transition_abi=self.transition_abi,
+        ).apply(pe)
 
     def postcheck(self, pe: PEFile) -> None:
         """Verify that this feature owns each declared runtime segment.
@@ -543,6 +552,7 @@ class SystemScreenCompiler(SystemCompilerContext):
             ZODIAC_SEGMENT,
             CURSOR_BLEND_SEGMENT,
             FONT_BANK_SEGMENT,
+            MOVIE_SEGMENT,
         ):
             section = pe.get_section(segment.logical_name)
             if section is None:
