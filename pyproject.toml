@@ -137,7 +137,9 @@ unused-ignore-comment = "warn"
 error-on-warning = true
 
 [tool.pytest.ini_options]
-addopts = ["--strict-config", "--strict-markers"]
+# Unicorn's Windows emulator uses handled access violations internally; pytest's
+# faulthandler reports each one as a fatal crash even when the test passes.
+addopts = ["--strict-config", "--strict-markers", "-p", "no:faulthandler"]
 testpaths = ["tests"]
 filterwarnings = ["error"]
 markers = [
