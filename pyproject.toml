@@ -173,6 +173,9 @@ bump_message = "bump: v$current_version → v$new_version"
 update_changelog_on_bump = true
 changelog_incremental = true
 
+[tool.poe]
+executor = { type = "simple" }
+
 [tool.poe.tasks]
 format = "ruff format ."
 lint = [

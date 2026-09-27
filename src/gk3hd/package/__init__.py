@@ -8,8 +8,9 @@ import shutil
 import subprocess
 import tomllib
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -26,6 +27,9 @@ from gk3hd.textures.workspace import (
     texture_pack_filename,
     texture_workspace_directory,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -92,15 +96,39 @@ def validate_release_assets(lock: object, release: object) -> None:
             raise ValueError(msg)
 
 
+def _release_inventory(repository: str, tag: str) -> dict[str, object]:
+    """Read published or private draft assets through authenticated GitHub CLI."""
+    release = json.loads(
+        _run(
+            "gh",
+            "release",
+            "view",
+            tag,
+            "--repo",
+            repository,
+            "--json",
+            "tagName,isDraft,assets",
+            capture=True,
+        )
+    )
+    if not isinstance(release, dict) or not isinstance(release.get("isDraft"), bool):
+        msg = "GitHub returned an invalid release inventory"
+        raise TypeError(msg)
+    # Unlike the public tag API, gh release view also resolves private drafts.
+    return {
+        "tag_name": release.get("tagName"),
+        "draft": release["isDraft"],
+        "assets": release.get("assets"),
+    }
+
+
 def _verify_remote(lock: object, *, allow_draft: bool = False) -> None:
     if not isinstance(lock, dict) or not isinstance(lock.get("tag"), str):
         msg = "release preparation requires a tag-based texture lock; use --textures"
         raise TypeError(msg)
     # Validate before interpolating the tag into an API path.
     TexturePackSource.from_lock(lock)
-    release = json.loads(
-        _run("gh", "api", f"repos/{_REPOSITORY}/releases/tags/{lock['tag']}", capture=True)
-    )
+    release = _release_inventory(_REPOSITORY, lock["tag"])
     validate_release_assets(lock, release)
     if release.get("draft") and not allow_draft:
         msg = "pinned textures are still private draft assets; publish their release first"
@@ -109,7 +137,7 @@ def _verify_remote(lock: object, *, allow_draft: bool = False) -> None:
 
 def _verify_renderer_remote(lock: object, *, allow_draft: bool = False) -> None:
     repository, tag, _ = release_target(lock)
-    release = json.loads(_run("gh", "api", f"repos/{repository}/releases/tags/{tag}", capture=True))
+    release = _release_inventory(repository, tag)
     validate_renderer_assets(lock, release)
     if release.get("draft") and not allow_draft:
         msg = "pinned renderer is still a private draft asset; publish its release first"
@@ -162,6 +190,34 @@ def _pack(version: str) -> tuple[Path, ...]:
     return report.archives
 
 
+@contextmanager
+def _restore_metadata_on_error(paths: tuple[Path, ...]) -> Iterator[None]:
+    """Undo local preparation on failure, before any release commit or tag exists."""
+    original = {path: path.read_bytes() if path.exists() else None for path in paths}
+    try:
+        yield
+    except BaseException:
+        for path, content in original.items():
+            if content is None:
+                path.unlink(missing_ok=True)
+            elif not path.exists() or path.read_bytes() != content:
+                atomic_write(path, content)
+        console.print(
+            "[yellow]Local release metadata restored; no release commit or tag created.[/]"
+        )
+        raise
+
+
+def _release_notes(version: str) -> str:
+    """Use only the selected version's conventional-commit changelog entry."""
+    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+    entry = re.search(rf"(?ms)^## v{re.escape(version)}(?:[ \t][^\n]*)?\n.*?(?=^## |\Z)", changelog)
+    if entry is None:
+        msg = f"CHANGELOG.md has no release notes for v{version}"
+        raise ValueError(msg)
+    return entry[0].strip()
+
+
 def _prepare(version: str | None, *, textures: bool, renderer: Path | None = None) -> str:
     if _run("git", "status", "--porcelain", capture=True):
         msg = "commit your work first: release preparation requires a clean worktree"
@@ -174,22 +230,26 @@ def _prepare(version: str | None, *, textures: bool, renderer: Path | None = Non
     renderer_asset = inspect_dll(renderer) if renderer is not None else None
     if renderer_asset is None:
         _verify_renderer_remote(json.loads(_RENDERER_LOCK.read_text(encoding="utf-8")))
-    selected = _release_version(version)
-    archives = _pack(selected) if textures else ()
-    if renderer_asset is not None:
-        atomic_write(
-            _RENDERER_LOCK,
-            (json.dumps(renderer_asset.lock(f"v{selected}"), indent=2) + "\n").encode(),
-        )
-        archives += renderer_asset.uploads
-    _run("uv", "lock")
-    _run("uv", "run", "--locked", "poe", "lint")
-    _run("uv", "run", "--locked", "poe", "test")
-    _run("uv", "build")
-    if renderer_asset is not None:
-        renderer_asset.verify_unchanged()
-    paths = ("pyproject.toml", "uv.lock", str(_LOCK), str(_RENDERER_LOCK), "CHANGELOG.md")
-    _run("git", "add", "--", *(path for path in paths if Path(path).is_file()))
+    paths = (Path("pyproject.toml"), Path("uv.lock"), _LOCK, _RENDERER_LOCK, Path("CHANGELOG.md"))
+    with _restore_metadata_on_error(paths):
+        selected = _release_version(version)
+        archives = _pack(selected) if textures else ()
+        if renderer_asset is not None:
+            atomic_write(
+                _RENDERER_LOCK,
+                (json.dumps(renderer_asset.lock(f"v{selected}"), indent=2) + "\n").encode(),
+            )
+            archives += renderer_asset.uploads
+        _run("uv", "lock")
+        # Reuse the environment that launched us. Syncing after the version bump
+        # would replace this running gk3hd.exe, which Windows keeps locked.
+        _run("uv", "run", "--no-sync", "poe", "lint")
+        _run("uv", "run", "--no-sync", "poe", "test")
+        _run("uv", "build")
+        if renderer_asset is not None:
+            renderer_asset.verify_unchanged()
+        notes = _release_notes(selected)
+    _run("git", "add", "--", *(str(path) for path in paths if path.is_file()))
     if _run("git", "diff", "--cached", "--name-only", capture=True):
         _run("git", "commit", "-m", f"chore(release): v{selected}")
     tag = f"v{selected}"
@@ -206,7 +266,8 @@ def _prepare(version: str | None, *, textures: bool, renderer: Path | None = Non
         "--verify-tag",
         "--title",
         tag,
-        "--generate-notes",
+        "--notes",
+        notes,
     )
     if archives:
         _run(
