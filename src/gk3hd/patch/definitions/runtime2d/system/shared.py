@@ -184,6 +184,8 @@ class SystemCompilerContext:
     _off_fingerprint_hide_wrapper: ClassVar[int] = 0x4E0
     _off_fingerprint_destructor_wrapper: ClassVar[int] = 0x520
     _off_fingerprint_destructor_limit: ClassVar[int] = 0x548
+    # Final action-row placement fits in the unused gap after fingerprint teardown.
+    _off_action_horizontal_origin_helper: ClassVar[int] = 0x550
     # system+0x300 remains the stable internal dispatcher address used by the
     # HD patch. Its JMP resolves this private implementation address. Use the
     # free aligned gap after fingerprint teardown for the display-target guard,

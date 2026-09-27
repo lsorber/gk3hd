@@ -147,6 +147,11 @@ class ActionMenuFeatureCompiler(SystemCompilerContext):
         action_layout = self.build_action_layout_helper(
             wrapper_va=action_layout_va,
             state_va=system_va + self._off_action_layout_state,
+            horizontal_origin_va=control_va + self._off_action_horizontal_origin_helper,
+        )
+        horizontal_origin = self.build_action_horizontal_origin_helper(
+            wrapper_va=control_va + self._off_action_horizontal_origin_helper,
+            center_x_va=system_va + self._off_action_layout_state + 4,
         )
         action_root = fixed_screens.build_root_draw_wrapper(
             wrapper_va=action_root_va,
@@ -279,6 +284,12 @@ class ActionMenuFeatureCompiler(SystemCompilerContext):
         )
         for label, offset, code, limit in (
             (
+                "action-menu horizontal origin",
+                self._off_action_horizontal_origin_helper,
+                horizontal_origin,
+                self._off_control_blt_wrapper,
+            ),
+            (
                 "action-menu destructor",
                 self._off_control_action_destructor_wrapper,
                 action_destructor,
@@ -333,6 +344,7 @@ class ActionMenuFeatureCompiler(SystemCompilerContext):
         *,
         wrapper_va: int,
         state_va: int,
+        horizontal_origin_va: int,
     ) -> bytes:
         """Scale ActionMenu objects and hit rectangles around their native center."""
         # ActionMenu's variable set of transparent icons is emitted by the
@@ -437,8 +449,7 @@ class ActionMenuFeatureCompiler(SystemCompilerContext):
         # are contiguous and share the same square size.
         code.raw(b"\x8b\x5e\x50")
         code.raw(b"\xa1" + struct.pack("<I", size_va) + b"\x0f\xaf\xc3")
-        code.raw(b"\x8b\xd0\xd1\xfa")
-        code.raw(b"\x8b\x3d" + struct.pack("<I", center_x_va) + b"\x2b\xfa")
+        code.call_absolute(horizontal_origin_va)
         code.raw(b"\x89\x3d" + struct.pack("<I", cursor_x_va))
         code.raw(b"\x89\x7e\x1c\x03\xc7\x89\x46\x24")
         code.raw(b"\xa1" + struct.pack("<I", size_va) + b"\x8b\xd0\xd1\xfa")
@@ -476,6 +487,22 @@ class ActionMenuFeatureCompiler(SystemCompilerContext):
         code.raw(b"\x89\x35" + struct.pack("<I", presented_root_va))
         code.label("done")
         code.raw(b"\x61\xc3")
+        return code.build()
+
+    def build_action_horizontal_origin_helper(self, *, wrapper_va: int, center_x_va: int) -> bytes:
+        """Translate a complete action row inside the display, without squashing.
+
+        Native placement clamps the 32-pixel row before we enlarge it. Even a
+        one-pixel final overrun can make the color-key renderer discard the last
+        icon while its hit box survives. EAX retains the complete final width;
+        EDI returns the final left edge and EDX is scratch.
+        """
+        code = X86Emitter(base_va=wrapper_va)
+        code.raw(b"\x8b\xd0\xd1\xfa")
+        code.raw(b"\x8b\x3d" + struct.pack("<I", center_x_va) + b"\x2b\xfa")
+        code.raw(b"\x8b\x15" + struct.pack("<I", self._physical_width_va))
+        code.raw(b"\x2b\xd0\x3b\xfa\x0f\x4f\xfa")  # min(left, width-row)
+        code.raw(b"\x31\xd2\x85\xff\x0f\x4c\xfa\xc3")  # max(left, 0)
         return code.build()
 
     def build_action_lifetime_helper(
