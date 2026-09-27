@@ -28,6 +28,7 @@ from gk3hd.patch.definitions.runtime2d.room_rendering import (
 from gk3hd.patch.definitions.runtime2d.sidney_construction import SidneyConstructionCompiler
 from gk3hd.patch.definitions.runtime2d.sidney_presentation import SidneyPresentationCompiler
 from gk3hd.patch.definitions.runtime2d.sprite_cache import SpriteCacheCompiler
+from gk3hd.patch.definitions.runtime2d.surface_formats import SurfaceFormatCompiler
 from gk3hd.patch.definitions.runtime2d.system import SystemScreenCompiler
 
 if TYPE_CHECKING:
@@ -89,6 +90,7 @@ class Runtime2DCompiler:
         compiler's constructor.
         """
         return (
+            SurfaceFormatCompiler(profile=self.profile),
             DirectRoomRenderingCompiler(symbols=symbols, profile=self.profile),
             SidneyConstructionCompiler(profile=self.profile),
             InventoryNavigationCompiler(profile=self.profile),

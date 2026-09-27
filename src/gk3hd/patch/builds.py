@@ -98,6 +98,16 @@ class BuildProfile:
 # from a handful of matching sites.
 _SHARED_SITES = MappingProxyType(
     {
+        "bitmap.rgb565_creation_case": PatchSite(
+            symbol="bitmap.rgb565_creation_case",
+            va=0x0054E778,
+            original=bytes.fromhex("e2 e4 54 00"),
+        ),
+        "bitmap.alpha_scratch_creation": PatchSite(
+            symbol="bitmap.alpha_scratch_creation",
+            va=0x00576E8E,
+            original=bytes.fromhex("e8 dd 74 fd ff"),
+        ),
         "image.coff_characteristics": PatchSite(
             symbol="image.coff_characteristics",
             # PE headers are mapped at ImageBase + file offset. Both supported
@@ -1279,6 +1289,7 @@ _SHARED_SITES = MappingProxyType(
 
 _SHARED_SYMBOLS = MappingProxyType(
     {
+        "bitmap.creation_descriptor_ready": 0x0054E4E2,
         "movies.complete": 0x00591880,
         "movies.layout": 0x004D87DB,
         "movies.bink_vtable": 0x00698ED0,

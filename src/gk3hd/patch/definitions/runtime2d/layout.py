@@ -505,6 +505,9 @@ FONT_BANK_SOURCE_COPY_OFFSET = 0x3A00
 FONT_BANK_ROW_LAYOUTS_OFFSET = 0x3B00
 SPRITE_CACHE_SEGMENT = RuntimeSegment("sprite_cache", 0x36000, 0x8000, b"SPRTCACH", 0xE0000020)
 MOVIE_SEGMENT = RuntimeSegment("movie_layout", 0x3E000, 0x1000, b"MOVIELAY", 0xE0000020)
+SURFACE_FORMAT_SEGMENT = RuntimeSegment(
+    "surface_formats", 0x3F000, 0x1000, b"SURFFMT\0", 0xE0000020
+)
 SPRITE_CACHE_TRANSFER_OFFSET = 0x1000
 CONSOLE_OWNER_OFFSET = 0x10
 CONSOLE_TRANSFER_OFFSET = 0x300
@@ -572,6 +575,7 @@ RUNTIME_SEGMENTS = (
     FONT_BANK_SEGMENT,
     SPRITE_CACHE_SEGMENT,
     MOVIE_SEGMENT,
+    SURFACE_FORMAT_SEGMENT,
 )
 
 
@@ -671,10 +675,10 @@ class RuntimeLayout:
     """
 
     section_name: ClassVar[str] = ".gk2d"
-    section_size: ClassVar[int] = 0x3F000
+    section_size: ClassVar[int] = 0x40000
     section_characteristics: ClassVar[int] = 0xE0000020
     magic: ClassVar[bytes] = b"GK3RT2D\0"
-    abi_version: ClassVar[int] = 159
+    abi_version: ClassVar[int] = 160
     header_size: ClassVar[int] = 0x1000
 
     segments: ClassVar[tuple[RuntimeSegment, ...]] = RUNTIME_SEGMENTS
