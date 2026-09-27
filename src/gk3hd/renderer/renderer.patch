@@ -2783,6 +2783,20 @@ index 0000000..e435d16
 +  return {valid || FAILED(hr),hr,valid};
 +}
 +}
+diff --git a/src/util/log/log.h b/src/util/log/log.h
+--- a/src/util/log/log.h
++++ b/src/util/log/log.h
+@@ -18,7 +18,9 @@ namespace dxvk {
+     None  = 5,
+   };
+
+-  using PFN_wineLogOutput = int (STDMETHODCALLTYPE *)(const char *);
++  // Wine's ntdll exports __wine_dbg_output as cdecl, not a Win32 stdcall.
++  // The wrong convention corrupts the x86 caller's stack on each log message.
++  using PFN_wineLogOutput = int (__cdecl *)(const char *);
+
+   /**
+    * \brief Logger
 diff --git a/src/ddraw/private_locks.h b/src/ddraw/private_locks.h
 new file mode 100644
 index 0000000..00493b3
