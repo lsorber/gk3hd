@@ -93,7 +93,7 @@ _GENERATED_PATCHES = (
     _compiled_definition(
         patch_id="fix_keyboard_camera_speed",
         name="Fix keyboard camera speed",
-        description="Keep camera speed steady at any resolution/FPS.",
+        description="Precise taps and faster holds in every mode, at any resolution/FPS.",
         ownership=frozenset(
             {
                 _CAMERA_SECTION,

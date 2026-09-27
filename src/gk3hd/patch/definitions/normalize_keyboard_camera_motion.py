@@ -39,7 +39,11 @@ class KeyboardCameraMotionCompiler:
         configurable reference update rate. Rotation uses the authored
         1024x768 dimensions; translational modes use only elapsed time. Long
         scheduling gaps are capped, so resuming or pressing a key after idle
-        cannot cause a camera jump.
+        cannot cause a camera jump. Every keyboard camera mode ramps over one
+        second of continuous input. Rotation starts at 0.375 times base speed and
+        reaches 2.53 times it; forward/back starts at 0.3 and reaches 1.65 times
+        it. Strafe/lift starts more gently, at 0.16875 times base speed, and
+        reaches 1.2375 times it. Each axis tracks its hold independently.
 
     Strategy:
         Redirect only the keyboard call into a small timing wrapper and mark
@@ -52,8 +56,10 @@ class KeyboardCameraMotionCompiler:
     Boundaries:
         Physical mouse deltas, key bindings, acceleration/smoothing history,
         collision, scripted/glide cameras, cutscenes, and camera-mode logic
-        remain native. ``reference_updates_per_second`` is the patch's single
-        speed parameter; 30 is a conservative period-appropriate default.
+        remain native. Only keyboard input acquires the hold ramp. Reversing or
+        pausing input resets each axis independently; brief gaps retain smooth
+        momentum rather than repeatedly restarting the ramp.
+        ``reference_updates_per_second`` sets the base speed; 30 is the default.
     """
 
     profile: BuildProfile
@@ -61,10 +67,10 @@ class KeyboardCameraMotionCompiler:
 
     id: ClassVar[str] = "fix_keyboard_camera_speed"
     section_name: ClassVar[str] = ".gkcam"
-    _section_size: ClassVar[int] = 0x200
+    _section_size: ClassVar[int] = 0x400
     _section_characteristics: ClassVar[int] = 0xE0000020
     _magic: ClassVar[bytes] = b"GK3CAM01"
-    _layout_version: ClassVar[int] = 1
+    _layout_version: ClassVar[int] = 6
 
     _off_layout_version: ClassVar[int] = 0x08
     _off_last_tick: ClassVar[int] = 0x0C
@@ -76,8 +82,21 @@ class KeyboardCameraMotionCompiler:
     _off_inverse_reference_height: ClassVar[int] = 0x24
     _off_first_delta_ms: ClassVar[int] = 0x28
     _off_max_delta_ms: ClassVar[int] = 0x2C
-    _off_keyboard_wrapper: ClassVar[int] = 0x40
-    _off_conversion_bridge: ClassVar[int] = 0x100
+    _off_horizontal_start: ClassVar[int] = 0x30
+    _off_horizontal_direction: ClassVar[int] = 0x34
+    _off_horizontal_held_ms: ClassVar[int] = 0x38
+    _off_inverse_hold_ramp: ClassVar[int] = 0x3C
+    _off_vertical_start: ClassVar[int] = 0x40
+    _off_vertical_direction: ClassVar[int] = 0x44
+    _off_vertical_held_ms: ClassVar[int] = 0x48
+    _off_rotation_initial_gain: ClassVar[int] = 0x4C
+    _off_rotation_gain_span: ClassVar[int] = 0x50
+    _off_translation_gain_span: ClassVar[int] = 0x54
+    _off_lateral_initial_gain: ClassVar[int] = 0x58
+    _off_lateral_gain_span: ClassVar[int] = 0x5C
+    _off_forward_initial_gain: ClassVar[int] = 0x60
+    _off_keyboard_wrapper: ClassVar[int] = 0x80
+    _off_conversion_bridge: ClassVar[int] = 0x200
 
     _reference_width: ClassVar[float] = 1024.0
     _reference_height: ClassVar[float] = 768.0
@@ -86,6 +105,14 @@ class KeyboardCameraMotionCompiler:
     # reference sample, preventing focus changes or stalls from accumulating.
     _first_delta_ms: ClassVar[int] = 17
     _max_delta_ms: ClassVar[int] = 34
+    _hold_ramp_ms: ClassVar[int] = 1000
+    _hold_reset_gap_ms: ClassVar[int] = 150
+    _rotation_initial_gain: ClassVar[float] = 0.375
+    _rotation_top_gain: ClassVar[float] = 2.53
+    _forward_top_gain: ClassVar[float] = 1.65
+    _lateral_initial_gain: ClassVar[float] = 0.16875
+    _lateral_top_gain: ClassVar[float] = 1.2375
+    _forward_initial_gain: ClassVar[float] = 0.3
 
     def __post_init__(self) -> None:
         """Reject speed parameters that cannot produce finite motion."""
@@ -106,6 +133,54 @@ class KeyboardCameraMotionCompiler:
     def _conversion_site(self) -> PatchSite:
         return self.profile.site("camera.motion_float_conversion")
 
+    def _emit_hold_timing(
+        self,
+        code: X86Emitter,
+        *,
+        section_va: int,
+        stack_offset: int,
+        state_offset: int,
+        label: str,
+    ) -> None:
+        """Track one raw axis independently; inactive or reversed input resets it."""
+        start_va = section_va + state_offset
+        direction_va = start_va + 4
+        held_va = start_va + 8
+        last_tick_va = section_va + self._off_last_tick
+        code += bytes((0x8B, 0x54, 0x24, stack_offset, 0x85, 0xD2))  # mov edx,[esp+axis]
+        code.jump_if(Condition.EQUAL, f"{label}_reset")
+        code += bytes.fromhex("c1 fa 1f 83 ca 01")  # sign -> -1 or +1
+        code += b"\x3b\x15" + struct.pack("<I", direction_va)
+        code.jump_if(Condition.EQUAL, f"{label}_measure")
+        code.label(f"{label}_reset")
+        code += b"\x89\x15" + struct.pack("<I", direction_va)
+        code += b"\xa1" + struct.pack("<I", last_tick_va)
+        code += b"\xa3" + struct.pack("<I", start_va)
+        code.label(f"{label}_measure")
+        code += b"\xa1" + struct.pack("<I", last_tick_va)
+        code += b"\x2b\x05" + struct.pack("<I", start_va)
+        code += b"\x3d" + struct.pack("<I", self._hold_ramp_ms)
+        code.jump_if(Condition.BELOW_OR_EQUAL, f"{label}_ready")
+        code += b"\xb8" + struct.pack("<I", self._hold_ramp_ms)
+        code.label(f"{label}_ready")
+        code += b"\xa3" + struct.pack("<I", held_va)
+
+    def _emit_hold_gain(
+        self,
+        code: X86Emitter,
+        *,
+        section_va: int,
+        held_offset: int,
+        initial_offset: int,
+        span_offset: int,
+    ) -> None:
+        """Multiply the current x87 value by a bounded, motion-specific ramp."""
+        code += b"\xdb\x05" + struct.pack("<I", section_va + held_offset)
+        code += b"\xd8\x0d" + struct.pack("<I", section_va + self._off_inverse_hold_ramp)
+        code += b"\xd8\x0d" + struct.pack("<I", section_va + span_offset)
+        code += b"\xd8\x05" + struct.pack("<I", section_va + initial_offset)
+        code += bytes.fromhex("de c9")  # fmulp: input * (initial + progress * span)
+
     def _build_keyboard_wrapper(self, *, section_va: int) -> bytes:
         """Timestamp one nonzero keyboard sample and call the native consumer."""
         last_tick_va = section_va + self._off_last_tick
@@ -113,6 +188,7 @@ class KeyboardCameraMotionCompiler:
         active_va = section_va + self._off_keyboard_active
         first_delta_va = section_va + self._off_first_delta_ms
         max_delta_va = section_va + self._off_max_delta_ms
+        direction_va = section_va + self._off_horizontal_direction
 
         code = X86Emitter(base_va=section_va + self._off_keyboard_wrapper)
         # WINMM calls may clobber EAX/ECX/EDX. EAX is dead at this native call
@@ -125,6 +201,13 @@ class KeyboardCameraMotionCompiler:
         code += b"\x85\xd2"  # test edx,edx
         code.jump_if(Condition.EQUAL, "first_sample")
         code += b"\x2b\xc2"  # sub eax,edx (wrap-safe unsigned milliseconds)
+        code += b"\x3d" + struct.pack("<I", self._hold_reset_gap_ms)
+        code.jump_if(Condition.BELOW_OR_EQUAL, "continuous_sample")
+        code += b"\xc7\x05" + struct.pack("<I", direction_va) + bytes(4)
+        code += (
+            b"\xc7\x05" + struct.pack("<I", section_va + self._off_vertical_direction) + bytes(4)
+        )
+        code.label("continuous_sample")
         code += b"\x3b\x05" + struct.pack("<I", max_delta_va)
         code.jump_if(Condition.BELOW_OR_EQUAL, "have_delta")
         code += b"\xa1" + struct.pack("<I", max_delta_va)
@@ -133,6 +216,23 @@ class KeyboardCameraMotionCompiler:
         code += b"\xa1" + struct.pack("<I", first_delta_va)
         code.label("have_delta")
         code += b"\xa3" + struct.pack("<I", delta_ms_va)
+
+        # The native producer calls only for nonzero motion. Track both axes
+        # independently, regardless of the camera mode selected by modifiers.
+        self._emit_hold_timing(
+            code,
+            section_va=section_va,
+            stack_offset=0x0C,
+            state_offset=self._off_horizontal_start,
+            label="horizontal",
+        )
+        self._emit_hold_timing(
+            code,
+            section_va=section_va,
+            stack_offset=0x10,
+            state_offset=self._off_vertical_start,
+            label="vertical",
+        )
         code += b"\x5a\x59"  # pop edx; pop ecx
 
         # Copy the three thiscall arguments. The native RET 0Ch consumes these
@@ -171,14 +271,30 @@ class KeyboardCameraMotionCompiler:
         code += bytes.fromhex("d9 45 08")  # fld dword [ebp+08h]
         code += b"\xd8\x0d" + struct.pack("<I", factor_va)
         code += bytes.fromhex("83 ff 03")  # cmp edi,3
-        code.jump_if(Condition.EQUAL, "horizontal_done")
+        code.jump_if(Condition.EQUAL, "horizontal_translation")
         code += bytes.fromhex("83 ff 04")  # cmp edi,4
-        code.jump_if(Condition.EQUAL, "horizontal_done")
+        code.jump_if(Condition.EQUAL, "horizontal_translation")
         code += b"\x8b\x15" + struct.pack(
             "<I", self.profile.address("high_resolution_3d.display_width_ptr")
         )
         code += bytes.fromhex("da 0a")  # fimul dword [edx]
         code += b"\xd8\x0d" + struct.pack("<I", inverse_width_va)
+        self._emit_hold_gain(
+            code,
+            section_va=section_va,
+            held_offset=self._off_horizontal_held_ms,
+            initial_offset=self._off_rotation_initial_gain,
+            span_offset=self._off_rotation_gain_span,
+        )
+        code.jump("horizontal_done")
+        code.label("horizontal_translation")
+        self._emit_hold_gain(
+            code,
+            section_va=section_va,
+            held_offset=self._off_horizontal_held_ms,
+            initial_offset=self._off_lateral_initial_gain,
+            span_offset=self._off_lateral_gain_span,
+        )
         code.label("horizontal_done")
         code += bytes.fromhex("d9 5d 08")  # fstp dword [ebp+08h]
 
@@ -188,12 +304,40 @@ class KeyboardCameraMotionCompiler:
         code += bytes.fromhex("d9 45 10")  # fld dword [ebp+10h]
         code += b"\xd8\x0d" + struct.pack("<I", factor_va)
         code += bytes.fromhex("83 ff 02")  # cmp edi,2
-        code.jump_if(Condition.NOT_EQUAL, "vertical_done")
+        code.jump_if(Condition.NOT_EQUAL, "vertical_translation")
         code += b"\x8b\x15" + struct.pack(
             "<I", self.profile.address("high_resolution_3d.display_height_ptr")
         )
         code += bytes.fromhex("da 0a")  # fimul dword [edx]
         code += b"\xd8\x0d" + struct.pack("<I", inverse_height_va)
+        self._emit_hold_gain(
+            code,
+            section_va=section_va,
+            held_offset=self._off_vertical_held_ms,
+            initial_offset=self._off_rotation_initial_gain,
+            span_offset=self._off_rotation_gain_span,
+        )
+        code.jump("vertical_done")
+        code.label("vertical_translation")
+        # Mode 3 lifts the camera; the other non-pitch modes move forward/back.
+        code += bytes.fromhex("83 ff 03")  # cmp edi,3
+        code.jump_if(Condition.EQUAL, "vertical_lift")
+        self._emit_hold_gain(
+            code,
+            section_va=section_va,
+            held_offset=self._off_vertical_held_ms,
+            initial_offset=self._off_forward_initial_gain,
+            span_offset=self._off_translation_gain_span,
+        )
+        code.jump("vertical_done")
+        code.label("vertical_lift")
+        self._emit_hold_gain(
+            code,
+            section_va=section_va,
+            held_offset=self._off_vertical_held_ms,
+            initial_offset=self._off_lateral_initial_gain,
+            span_offset=self._off_lateral_gain_span,
+        )
         code.label("vertical_done")
         code += bytes.fromhex("d9 5d 10 5a")  # fstp [ebp+10h]; pop edx
 
@@ -224,6 +368,41 @@ class KeyboardCameraMotionCompiler:
             ("first delta", self._off_first_delta_ms, struct.pack("<I", self._first_delta_ms)),
             ("maximum delta", self._off_max_delta_ms, struct.pack("<I", self._max_delta_ms)),
             (
+                "inverse hold ramp duration",
+                self._off_inverse_hold_ramp,
+                struct.pack("<f", 1.0 / self._hold_ramp_ms),
+            ),
+            (
+                "rotation initial gain",
+                self._off_rotation_initial_gain,
+                struct.pack("<f", self._rotation_initial_gain),
+            ),
+            (
+                "rotation gain span",
+                self._off_rotation_gain_span,
+                struct.pack("<f", self._rotation_top_gain - self._rotation_initial_gain),
+            ),
+            (
+                "translation gain span",
+                self._off_translation_gain_span,
+                struct.pack("<f", self._forward_top_gain - self._forward_initial_gain),
+            ),
+            (
+                "lateral initial gain",
+                self._off_lateral_initial_gain,
+                struct.pack("<f", self._lateral_initial_gain),
+            ),
+            (
+                "lateral gain span",
+                self._off_lateral_gain_span,
+                struct.pack("<f", self._lateral_top_gain - self._lateral_initial_gain),
+            ),
+            (
+                "forward initial gain",
+                self._off_forward_initial_gain,
+                struct.pack("<f", self._forward_initial_gain),
+            ),
+            (
                 "keyboard wrapper",
                 self._off_keyboard_wrapper,
                 self._build_keyboard_wrapper(section_va=section_va),
@@ -246,6 +425,12 @@ class KeyboardCameraMotionCompiler:
         # These cells are intentionally mutable and begin at zero. Reserving
         # the complete interval proves that no immutable payload overlaps it.
         section.reserve(label="runtime timing state", offset=self._off_last_tick, size=0x10)
+        section.reserve(
+            label="runtime horizontal hold state", offset=self._off_horizontal_start, size=0x0C
+        )
+        section.reserve(
+            label="runtime vertical hold state", offset=self._off_vertical_start, size=0x0C
+        )
         return section.build()
 
     def _mutation_plan(self, *, section_va: int) -> ExecutableMutationPlan:

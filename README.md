@@ -8,7 +8,7 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 
 - 🖥️ Select modern resolutions from the in-game menu
 - 🗺️ Restored SIDNEY and driving map functionality at modern resolutions
-- ⌨️ Fixed keyboard camera speed to match the 1024×768 reference
+- ⌨️ Improved keyboard camera controls that transition from precise to fast
 - 📐 UI scaled to match the 1024×768 reference
 - 💿 Removed the game's disc drive requirement
 
