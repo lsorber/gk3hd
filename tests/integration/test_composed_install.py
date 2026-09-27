@@ -9,6 +9,7 @@ import pytest
 import gk3hd.install as installation
 from gk3hd.patch.service import PatchRequest
 from gk3hd.textures.install.service import STATE_FILENAME, TextureInstallRequest
+from gk3hd.textures.progress import TextureInstallProgress
 
 
 @pytest.fixture(autouse=True)
@@ -113,3 +114,41 @@ def test_malformed_composite_journal_cannot_authorize_rollback(
     assert not patch.mock_calls
     assert not textures.mock_calls
     assert journal.read_text() == payload
+
+
+def test_composed_install_reports_work_before_texture_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    renderer_adapter: Mock,
+) -> None:
+    exe = tmp_path / "GK3.exe"
+    exe.write_bytes(b"test")
+    renderer_state = tmp_path / installation.RENDERER_STATE_FILENAME
+    texture_state = tmp_path / STATE_FILENAME
+    updates: list[TextureInstallProgress] = []
+
+    def install_renderer(**kwargs: object) -> None:
+        renderer_state.write_text("installed")
+        callback = kwargs["progress"]
+        assert callable(callback)
+        callback(5, 10)
+
+    renderer_adapter.install.side_effect = install_renderer
+    patch = Mock()
+    patch.status.return_value.installed = False
+    patch.verify.return_value.patches = ("example",)
+    monkeypatch.setattr(installation, "PatchService", lambda: patch)
+    textures = Mock()
+    textures.install.side_effect = lambda *_args, **_kwargs: texture_state.write_text("installed")
+    textures.verify.return_value.textures = 1
+    monkeypatch.setattr(installation, "texture_install", textures)
+
+    report = installation.install(
+        PatchRequest(exe=exe), TextureInstallRequest(exe=exe), progress=updates.append
+    )
+
+    assert report.changed
+    assert report.patches == report.textures == 1
+    assert TextureInstallProgress("Downloading renderer", 5, 10, "bytes") in updates
+    assert TextureInstallProgress("Installing patches", 0, 1) in updates
+    assert TextureInstallProgress("Verifying textures", 1, 1) == updates[-1]

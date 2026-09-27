@@ -11,6 +11,7 @@ import pytest
 from gk3hd.patch.install.windows import ConfigurationError, WindowsInstallConfiguration
 from gk3hd.patch.manifest import manifest_path_for_exe
 from gk3hd.renderer import distribution, service
+from gk3hd.renderer.artifact import RendererAsset
 from gk3hd.renderer.service import RendererService
 from gk3hd.renderer.state import JOURNAL_FILENAME, STATE_FILENAME, RendererState
 from tests.unit.patch.test_windows_install_configuration import MemoryRegistry
@@ -78,6 +79,30 @@ def test_install_preserves_unmanaged_renderer(
     with pytest.raises(ValueError, match="unmanaged graphics"):
         renderer.install(exe=exe)
     assert dll.read_bytes() == b"user renderer"
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_local_renderer_reports_complete_byte_progress(
+    environment: tuple[Path, RendererService, MemoryRegistry],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    local: bool,
+) -> None:
+    exe, renderer, _registry = environment
+    candidate = tmp_path / "candidate.dll"
+    payload = candidate.read_bytes()
+    asset = RendererAsset(candidate, "fixture", hashlib.sha256(payload).hexdigest(), len(payload))
+    monkeypatch.setattr(service, "local_build", lambda **_kwargs: asset)
+    records: list[tuple[int, int | None]] = []
+    renderer.install(
+        exe=exe,
+        dll=None if local else candidate,
+        local=local,
+        progress=lambda done, total: records.append((done, total)),
+    )
+    assert records[-1] == (len(payload), len(payload))
+    assert exe.with_name("ddraw.dll").read_bytes() == payload
 
 
 def test_uninstall_preserves_later_registry_edits(

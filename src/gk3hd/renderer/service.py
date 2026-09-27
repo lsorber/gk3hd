@@ -81,6 +81,8 @@ class RendererService:
         if asset is not None and digest != asset.dll_sha256:
             msg = "local renderer changed after build verification"
             raise ValueError(msg)
+        if progress is not None and (local or dll is not None):
+            progress(len(payload), len(payload))
         atomic_write(distribution.cached_path(digest), payload)
         with ExclusiveFileLock(executable_lock_path(target)):
             self._require_stopped()

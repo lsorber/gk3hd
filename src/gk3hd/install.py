@@ -13,6 +13,7 @@ from gk3hd.renderer.state import STATE_FILENAME as RENDERER_STATE_FILENAME
 from gk3hd.system.discovery import discover_game
 from gk3hd.system.files import atomic_write
 from gk3hd.textures.install.service import STATE_FILENAME, TextureInstallRequest
+from gk3hd.textures.progress import report_install_progress
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -101,11 +102,20 @@ def install(
     journal = _CompositeJournal(target.game_dir, patch_existed, textures_existed, renderer_existed)
     journal.write()
     changed = not patch_existed or not textures_existed or not renderer_existed
+
+    def renderer_progress(completed: int, total: int | None) -> None:
+        report_install_progress(progress, "Downloading renderer", completed, total, unit="bytes")
+
     try:
         if not renderer_existed:
-            RendererService().install(exe=target.exe)
+            report_install_progress(progress, "Installing renderer", 0, 1)
+            RendererService().install(exe=target.exe, progress=renderer_progress)
+            report_install_progress(progress, "Installing renderer", 1, 1)
+        report_install_progress(progress, "Verifying renderer", 0, 1)
         RendererService().verify(exe=target.exe)
+        report_install_progress(progress, "Verifying renderer", 1, 1)
         if not patch_existed:
+            report_install_progress(progress, "Installing patches", 0, 1)
             patch_service.install(
                 PatchRequest(
                     exe=target.exe,
@@ -115,6 +125,7 @@ def install(
                     backend=patch_request.backend,
                 )
             )
+            report_install_progress(progress, "Installing patches", 1, 1)
         if not textures_existed:
             texture_install.install(
                 TextureInstallRequest(
@@ -127,8 +138,12 @@ def install(
                 ),
                 progress=progress,
             )
+        report_install_progress(progress, "Verifying patches", 0, 1)
         patch_report = patch_service.verify(exe=target.exe)
+        report_install_progress(progress, "Verifying patches", 1, 1)
+        report_install_progress(progress, "Verifying textures", 0, 1)
         texture_report = texture_install.verify(exe=target.exe)
+        report_install_progress(progress, "Verifying textures", 1, 1)
         journal.path.unlink()
     except BaseException as error:
         try:
