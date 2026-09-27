@@ -202,6 +202,24 @@ index 3ca884d..ad22956 100644
      m_commonD3DDevice->SetInScene(true);
 
      return D3D_OK;
+@@ -1902,6 +1903,7 @@ namespace dxvk {
+
+       if (likely(m_textures[stage] != nullptr)) {
+         m_textures[stage] = nullptr;
++        m_textureSurfaces[stage] = nullptr;
+
+         if (likely(stage == 0))
+           m_bridge->SetColorKeyState(false);
+@@ -1968,7 +1970,9 @@ namespace dxvk {
+       Logger::err("D3D6Device::SetTexture: Found no valid D3D9 texture");
+     }
+
++    Com<DDraw4Surface, false> retainedSurface = surface4;
+     m_textures[stage] = texture6;
++    m_textureSurfaces[stage] = std::move(retainedSurface);
+
+     return D3D_OK;
+   }
 @@ -2141,15 +2145,17 @@ namespace dxvk {
      // Render target
      m_rt->InitializeOrUploadD3D9();
@@ -222,6 +240,20 @@ index 3ca884d..ad22956 100644
        }
      }
    }
+diff --git a/src/ddraw/d3d6/d3d6_device.h b/src/ddraw/d3d6/d3d6_device.h
+index 8173320..fccfa6a 100644
+--- a/src/ddraw/d3d6/d3d6_device.h
++++ b/src/ddraw/d3d6/d3d6_device.h
+@@ -214,6 +214,9 @@ namespace dxvk {
+     std::vector<D3DTLVERTEX>        m_tlvertexStream;
+
+     // D3D5Texture (aka IDirect3DTexture2) is shared between D3D5 and D3D6
++    // Texture2's private refs do not retain its parent. Parents are declared
++    // first so texture wrappers are released before their surfaces.
++    std::array<Com<DDraw4Surface, false>, ddrawCaps::TextureStageCount> m_textureSurfaces;
+     std::array<Com<D3D5Texture, false>, ddrawCaps::TextureStageCount> m_textures;
+
+     std::array<Com<d3d9::IDirect3DIndexBuffer9>, ddrawCaps::IndexBufferCount> m_ib9;
 diff --git a/src/ddraw/d3d6/d3d6_viewport.cpp b/src/ddraw/d3d6/d3d6_viewport.cpp
 index 8ea6003..0ac8d32 100644
 --- a/src/ddraw/d3d6/d3d6_viewport.cpp
