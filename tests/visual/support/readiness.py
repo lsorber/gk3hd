@@ -52,6 +52,30 @@ _CONSOLE_CHANNEL_GAP: Final = 40
 _CONSOLE_GREEN_MAX: Final = 40
 _CONSOLE_ROW_COVERAGE: Final = 0.45
 _CONSOLE_MIN_ROWS: Final = 3
+_SIDNEY_ORANGE_MIN: Final = 0.06
+_SIDNEY_DARK_MIN: Final = 0.45
+_SIDNEY_BLACK_LEVEL: Final = 25
+_SIDNEY_ORANGE_RED_MIN: Final = 110
+_SIDNEY_ORANGE_GREEN_RANGE: Final = (45, 150)
+_SIDNEY_ORANGE_BLUE_MAX: Final = 90
+_SIDNEY_ORANGE_CHANNEL_GAP: Final = 20
+
+
+def sidney_home_visible(image: Image) -> bool:
+    """Require the amber logo on a black screen, not similarly colored room scenery."""
+    pixels = _normalize_4_3(image).astype(np.int16)[185:595, 192:832]
+    red, green, blue = (pixels[:, :, channel] for channel in range(3))
+    orange = (
+        (red > _SIDNEY_ORANGE_RED_MIN)
+        & (green > _SIDNEY_ORANGE_GREEN_RANGE[0])
+        & (green < _SIDNEY_ORANGE_GREEN_RANGE[1])
+        & (blue < _SIDNEY_ORANGE_BLUE_MAX)
+        & (red - green > _SIDNEY_ORANGE_CHANNEL_GAP)
+    )
+    return bool(
+        orange.mean() >= _SIDNEY_ORANGE_MIN
+        and (pixels.max(axis=2) < _SIDNEY_BLACK_LEVEL).mean() >= _SIDNEY_DARK_MIN
+    )
 
 
 def developer_console_visible(image: Image) -> bool:

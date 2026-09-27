@@ -15,6 +15,7 @@ from tests.visual.support.matrix import (
     _launch_restored_save,
 )
 from tests.visual.support.phases import EMAIL_NOTICE, green_indicator_visible
+from tests.visual.support.readiness import sidney_home_visible
 from tests.visual.support.scenario import _wait_for_visible_room
 from tests.visual.support.special import (
     _INVENTORY_VTABLE,
@@ -46,12 +47,6 @@ if TYPE_CHECKING:
 
 _ENTRY_TIMEOUT = 15.0
 _PAGE_TIMEOUT = 5.0
-_ORANGE_RED_MIN = 110
-_ORANGE_GREEN_MIN = 45
-_ORANGE_GREEN_MAX = 150
-_ORANGE_BLUE_MAX = 90
-_ORANGE_RED_GREEN_DELTA = 20
-_HOME_ORANGE_FRACTION = 0.06
 _PAGE_CHANGE_FRACTION = 0.02
 _STABLE_MEAN_DELTA = 0.5
 _SETTLED_FRAMES = 3
@@ -230,16 +225,8 @@ def wait_for_home(grab: Callable[[], Image.Image]) -> Image.Image:
     while time.monotonic() < deadline:
         frame = grab()
         pixels = _screen_pixels(frame)
-        red, green, blue = pixels[:, :, 0], pixels[:, :, 1], pixels[:, :, 2]
-        orange = (
-            (red > _ORANGE_RED_MIN)
-            & (green > _ORANGE_GREEN_MIN)
-            & (green < _ORANGE_GREEN_MAX)
-            & (blue < _ORANGE_BLUE_MAX)
-            & (red - green > _ORANGE_RED_GREEN_DELTA)
-        )
         if (
-            float(orange.mean()) >= _HOME_ORANGE_FRACTION
+            sidney_home_visible(frame)
             and previous is not None
             and float(np.abs(pixels - previous).mean()) < _STABLE_MEAN_DELTA
         ):

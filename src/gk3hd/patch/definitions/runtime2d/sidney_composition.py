@@ -34,7 +34,7 @@ def build_root_draw_wrapper(
     enable_backdrop: bool,
     draw_target_va: int,
 ) -> bytes:
-    """Enter SIDNEY scope, publish its root, and traverse through the bridge."""
+    """Publish SIDNEY's logical root, then traverse through the fitted bridge."""
     # The original thiscall takes two stack arguments and returns with
     # RET 8.  Preserve ECX across it so the wrapper can close its scope.
     code = X86Emitter(base_va=wrapper_va)
@@ -415,6 +415,17 @@ def build_root_draw_bridge(
     code = X86Emitter(base_va=wrapper_va)
     # Keep GK3's requested damage at the reference mode and select the
     # complete logical SIDNEY region at every other live resolution.
+    # Children are authored at 1024x768, but the native root initially inherits
+    # framebuffer bounds. At 640x480 that rejects inverse-mapped pointer events
+    # in the right/bottom of an otherwise correctly fitted laptop. Keep root
+    # containment in the same persistent model space as all its descendants.
+    for offset, value in (
+        (0x1C, 0),
+        (0x20, 0),
+        (0x24, AUTHORED_FRAME_WIDTH),
+        (0x28, AUTHORED_FRAME_HEIGHT),
+    ):
+        code.raw(b"\xc7\x41" + bytes([offset]) + struct.pack("<I", value))
     code += b"\x8b\x44\x24\x08\x51"
     code.call_absolute(damage_selector_va)
     code += b"\x59"

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from unicorn import UC_ARCH_X86, UC_HOOK_CODE, UC_MODE_32, Uc
-from unicorn.x86_const import UC_X86_REG_EAX, UC_X86_REG_ECX, UC_X86_REG_EIP, UC_X86_REG_ESP
+from unicorn.x86_const import UC_X86_REG_EAX, UC_X86_REG_ECX, UC_X86_REG_ESP
 
 from gk3hd.patch.builds import GOG_BUILD
 from gk3hd.patch.definitions.guard_stale_mouse_move_targets import MouseMoveDispatchABI
@@ -68,7 +68,7 @@ def _exercise() -> None:
         system_input_wrapper_va=STOP,
         toolbar_input_wrapper_va=STOP,
         reference_anchor_input_wrapper_va=STOP,
-        reference_canvas_input_wrapper_va=STOP,
+        reference_canvas_input_wrapper_va=CALLBACK + 0x100,
         binocs_input_wrapper_va=STOP,
         system_action_presented_root_va=STATE + 96,
         system_native_input_vtables=(),
@@ -80,6 +80,7 @@ def _exercise() -> None:
     current = GOG_BUILD.address("ui.current_layer")
     cpu.mem_write(current, b"\xc3")
     cpu.mem_write(CALLBACK, b"\xc2\x04\x00")
+    cpu.mem_write(CALLBACK + 0x100, b"\xb8\xc8\x01\x00\x00\xc2\x04\x00")
     seen: list[tuple[int, int]] = []
     layer = ROOT
 
@@ -98,15 +99,14 @@ def _exercise() -> None:
             machine.reg_write(UC_X86_REG_EAX, 789)
 
     cpu.hook_add(UC_HOOK_CODE, native)
-    for width, height in ((1024, 768), (1280, 800), (3840, 2160)):
+    for width, height in ((640, 480), (800, 600), (1024, 768), (1280, 800), (3840, 2160)):
         for layer in (ROOT, ROOT + 0x100):
             for icon_size in (0, 32, 64):
-                action = bool(icon_size)
                 cpu.mem_write(STATE, bytes(128))
                 _write(cpu, STATE, ROOT)
                 # The overlay publishes physical button rectangles; only
                 # dense icons need the local opacity lookup adjustment.
-                _write(cpu, STATE + 96, ROOT + 0x100 if action else 0)
+                _write(cpu, STATE + 96, ROOT + 0x100 if icon_size else 0)
                 _write(cpu, STATE + 64, icon_size)
                 _write(cpu, STATE + 80, 320)
                 _write(cpu, ROOT + 0x100 + 0x1C, 720, 320, 848, 384)
@@ -117,26 +117,81 @@ def _exercise() -> None:
                 cpu.reg_write(UC_X86_REG_EAX, CALLBACK)
                 cpu.reg_write(UC_X86_REG_ECX, 123)
                 cpu.emu_start(BASE, STOP, count=1000)
-                assert cpu.reg_read(UC_X86_REG_EIP) == STOP
                 assert cpu.reg_read(UC_X86_REG_ESP) == STACK + 8
                 assert cpu.reg_read(UC_X86_REG_EAX) == 789
                 assert struct.unpack("<2I", cpu.mem_read(POINT, 8)) == (786, 365), (
                     width,
                     height,
                     layer,
-                    action,
+                    icon_size,
                     seen[-1],
                     struct.unpack("<2I", cpu.mem_read(POINT, 8)),
                 )
-                if layer == ROOT and (width > 1024 or height > 768):
+                if layer == ROOT:
                     offset = (width - height * 4 // 3) // 2
                     assert seen[-1] == (int((786 - offset) * 768 / height), 365 * 768 // height)
                 elif icon_size == 64 and (width > 1024 or height > 768):
                     assert seen[-1] == (785, 342)
                 else:
                     assert seen[-1] == (786, 365)
-    assert len(seen) == 18
+    # A retained SIDNEY cannot take an active modal's input, regardless of
+    # where its ownership query appears in the generated dispatcher.
+    _exercise_modal(compiler, cpu, ROOT + 0x100)
     _exercise_map(compiler, cpu, seen)
+    _exercise_action_positions(compiler, cpu, seen)
+
+
+def _exercise_action_positions(
+    compiler: SidneyPresentationCompiler, cpu: Uc, seen: list[tuple[int, int]]
+) -> None:
+    """Icon opacity sampling stays local at either screen edge or the center."""
+    action_root = ROOT + 0x100
+    for width, height in ((1280, 800), (1920, 1080), (3840, 2160)):
+        size = (32 * height + 384) // 768
+        menu_width = 5 * size
+        origins = (
+            (0, 0),
+            ((width - menu_width) // 2, height // 2),
+            (width - menu_width, height - size),
+        )
+        for left, top in origins:
+            cpu.mem_write(STATE, bytes(128))
+            _write(cpu, compiler._physical_width_global_va, width, height)
+            _write(cpu, STATE + 96, action_root)
+            _write(cpu, STATE + 64, size)
+            _write(cpu, STATE + 80, top)
+            _write(cpu, action_root + 0x1C, left, top, left + menu_width, top + size)
+            for index, local in ((0, 1), (0, size - 1), (4, 1), (4, size - 1)):
+                button_left = left + index * size
+                point = (button_left + local, top + local)
+                _write(cpu, POINT, *point)
+                _write(cpu, STACK, STOP, POINT)
+                cpu.reg_write(UC_X86_REG_ESP, STACK)
+                cpu.reg_write(UC_X86_REG_EAX, CALLBACK)
+                cpu.reg_write(UC_X86_REG_ECX, 123)
+                cpu.emu_start(BASE, STOP, count=1000)
+                expected_local = local * 32 // size
+                assert seen[-1] == (button_left + expected_local, top + expected_local)
+                assert struct.unpack("<2I", cpu.mem_read(POINT, 8)) == point
+                assert cpu.reg_read(UC_X86_REG_ESP) == STACK + 8
+                assert cpu.reg_read(UC_X86_REG_EAX) == 789
+
+
+def _exercise_modal(compiler: SidneyPresentationCompiler, cpu: Uc, layer: int) -> None:
+    for width, height in ((1280, 800), (3840, 2160)):
+        cpu.mem_write(STATE, bytes(128))
+        _write(cpu, STATE, ROOT)
+        _write(cpu, STATE + 44, 1, layer, 6)
+        _write(cpu, compiler._physical_width_global_va, width, height)
+        _write(cpu, POINT, 300, 200)
+        _write(cpu, STACK, STOP, POINT)
+        cpu.reg_write(UC_X86_REG_ESP, STACK)
+        cpu.reg_write(UC_X86_REG_EAX, CALLBACK)
+        cpu.reg_write(UC_X86_REG_ECX, 123)
+        cpu.emu_start(BASE, STOP, count=1000)
+        assert cpu.reg_read(UC_X86_REG_EAX) == 456  # modal adapter, not SIDNEY
+        assert cpu.reg_read(UC_X86_REG_ESP) == STACK + 8
+        assert struct.unpack("<2I", cpu.mem_read(POINT, 8)) == (300, 200)
 
 
 def _exercise_map(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import struct
 
 from gk3hd.patch.binary.x86 import Condition, X86Emitter
+from gk3hd.patch.definitions.runtime2d.geometry import AUTHORED_FRAME_HEIGHT, AUTHORED_FRAME_WIDTH
 from gk3hd.patch.definitions.runtime2d.map_overview import emit_overview_source
 from gk3hd.textures.native_bmp import PAIRED_UI_COLOR_SIZES
 from gk3hd.textures.upscale.fingerprint import INVENTORY_FINGERPRINT_SIZES
@@ -519,7 +520,14 @@ def build_surface_match(
 
 
 def build_high_dimensions(
-    *, wrapper_va: int, surface_match_va: int, original: bytes, return_va: int
+    *,
+    wrapper_va: int,
+    surface_match_va: int,
+    original: bytes,
+    return_va: int,
+    sidney_depth_va: int,
+    physical_width_va: int,
+    cursor_classifier_va: int,
 ) -> bytes:
     """Clip named borders in logical space before GK3 derives destination extents.
 
@@ -536,6 +544,23 @@ def build_high_dimensions(
     code.jump_if(Condition.ABOVE_OR_EQUAL, "done")
     code.raw(b"\xc1\xf8\x02\xc1\xf9\x02")
     code.label("done")
+    # SIDNEY's model is always 1024x768, even on smaller framebuffers. Clip
+    # in that model before the final blitter applies the presentation affine;
+    # physical clipping here permanently discards the right/bottom artwork.
+    # Only alter call-local bounds, never the underlying surface dimensions.
+    code.raw(b"\x60\x83\x3d" + struct.pack("<I", sidney_depth_va) + b"\x00")
+    code.jump_if(Condition.EQUAL, "physical_clip")
+    for offset, address in ((0x38, physical_width_va), (0x3C, physical_width_va + 4)):
+        code.raw(b"\xa1" + struct.pack("<I", address) + b"\x39\x47" + bytes([offset]))
+        code.jump_if(Condition.NOT_EQUAL, "physical_clip")
+    code.raw(b"\x8b\xcf\x8b\xd3\x31\xf6")
+    code.call_absolute(cursor_classifier_va)
+    code.raw(b"\x85\xc0")
+    code.jump_if(Condition.NOT_EQUAL, "physical_clip")
+    code.raw(b"\xc7\x45\xa4" + struct.pack("<I", AUTHORED_FRAME_WIDTH))
+    code.raw(b"\xc7\x45\xa8" + struct.pack("<I", AUTHORED_FRAME_HEIGHT))
+    code.label("physical_clip")
+    code.raw(b"\x61")
     code.raw(b"\x9d")
     code.jump_absolute(return_va)
     return code.build()

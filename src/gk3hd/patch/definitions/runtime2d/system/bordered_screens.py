@@ -10,6 +10,9 @@ from gk3hd.patch.binary.mutations import ExecutableMutationPlan
 from gk3hd.patch.binary.payload import SegmentPayloadBuilder
 from gk3hd.patch.binary.x86 import BranchOpcode, Condition, X86Emitter
 from gk3hd.patch.definitions.runtime2d.layout import (
+    SIDNEY_DRAW_DEPTH_OFFSET,
+    SIDNEY_PRESENTATION_SEGMENT,
+    SYSTEM_CONTROL_CURSOR_CLASSIFIER_OFFSET,
     SYSTEM_CONTROL_SEGMENT,
     SYSTEM_SEGMENT,
     UI_FRAMES_DIMENSIONS_OFFSET,
@@ -129,6 +132,13 @@ class BorderedScreenFeatureCompiler(SystemCompilerContext):
                     surface_match_va=base + _BLIT_MATCH,
                     original=high_site.original,
                     return_va=high_site.va + len(high_site.original),
+                    sidney_depth_va=self.symbols.va(
+                        SIDNEY_PRESENTATION_SEGMENT.logical_name, SIDNEY_DRAW_DEPTH_OFFSET
+                    ),
+                    physical_width_va=self._physical_width_va,
+                    cursor_classifier_va=self.symbols.va(
+                        SYSTEM_CONTROL_SEGMENT.logical_name, SYSTEM_CONTROL_CURSOR_CLASSIFIER_OFFSET
+                    ),
                 ),
                 UI_FRAMES_SOURCE_OFFSET,
             ),

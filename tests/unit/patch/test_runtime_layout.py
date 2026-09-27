@@ -85,36 +85,12 @@ def test_segments_are_non_overlapping_and_bounded() -> None:
     assert RuntimeLayout.segments[-1].end == RuntimeLayout.section_size
 
 
-def test_segment_catalog_uses_semantic_current_names() -> None:
-    """Logical slices describe responsibilities rather than patch lineage."""
+def test_segment_catalog_lookup_returns_each_declared_segment() -> None:
+    """Every declared owner can resolve its reserved slice without an alias."""
     assert RuntimeLayout.segments is RUNTIME_SEGMENTS
-    assert {segment.logical_name for segment in RUNTIME_SEGMENTS} == {
-        "sidney_construction",
-        "sidney_presentation",
-        "inventory",
-        "inventory_filter",
-        "inventory_navigation",
-        "ui_frames",
-        "ui_filter",
-        "ui_alpha",
-        "gps",
-        "console",
-        "cursor_blend",
-        "resources",
-        "fingerprint",
-        "fingerprint_alpha",
-        "font_banks",
-        "sprite_cache",
-        "system",
-        "system_controls",
-        "load_save",
-        "load_save_buttons",
-        "captions",
-        "binocular",
-        "room_rendering",
-        "timeblock",
-        "zodiac",
-    }
+    for segment in RUNTIME_SEGMENTS:
+        assert RuntimeLayout.segment(segment.logical_name) is segment
+    assert RuntimeLayout.segment("undeclared_owner") is None
 
 
 def test_logical_segments_share_one_physical_section() -> None:

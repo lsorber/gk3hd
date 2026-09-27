@@ -553,7 +553,17 @@ def build_input_dispatch_wrapper(
     # section VA to every call target (for example 0x00474B2D became
     # 0x00BB5F2D at runtime during Restore).
     code = X86Emitter(base_va=wrapper_va)
-    # Most authored-framebuffer interfaces need no inverse. TimeBlock is the
+    # SIDNEY always constructs a 1024x768 model, including in smaller modes.
+    # Admit its current root before the native-small-mode shortcut. Retained
+    # SIDNEY beneath Inventory must not steal that overlay's pointer events.
+    code += b"\x83\x3d" + struct.pack("<I", root_ptr_va) + b"\x00"
+    code.jump_if(Condition.EQUAL, "sidney_not_current")
+    code += b"\x50\x51"
+    code.call_absolute(owner._current_layer_va)
+    code += b"\x3b\x05" + struct.pack("<I", root_ptr_va) + b"\x59\x58"
+    code.jump_if(Condition.EQUAL, "sidney_transform")
+    code.label("sidney_not_current")
+    # Other authored-framebuffer interfaces need no inverse. TimeBlock is the
     # exception: dense backgrounds retain a larger persistent model, and Draw
     # only temporarily translates its children into authored space. At 1024,
     # consult that exact live owner without entering transient system roots.
@@ -577,15 +587,6 @@ def build_input_dispatch_wrapper(
     code += b"\x3b\x05" + struct.pack("<I", system_root_ptr_va) + b"\x59\x58"
     code.jump_if(Condition.EQUAL, "system_dispatch")
     code.label("retained_roots")
-    code += b"\x83\x3d" + struct.pack("<I", root_ptr_va) + b"\x00"
-    code.jump_if(Condition.EQUAL, "sidney_not_current")
-    # Add Data retains SIDNEY underneath Inventory. Its inverse must not
-    # remap Inventory's already-physical ActionMenu button rectangles.
-    code += b"\x50\x51"
-    code.call_absolute(owner._current_layer_va)
-    code += b"\x3b\x05" + struct.pack("<I", root_ptr_va) + b"\x59\x58"
-    code.jump_if(Condition.EQUAL, "sidney_transform")
-    code.label("sidney_not_current")
 
     code += b"\x83\x3d" + struct.pack("<I", driving_map_active_va) + b"\x00"
     code.jump_if(Condition.NOT_EQUAL, "map_transform")

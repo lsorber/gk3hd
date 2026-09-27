@@ -347,6 +347,9 @@ def test_high_blitter_clips_logical_source_and_preserves_native_destination_and_
         surface_match_va=0x810000,
         original=site.original,
         return_va=site.va + len(site.original),
+        sidney_depth_va=0x820000,
+        physical_width_va=0x820004,
+        cursor_classifier_va=0x830000,
     )
     instructions = _disassemble(payload, 0x100)
     assert payload.startswith(b"\x9c" + site.original + b"\x50\x8b\xc3")

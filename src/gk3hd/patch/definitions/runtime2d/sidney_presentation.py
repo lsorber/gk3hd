@@ -25,6 +25,7 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SIDNEY_ALPHA_CONSTRUCTOR_OFFSET,
     SIDNEY_BUTTON_DISPATCH_ADAPTER_OFFSET,
     SIDNEY_CONSTRUCTION_SEGMENT,
+    SIDNEY_DRAW_DEPTH_OFFSET,
     SIDNEY_DRIVING_MAP_INPUT_DEPTH_OFFSET,
     SIDNEY_FINGERPRINT_STATE_OFFSET,
     SIDNEY_FRAME_SOURCE_OFFSET,
@@ -138,7 +139,7 @@ class SidneyPresentationCompiler:
     _off_layout_version: ClassVar[int] = 0x08
     _layout_version: ClassVar[int] = 102
 
-    _off_active_depth: ClassVar[int] = 0x0C
+    _off_active_depth: ClassVar[int] = SIDNEY_DRAW_DEPTH_OFFSET
     _off_toolbar_input_depth: ClassVar[int] = SIDNEY_TOOLBAR_INPUT_DEPTH_OFFSET
     _off_transformed_blit_count: ClassVar[int] = 0x1C
     _off_root_draw_wrapper: ClassVar[int] = 0x20

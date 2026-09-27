@@ -9,12 +9,28 @@ from tests.visual.support.readiness import (
     frame_mean_absolute_difference,
     restore_browser_visible,
     restore_dialog_visible,
+    sidney_home_visible,
     startup_escape_safe,
     timeblock_complete,
     title_play_center,
     title_ready,
     title_restore_center,
 )
+
+
+@pytest.mark.parametrize("size", [(1024, 768), (1280, 800), (3840, 2160)])
+def test_sidney_requires_logo_and_dark_application_background(size: tuple[int, int]) -> None:
+    frame = Image.new("RGB", (1024, 768), (120, 85, 45))
+    draw = ImageDraw.Draw(frame)
+    draw.rectangle((192, 185, 831, 594), fill="black")
+    draw.ellipse((365, 255, 660, 550), fill=(180, 100, 20))
+    canvas = Image.new("RGB", size, "black")
+    width = round(size[1] * 4 / 3)
+    canvas.paste(frame.resize((width, size[1])), ((size[0] - width) // 2, 0))
+    assert sidney_home_visible(canvas)
+    # A room full of wood can satisfy the orange test, but is not the computer.
+    assert not sidney_home_visible(Image.new("RGB", size, (120, 85, 45)))
+    assert not sidney_home_visible(Image.new("RGB", size, "black"))
 
 
 @pytest.mark.parametrize("size", [(1024, 768), (3840, 2160)])
