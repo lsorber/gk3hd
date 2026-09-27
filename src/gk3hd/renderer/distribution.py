@@ -198,6 +198,7 @@ def config_bytes(*, executable_name: str, previous: bytes = b"") -> bytes:
             b"ddraw.legacyPresentGuard = Strict",
             b"ddraw.cpuRenderTargetBacking = True",
             b"d3d9.presentInterval = 0",
+            b'dxvk.shaderCompilationMethod = "none"',
             b"",
         )
     )

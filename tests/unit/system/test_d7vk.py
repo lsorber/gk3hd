@@ -11,10 +11,12 @@ def test_d7vk_policy_preserves_other_sections_and_is_idempotent(newline: bytes) 
         (
             b"# player settings",
             b"d3d9.presentInterval = 1",
+            b'dxvk.shaderCompilationMethod = "dyasync"',
             b"[GK3.exe]",
             b"ddraw.forceLegacyPresent = False",
             b"[Other.exe]",
             b"d3d9.presentInterval = 2",
+            b'dxvk.shaderCompilationMethod = "async"',
         )
     )
     result = config_bytes(executable_name="GK3.exe", previous=previous)
@@ -25,6 +27,7 @@ def test_d7vk_policy_preserves_other_sections_and_is_idempotent(newline: bytes) 
     assert b"ddraw.legacyPresentGuard = Strict" + newline in block
     assert b"ddraw.cpuRenderTargetBacking = True" + newline in block
     assert b"d3d9.presentInterval = 0" + newline in block
+    assert b'dxvk.shaderCompilationMethod = "none"' + newline in block
     assert config_bytes(executable_name="GK3.exe", previous=result) == result
 
 
