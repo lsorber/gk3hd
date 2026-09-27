@@ -24,7 +24,7 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 
 ### Performance and compatibility improvements
 
-- ⚡ Modern Vulkan rendering with an improved [D7VK](https://github.com/WinterSnowfall/d7vk) build
+- ⚡ Modern Vulkan rendering with a GK3-tuned [DXVK-Sarek](https://github.com/pythonlover02/dxvk-sarek) build
 - 🚀 Faster high-resolution rendering with fewer readbacks and less overhead
 - 🧩 Support for the Steam and GOG editions
 - 🐧 Experimental Linux and Steam Deck support through Proton
@@ -75,7 +75,7 @@ changing the game.
 
 ### Build and install the renderer
 
-Install the published renderer independently, or build our modified D7VK locally:
+Install the published renderer independently, or build our modified DXVK-Sarek renderer locally:
 
 ```sh
 uvx gk3hd renderer build            # Download source, build and test in `<GAME>/gk3hd/renderer/`

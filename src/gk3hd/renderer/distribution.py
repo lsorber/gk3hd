@@ -32,7 +32,10 @@ DLL_SHA256 = release_lock()["dll_sha256"]
 VERSION = release_lock()["version"]
 _FIRST_PRINTABLE_ASCII = 32
 REPOSITORY = "lsorber/gk3hd"
-ASSET_NAME = re.compile(r"d7vk-([0-9]+(?:\.[0-9]+){1,2}-gk3hd\.[0-9]+)\.dll")
+# Identify our renderer build convention, independently of the upstream project.
+ASSET_NAME = re.compile(
+    r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*-([0-9]+(?:\.[0-9]+){1,2}-gk3hd\.[0-9]+)\.dll"
+)
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _PAGE_SIZE = 100
 _MAX_PAGES = 100

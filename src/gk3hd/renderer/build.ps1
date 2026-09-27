@@ -46,11 +46,15 @@ if (Test-Path -LiteralPath $output) { throw "Output already exists; choose a fre
 New-Item -ItemType Directory -Path $output | Out-Null
 $source = Join-Path $output 'source'
 $build = Join-Path $output 'build'
+$sourcePatch = Join-Path $output 'renderer.patch'
+# Git may check out the recipe with CRLF; git apply needs an LF-only diff.
+[IO.File]::WriteAllText($sourcePatch, [IO.File]::ReadAllText($patch).Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
 $shaderArchive = Join-Path $output 'glslang.zip'
 $shaderRoot = Join-Path $output 'glslang'
 $oldPath = $env:PATH
 $oldConfig = $env:DXVK_CONFIG_FILE
 $oldLogPath = $env:D7VK_LOG_PATH
+$oldDxvkLogPath = $env:DXVK_LOG_PATH
 $oldCl = $env:CL
 try {
     # Preserve assertions while making their __FILE__ paths independent of
@@ -64,8 +68,8 @@ try {
     if ($submodules | Where-Object { $_ -notmatch '^ [0-9a-f]{40} ' }) {
         throw 'An upstream submodule does not match its recorded commit.'
     }
-    Invoke-Checked git @('-C', $source, 'apply', '--check', $patch)
-    Invoke-Checked git @('-C', $source, 'apply', $patch)
+    Invoke-Checked git @('-C', $source, 'apply', '--check', $sourcePatch)
+    Invoke-Checked git @('-C', $source, 'apply', $sourcePatch)
     Invoke-WebRequest -Uri $pin.glslang_url -OutFile $shaderArchive
     Assert-Hash $shaderArchive $pin.glslang_archive_sha256
     Expand-Archive -LiteralPath $shaderArchive -DestinationPath $shaderRoot
@@ -76,9 +80,11 @@ try {
         '-Denable_ddraw=true', '-Denable_d3d9=true', '-Denable_dxgi=false', '-Denable_d3d8=false',
         '-Denable_d3d10=false', '-Denable_d3d11=false', '-Dbuild_id=false',
         "-Dgk3hd_version=v$($pin.version)"))
-    $buildEnv = Get-Content -LiteralPath (Join-Path $build 'buildenv.h') -Raw
-    if (-not $buildEnv.Contains('DXVK_TARGET "x86"') -or
-        -not $buildEnv.Contains("DXVK_COMPILER_VERSION `"$($pin.msvc)`"")) {
+    $machines = Get-Content -LiteralPath (Join-Path $build 'meson-info/intro-machines.json') -Raw | ConvertFrom-Json
+    $compilers = Get-Content -LiteralPath (Join-Path $build 'meson-info/intro-compilers.json') -Raw | ConvertFrom-Json
+    if ($machines.host.cpu_family -ne 'x86' -or $machines.host.system -ne 'windows' -or
+        $compilers.host.cpp.id -ne 'msvc' -or $compilers.host.cpp.version -ne $pin.msvc -or
+        $compilers.host.c.id -ne 'msvc' -or $compilers.host.c.version -ne $pin.msvc) {
         throw "The compiler must be x86 MSVC $($pin.msvc); see upstream.json."
     }
     Invoke-Checked uvx ($meson + @('compile', '-C', $build, '-j', "$Jobs", 'ddraw'))
@@ -137,11 +143,14 @@ try {
         '/link', 'dxguid.lib', 'user32.lib', 'gdi32.lib')
     $env:DXVK_CONFIG_FILE = Join-Path $PSScriptRoot 'tests/dxvk.conf'
     $env:D7VK_LOG_PATH = $output
+    $env:DXVK_LOG_PATH = $output
     Invoke-Checked $test @($dll)
     foreach ($unit in @('region_tests', 'check_lock_regions', 'check_baseline_damage', 'check_native_copy', 'check_stretch', 'check_area_blend', 'check_area_blt')) {
         $unitExe = Join-Path $output "$unit.exe"
         Invoke-Checked cl @('/nologo', '/std:c++17', '/EHsc', '/O2',
             (Join-Path $PSScriptRoot "tests/$unit.cpp"), "/I$(Join-Path $source 'src/ddraw')",
+            "/I$(Join-Path $source 'include/vulkan/include')",
+            "/I$(Join-Path $source 'include/spirv/include')",
             "/Fe:$unitExe", "/Fo:$(Join-Path $output "$unit.obj")", # codespell:ignore fo
             '/link', 'ddraw.lib', 'dxguid.lib', 'user32.lib', 'gdi32.lib')
         if ($unit -in @('check_area_blend', 'check_area_blt')) { Invoke-Checked $unitExe @($dll) }
@@ -151,24 +160,17 @@ try {
     # Package only after the freshly compiled native tests pass. No game files.
     Assert-Hash $patch $patchHash
     Assert-Hash (Join-Path $PSScriptRoot 'upstream.json') $pinHash
-    $name = "d7vk-$($pin.version)"
+    $name = "dxvk-sarek-$($pin.version)"
     $releaseDll = Join-Path $output "$name.dll"
     $notices = Join-Path $output "$name.txt"
     Copy-Item -LiteralPath $dll -Destination $releaseDll
-    $licenses = @{
-        'D7VK.txt' = 'LICENSE'
-        'dxbc-spirv.txt' = 'subprojects/dxbc-spirv/LICENSE'
-        'libdisplay-info.txt' = 'subprojects/libdisplay-info/LICENSE'
-        'SPIRV-Headers.txt' = 'include/spirv/LICENSE'
-        'dxbc-SPIRV-Headers.txt' = 'subprojects/dxbc-spirv/submodules/spirv_headers/LICENSE'
-        'Vulkan-Headers.txt' = 'include/vulkan/LICENSE.md'
-        'Vulkan-MIT.txt' = 'include/vulkan/LICENSES/MIT.txt'
-        'Vulkan-Apache-2.0.txt' = 'include/vulkan/LICENSES/Apache-2.0.txt'
-        'OpenVR.txt' = 'include/openvr/LICENSE'
-    }
-    $noticeText = "Modified D7VK for GK3HD. Source and modifications: https://github.com/lsorber/gk3hd/tree/main/src/gk3hd/renderer`n"
-    foreach ($license in ($licenses.GetEnumerator() | Sort-Object Key)) {
-        $noticeText += "`n=== $($license.Key) ===`n"
+    $licenses = @($pin.licenses.PSObject.Properties | Sort-Object Name)
+    if (-not $licenses.Count) { throw 'The recipe must declare its third-party notices.' }
+    $noticeText = "Modified DXVK-Sarek (D7VK-derived) for GK3HD. Source and modifications: https://github.com/lsorber/gk3hd/tree/main/src/gk3hd/renderer`n"
+    # Preserve notices for code carried from our previous D7VK base, too.
+    $noticeText += "`n" + (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Raw)
+    foreach ($license in $licenses) {
+        $noticeText += "`n=== $($license.Name) ===`n"
         $noticeText += Get-Content -LiteralPath (Join-Path $source $license.Value) -Raw
     }
     Set-Content -LiteralPath $notices -Value $noticeText -Encoding utf8NoBOM
@@ -181,7 +183,7 @@ try {
         meson = $pin.meson
         ninja = $pin.ninja
         source_path_mapping = 'gk3hd-build'
-        patch_sha256 = (Get-FileHash -LiteralPath $patch).Hash.ToLowerInvariant()
+        patch_sha256 = (Get-FileHash -LiteralPath $sourcePatch).Hash.ToLowerInvariant()
         dll_sha256 = (Get-FileHash -LiteralPath $dll).Hash.ToLowerInvariant()
         notices_sha256 = (Get-FileHash -LiteralPath $notices).Hash.ToLowerInvariant()
         surface_tests = 'passed'
@@ -193,5 +195,6 @@ try {
     $env:PATH = $oldPath
     $env:DXVK_CONFIG_FILE = $oldConfig
     $env:D7VK_LOG_PATH = $oldLogPath
+    $env:DXVK_LOG_PATH = $oldDxvkLogPath
     $env:CL = $oldCl
 }

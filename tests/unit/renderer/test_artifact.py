@@ -20,12 +20,13 @@ def renderer_dll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     recipe = tmp_path / "recipe"
     recipe.mkdir()
     pin = {
-        "version": "2.2-gk3hd.3",
+        "version": "1.13.0-gk3hd.1",
         "commit": "a" * 40,
         "msvc": "1",
         "windows_sdk": "2",
         "meson": "3",
         "ninja": "4",
+        "licenses": {"Renderer.txt": "LICENSE", "Headers.txt": "include/LICENSE"},
     }
     patch = b"synthetic source patch\n"
     dll = bytearray(256)
@@ -34,9 +35,9 @@ def renderer_dll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dll[64:68] = b"PE\0\0"
     for offset, value in ((68, 0x14C), (86, 0x2000), (88, 0x10B)):
         struct.pack_into("<H", dll, offset, value)
-    path = tmp_path / f"d7vk-{pin['version']}.dll"
+    path = tmp_path / f"dxvk-sarek-{pin['version']}.dll"
     path.write_bytes(dll)
-    notices = "\n".join(f"=== {name} ===\nTest notice" for name in artifact._LICENSES).encode()
+    notices = b"=== Renderer.txt ===\nRenderer notice\n=== Headers.txt ===\nHeaders notice\n"
     path.with_suffix(".txt").write_bytes(notices)
     build = {
         "version": pin["version"],
@@ -59,7 +60,7 @@ def renderer_dll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_direct_dll_lock_and_all_uploads(renderer_dll: Path) -> None:
     asset = artifact.inspect_dll(renderer_dll)
     lock = asset.lock("v1.0")
-    assert lock["asset_url"].endswith("/v1.0/d7vk-2.2-gk3hd.3.dll")
+    assert lock["asset_url"].endswith(f"/v1.0/{renderer_dll.name}")
     assert lock["dll_sha256"] == hashlib.sha256(renderer_dll.read_bytes()).hexdigest()
     assert int(lock["dll_size"]) == renderer_dll.stat().st_size
     assert artifact.release_target(lock) == ("lsorber/gk3hd", "v1.0", renderer_dll.name)
@@ -71,6 +72,35 @@ def test_direct_dll_lock_and_all_uploads(renderer_dll: Path) -> None:
     asset.verify_unchanged()
     with pytest.raises(ValueError, match=r"invalid.*tag"):
         asset.lock("../latest")
+
+
+def test_renderer_rejects_old_prefix_for_a_new_build(renderer_dll: Path) -> None:
+    wrong_name = renderer_dll.with_name(renderer_dll.name.replace("dxvk-sarek-", "d7vk-"))
+    renderer_dll.rename(wrong_name)
+    with pytest.raises(ValueError, match="expected the build recipe's dxvk-sarek-"):
+        artifact.inspect_dll(wrong_name)
+
+
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"])
+def test_renderer_verification_accepts_equivalent_patch_line_endings(
+    renderer_dll: Path, line_ending: bytes
+) -> None:
+    patch = artifact._TOOLS / "renderer.patch"
+    original = artifact.inspect_dll(renderer_dll)
+    patch.write_bytes(patch.read_bytes().replace(b"\n", line_ending))
+    assert artifact.inspect_dll(renderer_dll) == original
+    patch.write_bytes(b"different source patch" + line_ending)
+    with pytest.raises(ValueError, match="provenance"):
+        artifact.inspect_dll(renderer_dll)
+
+
+def test_published_baseline_keeps_its_original_asset_identity() -> None:
+    lock = json.loads(
+        artifact._TOOLS.parent.joinpath("assets/d7vk-lock.json").read_text(encoding="utf-8")
+    )
+    repository, tag, filename = artifact.release_target(lock)
+    assert repository == lock["repository"]
+    assert lock["asset_url"].endswith(f"/{tag}/{filename}")
 
 
 @pytest.mark.parametrize(
@@ -98,6 +128,26 @@ def test_renderer_rejects_mismatched_provenance(renderer_dll: Path, field: str) 
 def test_renderer_requires_companions(renderer_dll: Path, suffix: str) -> None:
     renderer_dll.with_suffix(suffix).unlink()
     with pytest.raises(FileNotFoundError):
+        artifact.inspect_dll(renderer_dll)
+
+
+def test_renderer_requires_every_declared_notice(renderer_dll: Path) -> None:
+    notices = renderer_dll.with_suffix(".txt")
+    notices.write_text("=== Renderer.txt ===\nRenderer notice\n")
+    provenance = renderer_dll.with_suffix(".json")
+    build = json.loads(provenance.read_text())
+    build["notices_sha256"] = hashlib.sha256(notices.read_bytes()).hexdigest()
+    provenance.write_text(json.dumps(build))
+    with pytest.raises(ValueError, match="missing required third-party"):
+        artifact.inspect_dll(renderer_dll)
+
+
+def test_renderer_refuses_undeclared_notices(renderer_dll: Path) -> None:
+    recipe = artifact._TOOLS / "upstream.json"
+    pin = json.loads(recipe.read_text())
+    pin["licenses"] = {}
+    recipe.write_text(json.dumps(pin))
+    with pytest.raises(ValueError, match="must declare"):
         artifact.inspect_dll(renderer_dll)
 
 

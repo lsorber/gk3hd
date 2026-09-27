@@ -87,8 +87,10 @@ lives in the selected game's renderer workspace, so `install --local` can find i
 from any current directory.
 The `latest.json` record identifies the last successful build for installation
 and release commands. Interrupted/incomplete directories are never overwritten.
-The outputs are `d7vk-VERSION.dll`, `d7vk-VERSION.txt` (third-party notices), and
-`d7vk-VERSION.json` (build provenance). Use `gk3hd package draft --renderer`;
+The outputs are `dxvk-sarek-VERSION.dll`, `dxvk-sarek-VERSION.txt` (third-party notices), and
+`dxvk-sarek-VERSION.json` (build provenance), where `VERSION` includes the upstream
+version and our modification revision (currently `1.13.0-gk3hd.1`).
+Use `gk3hd package draft --renderer`;
 the release tool verifies and uploads all three files separately. The reviewed
 source patch stays in this repository at the release tag. Only the DLL is
 downloaded by the installer and installed as `ddraw.dll`; there is no renderer ZIP

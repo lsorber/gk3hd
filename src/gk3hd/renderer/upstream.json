@@ -1,13 +1,21 @@
 {
-  "version": "2.2-gk3hd.8",
-  "repository": "https://github.com/WinterSnowfall/d7vk.git",
-  "tag": "v2.2",
-  "commit": "ce4a34948b72b1c6b27576e04a0f22ae155d674c",
+  "version": "1.13.0-gk3hd.1",
+  "repository": "https://github.com/pythonlover02/dxvk-sarek.git",
+  "tag": "v1.13.0",
+  "commit": "37f397e142b977a343e920dbc4c7bf7ed2c63a81",
   "meson": "1.12.0",
   "ninja": "1.13.2",
   "msvc": "19.44.35222",
   "windows_sdk": "10.0.26100.0",
   "glslang_url": "https://github.com/KhronosGroup/glslang/releases/download/16.5.0/glslang-16.5.0-windows-x86_64-release.zip",
   "glslang_archive_sha256": "06b71298b750268c127f2ee7ae0ef7525e2068120c6c8a3a08b2f58ca6f325ce",
-  "glslang_exe_sha256": "e207976041258c1ccfb32902c2a3d543542c1a463c84bd2dd6ba0dca78ea3578"
+  "glslang_exe_sha256": "e207976041258c1ccfb32902c2a3d543542c1a463c84bd2dd6ba0dca78ea3578",
+  "licenses": {
+    "D7VK.txt": "LICENSE",
+    "SPIRV-Headers.txt": "include/spirv/LICENSE",
+    "Vulkan-Headers.txt": "include/vulkan/LICENSE.md",
+    "Vulkan-MIT.txt": "include/vulkan/LICENSES/MIT.txt",
+    "Vulkan-Apache-2.0.txt": "include/vulkan/LICENSES/Apache-2.0.txt",
+    "OpenVR.txt": "include/openvr/LICENSE"
+  }
 }

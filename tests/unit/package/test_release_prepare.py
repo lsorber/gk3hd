@@ -24,14 +24,14 @@ def test_release_can_replace_or_reuse_renderer_and_textures_independently(
     texture_lock = Path("texture-lock.json")
     renderer_lock = Path("renderer-lock.json")
     texture_lock.write_text('{"tag":"v1.0"}')
-    archive = Path("d7vk-2.2-gk3hd.3.dll")
+    archive = Path("dxvk-sarek-1.13.0-gk3hd.1.dll")
     archive.write_bytes(b"verified local DLL fixture")
     companions = (archive.with_suffix(".json"), archive.with_suffix(".txt"))
     for companion in companions:
         companion.write_bytes(b"verified companion fixture")
     asset = RendererAsset(
         archive,
-        "2.2-gk3hd.3",
+        "1.13.0-gk3hd.1",
         hashlib.sha256(archive.read_bytes()).hexdigest(),
         archive.stat().st_size,
         tuple((path, hashlib.sha256(path.read_bytes()).hexdigest()) for path in companions),

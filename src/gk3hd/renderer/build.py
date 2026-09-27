@@ -43,11 +43,16 @@ def recipe_digest() -> str:
     inputs = sorted(
         path
         for path in RECIPE.rglob("*")
-        if path.is_file() and path.suffix in {".ps1", ".patch", ".json", ".cpp", ".h", ".conf"}
+        if path.is_file()
+        and (
+            path.suffix in {".ps1", ".patch", ".json", ".cpp", ".h", ".conf"}
+            or path.name == "LICENSE"
+        )
     )
     digest = hashlib.sha256()
     for path in inputs:
-        digest.update(path.relative_to(RECIPE).as_posix().encode() + b"\0" + path.read_bytes())
+        content = path.read_bytes().replace(b"\r\n", b"\n")
+        digest.update(path.relative_to(RECIPE).as_posix().encode() + b"\0" + content)
     return digest.hexdigest()
 
 
@@ -66,7 +71,7 @@ def build(
     root = workspace(game_dir)
     target = (output or root / digest[:16]).resolve()
     pin = json.loads((RECIPE / "upstream.json").read_text(encoding="utf-8"))
-    dll = target / f"d7vk-{pin['version']}.dll"
+    dll = target / f"dxvk-sarek-{pin['version']}.dll"
     if not target.exists():
         result = subprocess.run(  # noqa: S603 - fixed recipe and separate arguments.
             [

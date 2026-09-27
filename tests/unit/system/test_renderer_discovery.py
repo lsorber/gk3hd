@@ -16,8 +16,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _release(tag: str = "v1.1", *, published: str = "2026-09-19T10:00:00Z") -> dict[str, object]:
-    name = "d7vk-2.2-gk3hd.9.dll"
+def _release(
+    tag: str = "v1.1",
+    *,
+    published: str = "2026-09-19T10:00:00Z",
+    name: str = "dxvk-sarek-1.13.0-gk3hd.1.dll",
+) -> dict[str, object]:
     return {
         "tag_name": tag,
         "published_at": published,
@@ -38,7 +42,7 @@ def _release(tag: str = "v1.1", *, published: str = "2026-09-19T10:00:00Z") -> d
 def test_latest_skips_package_only_drafts_prereleases_and_paginates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    older = _release("v1.0", published="2026-09-01T00:00:00Z")
+    older = _release("v1.0", published="2026-09-01T00:00:00Z", name="d7vk-2.2-gk3hd.8.dll")
     newer = _release()
     pages = [
         [{**_release("v1.3"), "assets": []}, {**_release(), "draft": True}, older],
@@ -49,9 +53,38 @@ def test_latest_skips_package_only_drafts_prereleases_and_paginates(
     monkeypatch.setattr(d7vk, "_release_page", fetch)
     result = d7vk.latest_renderer()
     assert "/v1.1/" in result["asset_url"]
+    assert result["asset_url"].endswith("/dxvk-sarek-1.13.0-gk3hd.1.dll")
     assert result["dll_sha256"] == "a" * 64
     assert result["dll_size"] == "100"
     assert [c.args for c in fetch.call_args_list] == [(1,), (2,)]
+
+
+def test_latest_can_reuse_the_published_d7vk_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = _release("v1.0.0", name="d7vk-2.2-gk3hd.8.dll")
+    monkeypatch.setattr(d7vk, "_release_page", Mock(return_value=[baseline]))
+    result = d7vk.latest_renderer()
+    assert result["asset_url"].endswith("/v1.0.0/d7vk-2.2-gk3hd.8.dll")
+
+
+@pytest.mark.parametrize("upstream", ["dxvk-sarek", "d7vk", "future-renderer"])
+def test_discovery_uses_the_renderer_convention_not_the_upstream_name(
+    monkeypatch: pytest.MonkeyPatch, upstream: str
+) -> None:
+    name = f"{upstream}-1.13.0-gk3hd.1.dll"
+    monkeypatch.setattr(d7vk, "_release_page", Mock(return_value=[_release(name=name)]))
+    assert d7vk.latest_renderer()["asset_url"].endswith(f"/{name}")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["unrelated.dll", "dxvk-sarek-1.13.0.dll", "../dxvk-sarek-1.13.0-gk3hd.1.dll"],
+)
+def test_discovery_ignores_dlls_outside_our_renderer_convention(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setattr(d7vk, "_release_page", Mock(return_value=[_release(name=name)]))
+    with pytest.raises(DownloadError, match="no published"):
+        d7vk.latest_renderer()
 
 
 @pytest.mark.parametrize(
