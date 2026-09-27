@@ -63,6 +63,41 @@ index e182b5f..b5bd467 100644
    D3D9GlobalAnnotationList D3D9GlobalAnnotationList::s_instance;
 
    HRESULT CreateD3D9(
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 51f7461..911a2cf 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -859,6 +859,19 @@ namespace dxvk {
+
+
+   void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
++    // Preserve single-buffer windowed/COPY semantics, as in current DXVK.
++    // An optional hidden front buffer is a snapshot, not an extra rotating
++    // application back buffer. DDraw's incremental uploads rely on retention.
++    const bool preserveBackBuffer = m_presentParams.SwapEffect == D3DSWAPEFFECT_COPY ||
++      (m_presentParams.SwapEffect == D3DSWAPEFFECT_DISCARD &&
++       m_presentParams.BackBufferCount == 1 && m_presentParams.Windowed);
++    if (preserveBackBuffer && !m_parent->GetOptions()->noExplicitFrontBuffer &&
++        m_backBuffers.size() > 1) {
++      const auto& frontBuffer = m_backBuffers.back();
++      if (FAILED(m_parent->StretchRect(m_backBuffers[0].ptr(), nullptr,
++          frontBuffer.ptr(), nullptr, D3DTEXF_NONE)))
++        Logger::err("Failed to preserve front-buffer snapshot");
++    }
+     m_parent->Flush();
+
+     // Retrieve the image and image view to present
+@@ -925,7 +938,9 @@ namespace dxvk {
+
+     // Rotate swap chain buffers so that the back
+     // buffer at index 0 becomes the front buffer.
+-    for (uint32_t i = 1; i < m_backBuffers.size(); i++)
++    const uint32_t rotatingBufferCount = m_backBuffers.size() -
++      (preserveBackBuffer && !m_parent->GetOptions()->noExplicitFrontBuffer ? 1u : 0u);
++    for (uint32_t i = 1; i < rotatingBufferCount; i++)
+       m_backBuffers[i]->Swap(m_backBuffers[i - 1].ptr());
+
+     m_parent->m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
 diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
 index 34f4be6..748af62 100644
 --- a/src/d3d9/meson.build
