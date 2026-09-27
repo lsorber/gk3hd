@@ -32,18 +32,21 @@ class TransitionFrameCompiler:
 
     Outcome:
         Restore and room transitions cannot expose an uninitialized, black, or
-        stale peer from GK3's two-page native flip chain.
+        stale peer from GK3's two-page native flip chain. Redundant fullscreen
+        window updates cannot repeatedly hide Vulkan output on newer Wine.
 
     Before:
         GK3 retains separate background histories for two physical pages while
         DirectDraw exposes one stable back-surface interface. A page returned
         by ``Flip`` may therefore have neither current pixels nor a matching
         damage history, notably during Restore and the motorcycle transition.
+        Each engine update also reasserts topmost placement, even when unchanged;
+        Wine can invalidate the display surface on every such request.
 
     After:
         Both physical pages and their room-owned histories are initialized in
         successful-Flip generation order before normal frame presentation
-        resumes.
+        resumes. Topmost placement is changed only when actually necessary.
 
     Strategy:
         A primary-surface 2D Blt arms a handoff. The next two room-owned scene
@@ -52,12 +55,15 @@ class TransitionFrameCompiler:
         successful Flip generations and concrete layer ownership, never time,
         resolution, or a stable COM wrapper address. Typed callback slots let
         the fixed-interface runtime present overlays immediately before and
-        after Flip without stacking another hook.
+        after Flip without stacking another hook. A Win32 call bridge checks the
+        live window style before forwarding the native topmost request.
 
     Boundaries:
         Presentation remains GK3's native fullscreen ``Flip``. Fixed 2D
         interfaces own their own composition; surface creation, Direct3D
         drawing, mode selection, cadence, and frame limiting are unchanged.
+        Real topmost changes, failures and unsupported style queries still use
+        the original Win32 call, including after another program changes style.
     """
 
     id: ClassVar[str] = "prevent_transition_flicker"
@@ -65,10 +71,10 @@ class TransitionFrameCompiler:
 
     _section_name: ClassVar[str] = ".gk3dd"
     section_name: ClassVar[str] = _section_name
-    _section_size: ClassVar[int] = 0x800
+    _section_size: ClassVar[int] = 0x900
     _section_characteristics: ClassVar[int] = 0xE0000020
     _magic: ClassVar[bytes] = b"GK3NDD1\0"
-    _layout_version: ClassVar[int] = 162
+    _layout_version: ClassVar[int] = 163
     _native_flip_page_count: ClassVar[int] = 2
     _off_layout_version: ClassVar[int] = 0x08
     # Control state consumed by later hooks.
@@ -145,12 +151,18 @@ class TransitionFrameCompiler:
     _off_scene_wrapper: ClassVar[int] = 0x180
     _off_begin_wrapper: ClassVar[int] = 0x400
     _off_blt_wrapper: ClassVar[int] = 0x500
+    _off_window_wrapper: ClassVar[int] = 0x800
+    _off_window_module_name: ClassVar[int] = 0x8C0
+    _off_window_proc_name: ClassVar[int] = 0x8D0
+    _off_window_order_proc_name: ClassVar[int] = 0x8E0
     _anchors: ClassVar[tuple[tuple[str, str], ...]] = (
         ("transition.flip_retry_anchor", "Flip retry setup"),
         ("transition.flip_result_anchor", "Flip result handling"),
         ("transition.scene_setup_anchor", "3D frame setup"),
         ("transition.begin_scene_anchor", "Direct3D BeginScene wrapper"),
         ("transition.blt_result_anchor", "2D Blt result handling"),
+        ("window.topmost_args", "topmost window arguments"),
+        ("window.topmost_result", "topmost window continuation"),
     )
 
     @classmethod
@@ -510,6 +522,54 @@ class TransitionFrameCompiler:
         code.jump_absolute(self.profile.address("transition.blt_continue"))
         return code.build()
 
+    def _build_window_wrapper(self, *, section_va: int) -> bytes:
+        """Skip only an already-satisfied, position-preserving topmost request.
+
+        Query the actual style rather than caching a previous request: another
+        application may legitimately have removed topmost placement or put a
+        different topmost window above it. Activation is also observable: a
+        foreground change must still call SetWindowPos. Resolve
+        GetWindowLongA from the already-loaded USER32; no additional DLL or
+        permanent process state is needed. Failed resolution/query falls back
+        to SetWindowPos. Preserve all arguments, stdcall stack and nonvolatile
+        registers, and return the real BOOL on the forwarding path.
+        """
+        code = X86Emitter(base_va=section_va + self._off_window_wrapper)
+        code.raw(bytes.fromhex("55 8b ec 83 7d 0c ff"))
+        code.jump_if(Condition.NOT_EQUAL, "forward")  # HWND_TOPMOST only
+        code.raw(bytes.fromhex("83 7d 20 03"))  # SWP_NOSIZE | SWP_NOMOVE only
+        code.jump_if(Condition.NOT_EQUAL, "forward")
+        code.push_imm32(section_va + self._off_window_module_name)
+        code.raw(b"\xff\x15" + struct.pack("<I", self.profile.address("win32.GetModuleHandleA")))
+        code.raw(b"\x85\xc0")
+        code.jump_if(Condition.EQUAL, "forward")
+        code.push_imm32(section_va + self._off_window_proc_name)
+        code.raw(b"\x50\xff\x15" + struct.pack("<I", self.profile.address("win32.GetProcAddress")))
+        code.raw(b"\x85\xc0")
+        code.jump_if(Condition.EQUAL, "forward")
+        code.raw(bytes.fromhex("6a ec ff 75 08 ff d0 a9 08 00 00 00"))  # GWL_EXSTYLE, WS_EX_TOPMOST
+        code.jump_if(Condition.EQUAL, "forward")
+        code.raw(b"\xff\x15" + struct.pack("<I", self.profile.address("win32.GetForegroundWindow")))
+        code.raw(bytes.fromhex("3b 45 08"))
+        code.jump_if(Condition.NOT_EQUAL, "forward")
+        code.push_imm32(section_va + self._off_window_module_name)
+        code.raw(b"\xff\x15" + struct.pack("<I", self.profile.address("win32.GetModuleHandleA")))
+        code.raw(b"\x85\xc0")
+        code.jump_if(Condition.EQUAL, "forward")
+        code.push_imm32(section_va + self._off_window_order_proc_name)
+        code.raw(b"\x50\xff\x15" + struct.pack("<I", self.profile.address("win32.GetProcAddress")))
+        code.raw(b"\x85\xc0")
+        code.jump_if(Condition.EQUAL, "forward")
+        code.raw(bytes.fromhex("6a 03 ff 75 08 ff d0 85 c0"))  # GetWindow(hwnd, GW_HWNDPREV)
+        code.jump_if(Condition.NOT_EQUAL, "forward")
+        code.raw(bytes.fromhex("b8 01 00 00 00 c9 c2 1c 00"))  # TRUE, pop seven arguments
+        code.label("forward")
+        for offset in (0x20, 0x1C, 0x18, 0x14, 0x10, 0x0C, 0x08):
+            code.raw(bytes((0xFF, 0x75, offset)))
+        code.raw(self.profile.site("window.topmost_call").original)
+        code.raw(bytes.fromhex("c9 c2 1c 00"))
+        return code.build(maximum_size=self._off_window_module_name - self._off_window_wrapper)
+
     def _read_hook(self, pe: PEFile, site_va: int, original: bytes) -> bytes:
         return pe.read_bytes(pe.va_to_offset(site_va), len(original))
 
@@ -518,6 +578,7 @@ class TransitionFrameCompiler:
         seed = self.profile.site("transition.seed_hook")
         begin = self.profile.site("transition.begin_hook")
         blt = self.profile.site("transition.blt_hook")
+        window = self.profile.site("window.topmost_call")
         return (
             (flip.va, flip.original, section_va + self._off_flip_wrapper, "Flip"),
             (
@@ -538,11 +599,13 @@ class TransitionFrameCompiler:
                 section_va + self._off_blt_wrapper,
                 "primary Blt gate",
             ),
+            (window.va, window.original, section_va + self._off_window_wrapper, "topmost window"),
         )
 
     def _build_wrappers(self, section_va: int) -> tuple[tuple[int, bytes], ...]:
         """Generate the complete immutable transition payload in section order."""
         wrappers = (
+            (self._off_window_wrapper, self._build_window_wrapper(section_va=section_va)),
             (
                 self._off_flip_wrapper,
                 self._build_flip_wrapper(
@@ -716,10 +779,23 @@ class TransitionFrameCompiler:
                 payload=wrapper,
                 limit=limit,
             )
+        payload.place(
+            label="window module name", offset=self._off_window_module_name, payload=b"user32.dll\0"
+        )
+        payload.place(
+            label="window style query",
+            offset=self._off_window_proc_name,
+            payload=b"GetWindowLongA\0",
+        )
+        payload.place(
+            label="window order query",
+            offset=self._off_window_order_proc_name,
+            payload=b"GetWindow\0",
+        )
         return payload.build()
 
     def _mutation_plan(self, *, section_va: int) -> ExecutableMutationPlan:
-        """Declare all four displaced native-call redirects as one transaction."""
+        """Declare native presentation and window redirects as one transaction."""
         plan = ExecutableMutationPlan(owner=self.id)
         for site, original, wrapper, label in self._hook_specs(section_va):
             plan.branch(
@@ -797,5 +873,13 @@ class TransitionFrameCompiler:
         for offset, wrapper in wrappers:
             if pe.read_bytes(section_offset + offset, len(wrapper)) != wrapper:
                 msg = f"{self.id} postcheck failed: wrapper at 0x{offset:x} mismatch"
+                raise PatchError(msg)
+        for offset, expected in (
+            (self._off_window_module_name, b"user32.dll\0"),
+            (self._off_window_proc_name, b"GetWindowLongA\0"),
+            (self._off_window_order_proc_name, b"GetWindow\0"),
+        ):
+            if pe.read_bytes(section_offset + offset, len(expected)) != expected:
+                msg = f"{self.id} postcheck failed: window API name mismatch"
                 raise PatchError(msg)
         self._mutation_plan(section_va=section_va).verify(pe)

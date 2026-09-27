@@ -582,6 +582,21 @@ _SHARED_SITES = MappingProxyType(
             va=0x00533CE7,
             original=bytes.fromhex("8b 11 ff 52 58"),
         ),
+        "window.topmost_args": PatchSite(
+            symbol="window.topmost_args",
+            va=0x0053DC99,
+            original=bytes.fromhex("8b 4e 10 6a 03 6a 00 6a 00 6a 00 6a 00 6a ff 51"),
+        ),
+        "window.topmost_call": PatchSite(
+            symbol="window.topmost_call",
+            va=0x0053DCA9,
+            original=bytes.fromhex("ff 15 68 53 66 00"),
+        ),
+        "window.topmost_result": PatchSite(
+            symbol="window.topmost_result",
+            va=0x0053DCAF,
+            original=bytes.fromhex("84 db 74 1e"),
+        ),
         "mouse_move.wndproc_dispatch_prefix": PatchSite(
             symbol="mouse_move.wndproc_dispatch_prefix",
             va=0x00533CDD,
@@ -1543,6 +1558,7 @@ _SHARED_SYMBOLS = MappingProxyType(
         "cursor.drawable_blt": 0x00499722,
         "cursor.platform_initialize": 0x0056BB60,
         "win32.GetModuleHandleA": 0x0066508C,
+        "win32.GetForegroundWindow": 0x006652AC,
         "win32.GetProcAddress": 0x00665108,
         "win32.LoadCursorA": 0x00665320,
         "cursor.platform_instance": 0x00710B98,

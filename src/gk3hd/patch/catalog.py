@@ -108,7 +108,7 @@ _GENERATED_PATCHES = (
     _compiled_definition(
         patch_id="prevent_transition_flicker",
         name="Prevent transition flicker",
-        description="Fix broken frames between UI and 3D views.",
+        description="Prevent broken transition frames and Wine window flicker.",
         ownership=frozenset(
             {
                 _TRANSITION_SECTION,
@@ -116,6 +116,7 @@ _GENERATED_PATCHES = (
                 ResourceClaim(ResourceKind.HOOK, "directdraw_primary_blt"),
                 ResourceClaim(ResourceKind.HOOK, "direct3d_begin_scene"),
                 ResourceClaim(ResourceKind.HOOK, "direct3d_scene_setup"),
+                ResourceClaim(ResourceKind.HOOK, "topmost_window_update"),
             }
         ),
         compiler_factory=lambda context: TransitionFrameCompiler(
