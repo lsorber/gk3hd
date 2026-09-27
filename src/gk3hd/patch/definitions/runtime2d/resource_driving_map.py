@@ -28,11 +28,24 @@ if TYPE_CHECKING:
     from gk3hd.patch.definitions.runtime2d.resources import ResourceDispatchCompiler
 
 _PUSH_IMM8_OPCODE = 0x6A
+_CORRECTED_LOCATIONS = ("TR1", "RL1", "TRE")
+
+
+def _original_origin(profile: BuildProfile, location: str) -> tuple[int, int]:
+    """Read the game's saved-layout anchors from its verified constructor."""
+    payload = profile.site(f"driving_map.{location}.origin").original
+    coordinates = []
+    offset = 0
+    for _ in range(2):
+        short = payload[offset] == _PUSH_IMM8_OPCODE
+        coordinates.append(struct.unpack_from("<b" if short else "<I", payload, offset + 1)[0])
+        offset += 2 if short else 5
+    return coordinates[1], coordinates[0]
 
 
 def correct_location_origins(mutations: ExecutableMutationPlan, profile: BuildProfile) -> None:
     """Move normal/highlight art and hitboxes at their shared native constructor."""
-    for location in ("TR1", "RL1", "TRE"):
+    for location in _CORRECTED_LOCATIONS:
         site = profile.site(f"driving_map.{location}.origin")
         x, y, _width, _height = MAP_LOCATIONS[location]
         payload = bytearray(site.original)
@@ -108,6 +121,14 @@ def build_draw_scope(
     system_render_state_vas: tuple[int, int, int],
 ) -> bytes:
     """Draw the exact live map against one complete physical damage region."""
+    # Native saves serialize the map tree and can replace constructor-corrected
+    # anchors with their original values. Recognize both layouts, then publish
+    # one canonical rectangle for artwork AND native picking on every redraw.
+    locations = [(x, y, x, y, width, height) for x, y, width, height in MAP_LOCATIONS.values()]
+    locations.extend(
+        (*_original_origin(owner.profile, name), *MAP_LOCATIONS[name])
+        for name in _CORRECTED_LOCATIONS
+    )
     code = X86Emitter(base_va=wrapper_va)
     code += b"\x81\x3d" + struct.pack("<I", owner._physical_width_va)
     code += b"\x00\x04\x00\x00"
@@ -144,23 +165,25 @@ def build_draw_scope(
             code += b"\x8b\xe8"
     code += b"\xc1\xe0\x10\x0b\xe8\xbf"
     code.absolute_label("location_bounds")
-    code += b"\xba" + struct.pack("<I", len(MAP_LOCATIONS))
+    code += b"\xba" + struct.pack("<I", len(locations))
     code.label("find_location")
     code += b"\x3b\x2f"
     code.jump_short_if(Condition.EQUAL, "location_found")
-    code += b"\x83\xc7\x08\x4a"
+    code += b"\x83\xc7\x0c\x4a"
     code.jump_short_if(Condition.NOT_EQUAL, "find_location")
     code.jump_short("location_done")
     code.label("location_found")
-    for component, far, native, physical in (
-        (0, 0x24, 640, owner._physical_width_va),
-        (2, 0x28, 480, owner._physical_width_va + 4),
+    for component, near, native, physical in (
+        (4, 0x1C, 640, owner._physical_width_va),
+        (6, 0x20, 480, owner._physical_width_va + 4),
     ):
-        code += b"\x0f\xb7\x47" + bytes([component])
-        code += b"\x0f\xb7\x77" + bytes([component + 4]) + b"\x03\xc6"
-        code += b"\x0f\xaf\x05" + struct.pack("<I", physical)
-        code += b"\x31\xd2\x68" + struct.pack("<I", native)
-        code += b"\xf7\x34\x24\x83\xc4\x04\x89\x41" + bytes([far])
+        for edge in (near, near + 8):
+            code += b"\x0f\xb7\x47" + bytes([component])
+            if edge != near:
+                code += b"\x0f\xb7\x77" + bytes([component + 4]) + b"\x03\xc6"
+            code += b"\x0f\xaf\x05" + struct.pack("<I", physical)
+            code += b"\x31\xd2\x68" + struct.pack("<I", native)
+            code += b"\xf7\x34\x24\x83\xc4\x04\x89\x41" + bytes([edge])
     code.label("location_done")
     code += b"\x5f"
     # Publish every location's exact physical model rectangle for the nested
@@ -184,6 +207,33 @@ def build_draw_scope(
     code += b"\x89\x15" + struct.pack("<I", full_damage_rect_va + 8)
     code += b"\x8b\x15" + struct.pack("<I", owner._physical_width_va + 4)
     code += b"\x89\x15" + struct.pack("<I", full_damage_rect_va + 12)
+    # The native map erase covers 1024x768 even when its screen bitmap is
+    # larger. Damage alone does not repaint the unused pillars: the previous
+    # room and old GDI captions survive there. This exact retained map owns
+    # the complete frame, so clear it before its complete child traversal.
+    # Container::Draw receives an encoded BitmapManager handle, NOT a Bitmap*.
+    # Resolve it using the same native lookup as FillRectangle and EditBox's
+    # caret; the manager record's +0x30 owns the actual Bitmap. Keep the handle
+    # unchanged for the child traversal and never dereference it as a pointer.
+    # Bitmap::Fill is a three-argument thiscall (color, RECT*, blend options).
+    code += b"\x60\x8b\x0d" + struct.pack("<I", owner._resource_manager_va) + b"\x85\xc9"
+    code.jump_short_if(Condition.EQUAL, "clear_done")
+    code += b"\xff\x74\x24\x24"
+    code.call_absolute(owner.profile.address("bitmap.resolve_resource"))
+    code += b"\x85\xc0"
+    code.jump_short_if(Condition.EQUAL, "clear_done")
+    code += b"\x8b\x48\x30\x85\xc9"
+    code.jump_short_if(Condition.EQUAL, "clear_done")
+    for offset, address in (
+        (0x38, owner._physical_width_va),
+        (0x3C, owner._physical_width_va + 4),
+    ):
+        code += b"\xa1" + struct.pack("<I", address) + b"\x39\x41" + bytes([offset])
+        code.jump_short_if(Condition.NOT_EQUAL, "clear_done")
+    code += b"\x6a\x00\x68" + struct.pack("<I", full_damage_rect_va) + b"\x6a\x00"
+    code.call_absolute(owner.profile.address("bitmap.solid_fill"))
+    code.label("clear_done")
+    code += b"\x61"
     code += b"\xc7\x05" + struct.pack("<I", scope_active_va) + b"\x01\x00\x00\x00"
     code += b"\xff\x05" + struct.pack("<I", full_draw_count_va)
     # A modal can request a fresh underlying map before capturing its dimmed
@@ -204,8 +254,8 @@ def build_draw_scope(
     code.label("native")
     code.jump_absolute(owner.profile.address("ui.container_draw"))
     code.label("location_bounds")
-    for bounds in MAP_LOCATIONS.values():
-        code += struct.pack("<4H", *bounds)
+    for bounds in locations:
+        code += struct.pack("<6H", *bounds)
     return code.build()
 
 

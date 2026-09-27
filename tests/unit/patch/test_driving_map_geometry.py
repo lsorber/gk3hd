@@ -1,11 +1,14 @@
 """Execute map geometry helpers, including the native unscaled marker radius."""
 
 import struct
+from dataclasses import replace
 
 import pytest
-from unicorn import UC_ARCH_X86, UC_MODE_32, Uc
+from unicorn import UC_ARCH_X86, UC_HOOK_CODE, UC_MODE_32, Uc
 from unicorn.x86_const import UC_X86_REG_EAX, UC_X86_REG_ECX, UC_X86_REG_ESI, UC_X86_REG_ESP
 
+from gk3hd.driving_map import MAP_LOCATIONS
+from gk3hd.patch.builds import GOG_BUILD, STEAM_NORMALIZED_BUILD, BuildProfile
 from gk3hd.patch.definitions.runtime2d.resource_driving_map import (
     build_draw_scope,
     build_marker_ellipse,
@@ -141,11 +144,12 @@ def test_background_and_adjacent_tiles_meet_without_gaps(size: tuple[int, int]) 
 
 
 @pytest.mark.parametrize("size", [(1024, 768), (1280, 800), (1280, 1024), (3840, 2160)])
-@pytest.mark.parametrize("bounds", [(57, 131, 49, 38), (44, 218, 98, 75), (578, 22, 53, 49)])
+@pytest.mark.parametrize("profile", [GOG_BUILD, STEAM_NORMALIZED_BUILD], ids=["gog", "steam"])
 def test_location_keeps_hitbox_across_texture_densities_and_redraws(
-    size: tuple[int, int], bounds: tuple[int, int, int, int]
+    size: tuple[int, int],
+    profile: BuildProfile,
 ) -> None:
-    compiler = _compiler()
+    compiler = replace(_compiler(), profile=profile)
     base, state, root, child, children, stack, stop = (
         0x800000,
         0x801000,
@@ -176,32 +180,153 @@ def test_location_keeps_hitbox_across_texture_densities_and_redraws(
         ),
     )
     cpu.mem_write(compiler.profile.address("ui.container_draw"), b"\xc2\x08\x00")
+    cpu.mem_write(compiler.profile.address("bitmap.solid_fill"), b"\xc2\x0c\x00")
     cpu.mem_write(compiler._physical_width_va, struct.pack("<2I", *size))
     cpu.mem_write(state + 4, struct.pack("<I", 1))
+    bitmap = base + 0x5000
+    cpu.mem_write(bitmap + 0x38, struct.pack("<2I", *size))
+    resource = base + 0x6000
+    cpu.mem_write(compiler._resource_manager_va, struct.pack("<I", state + 640))
+    cpu.mem_write(resource + 0x30, struct.pack("<I", bitmap))
+    cpu.mem_write(
+        compiler.profile.address("bitmap.resolve_resource"),
+        b"\xb8" + struct.pack("<I", resource) + b"\xc2\x04\x00",
+    )
     cpu.mem_write(root + 0x4C, struct.pack("<2I", children, 1))
     cpu.mem_write(children, struct.pack("<I", child))
     cpu.mem_write(child, struct.pack("<I", compiler._bitmap_node_destructor_slot_va))
     width, height = size
-    source_x, source_y, source_width, source_height = bounds
-    x, y = source_x * width // 640, source_y * height // 480
-    extent = (source_width * width // 640, source_height * height // 480)
-    for density in (1, 4, 1, 4, 1):  # hover replaces either original or dense art
-        cpu.mem_write(
-            child + 0x1C,
-            struct.pack("<4I", x, y, x + extent[0] * density, y + extent[1] * density),
-        )
-        cpu.mem_write(stack, struct.pack("<3I", stop, 123, 456))
-        cpu.reg_write(UC_X86_REG_ESP, stack)
-        cpu.reg_write(UC_X86_REG_ECX, root)
-        cpu.emu_start(base, stop, count=1500)
-        assert struct.unpack("<4I", cpu.mem_read(child + 0x1C, 16)) == (
-            x,
-            y,
-            (source_x + source_width) * width // 640,
-            (source_y + source_height) * height // 480,
-        )
-        assert struct.unpack("<I", cpu.mem_read(state, 4)) == (0,)
-        assert cpu.reg_read(UC_X86_REG_ESP) == stack + 12
+    saved_origins = {"TR1": (54, 134), "RL1": (487, 170), "TRE": (506, 91)}
+    for name, (source_x, source_y, source_width, source_height) in MAP_LOCATIONS.items():
+        x, y = source_x * width // 640, source_y * height // 480
+        extent = (source_width * width // 640, source_height * height // 480)
+        for restored in (False, True):
+            saved_x, saved_y = (
+                saved_origins.get(name, (source_x, source_y))
+                if restored
+                else (
+                    source_x,
+                    source_y,
+                )
+            )
+            old_x, old_y = saved_x * width // 640, saved_y * height // 480
+            for density in (1, 4, 1, 4, 1):  # hover replaces original or dense art
+                cpu.mem_write(
+                    child + 0x1C,
+                    struct.pack(
+                        "<4I",
+                        old_x,
+                        old_y,
+                        old_x + extent[0] * density,
+                        old_y + extent[1] * density,
+                    ),
+                )
+                cpu.mem_write(stack, struct.pack("<3I", stop, 0x20001, 456))
+                cpu.reg_write(UC_X86_REG_ESP, stack)
+                cpu.reg_write(UC_X86_REG_ECX, root)
+                cpu.emu_start(base, stop, count=1500)
+                actual = struct.unpack("<4I", cpu.mem_read(child + 0x1C, 16))
+                expected = (
+                    x,
+                    y,
+                    (source_x + source_width) * width // 640,
+                    (source_y + source_height) * height // 480,
+                )
+                assert actual == expected, (name, restored, density, size)
+                assert struct.unpack("<I", cpu.mem_read(state, 4)) == (0,)
+                assert cpu.reg_read(UC_X86_REG_ESP) == stack + 12
+                # Drawing and native picking must consume the same rectangle.
+                assert bytes(cpu.mem_read(state + 256, 16)) == bytes(cpu.mem_read(child + 0x1C, 16))
+
+
+@pytest.mark.parametrize("size", [(1024, 768), (1280, 720), (1280, 800), (3840, 2160)])
+@pytest.mark.parametrize("map_owned", [False, True])
+@pytest.mark.parametrize("screen_bitmap", [False, True])
+@pytest.mark.parametrize(
+    "lookup", ["resolved", "missing_manager", "missing_resource", "missing_bitmap"]
+)
+def test_map_repaints_its_entire_frame_before_children(
+    size: tuple[int, int], *, map_owned: bool, screen_bitmap: bool, lookup: str
+) -> None:
+    compiler = _compiler()
+    base, state, root, bitmap, stack, stop = (
+        0x800000,
+        0x801000,
+        0x802000,
+        0x803000,
+        0x808000,
+        0x809000,
+    )
+    cpu = Uc(UC_ARCH_X86, UC_MODE_32)
+    cpu.mem_map(0x400000, 0x400000)
+    cpu.mem_map(base, 0x10000)
+    cpu.mem_write(
+        base,
+        build_draw_scope(
+            compiler,
+            wrapper_va=base,
+            scope_active_va=state,
+            input_active_va=state + 4,
+            base_child_va=state + 8,
+            children_scaled_va=state + 12,
+            child_rect_count_va=state + 16,
+            child_rects_va=state + 256,
+            full_draw_count_va=state + 20,
+            full_damage_region_va=state + 32,
+            full_damage_rect_va=state + 64,
+            system_render_state_vas=(state + 80, state + 84, state + 88),
+        ),
+    )
+    fill = compiler.profile.address("bitmap.solid_fill")
+    draw = compiler.profile.address("ui.container_draw")
+    resolve = compiler.profile.address("bitmap.resolve_resource")
+    resource = state + 512
+    manager = state + 640
+    cpu.mem_write(
+        compiler._resource_manager_va,
+        struct.pack("<I", 0 if lookup == "missing_manager" else manager),
+    )
+    # A native encoded handle is deliberately unmapped: confusing it with a
+    # Bitmap pointer must fail, not silently skip the physical frame's clear.
+    handle = 0x20001
+    cpu.mem_write(
+        resolve,
+        b"\xb8"
+        + struct.pack("<I", 0 if lookup == "missing_resource" else resource)
+        + b"\xc2\x04\x00",
+    )
+    cpu.mem_write(resource + 0x30, struct.pack("<I", 0 if lookup == "missing_bitmap" else bitmap))
+    cpu.mem_write(fill, b"\xc2\x0c\x00")
+    cpu.mem_write(draw, b"\xc2\x08\x00")
+    cpu.mem_write(compiler._physical_width_va, struct.pack("<2I", *size))
+    cpu.mem_write(bitmap + 0x38, struct.pack("<2I", *(size if screen_bitmap else (64, 64))))
+    cpu.mem_write(state + 4, struct.pack("<I", int(map_owned)))
+    calls: list[str] = []
+
+    def observe(machine: Uc, address: int, _size: int, _data: object) -> None:
+        sp = machine.reg_read(UC_X86_REG_ESP)
+        if address == resolve:
+            assert machine.reg_read(UC_X86_REG_ECX) == manager
+            assert struct.unpack("<I", machine.mem_read(sp + 4, 4)) == (handle,)
+        elif address == fill:
+            calls.append("clear")
+            assert machine.reg_read(UC_X86_REG_ECX) == bitmap
+            color, rect, blend = struct.unpack("<3I", machine.mem_read(sp + 4, 12))
+            assert (color, blend) == (0, 0)
+            assert struct.unpack("<4I", machine.mem_read(rect, 16)) == (0, 0, *size)
+        elif address == draw:
+            calls.append("children")
+            assert machine.reg_read(UC_X86_REG_ECX) == root
+            assert struct.unpack("<I", machine.mem_read(sp + 4, 4)) == (handle,)
+
+    cpu.hook_add(UC_HOOK_CODE, observe)
+    cpu.mem_write(stack, struct.pack("<3I", stop, handle, 123))
+    cpu.reg_write(UC_X86_REG_ESP, stack)
+    cpu.reg_write(UC_X86_REG_ECX, root)
+    cpu.emu_start(base, stop, count=1500)
+    clears_frame = map_owned and screen_bitmap and lookup == "resolved"
+    assert calls == (["clear", "children"] if clears_frame else ["children"])
+    assert cpu.reg_read(UC_X86_REG_ESP) == stack + 12
 
 
 def test_hidden_marker_does_not_draw_or_leak_stack() -> None:

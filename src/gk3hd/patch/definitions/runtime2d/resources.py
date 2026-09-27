@@ -173,7 +173,7 @@ class ResourceDispatchCompiler:
     # historical 0x920--0x980 slot.  Explicit slot bounds make future growth
     # fail closed during patch construction rather than corrupting a peer.
     _off_driving_map_draw_wrapper: ClassVar[int] = 0x1210
-    _off_driving_map_destructor_wrapper: ClassVar[int] = 0x1500
+    _off_driving_map_destructor_wrapper: ClassVar[int] = 0x1540
     # Marker fitting needs two temporary raster dimensions and an exact hidden
     # sentinel proof. Give that bounded helper the remaining resource-code page
     # instead of byte-packing it beside unrelated retained state.
