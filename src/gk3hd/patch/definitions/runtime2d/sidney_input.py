@@ -588,8 +588,21 @@ def build_input_dispatch_wrapper(
     code.jump_if(Condition.EQUAL, "system_dispatch")
     code.label("retained_roots")
 
-    code += b"\x83\x3d" + struct.pack("<I", driving_map_active_va) + b"\x00"
-    code.jump_if(Condition.NOT_EQUAL, "map_transform")
+    # Travel hides and retains DrivingMap instead of destroying DM_BASE.
+    # Its bitmap-lifetime token therefore survives motorcycle travel and
+    # save restoration. Only the live map layer may own the map inverse;
+    # applying it to room controls produces an offset growing from center.
+    code += b"\x50\x51\x52"
+    code.call_absolute(owner._current_layer_va)
+    code += b"\x85\xc0"
+    code.jump_short_if(Condition.NOT_EQUAL, "map_owner_compare")
+    code += b"\x40"  # null -> 1, clearing ZF without dereferencing the root
+    code.jump_short("map_owner_checked")
+    code.label("map_owner_compare")
+    code += b"\x81\x38" + struct.pack("<I", owner.profile.address("driving_map.vtable"))
+    code.label("map_owner_checked")
+    code += b"\x5a\x59\x58"
+    code.jump_if(Condition.EQUAL, "map_transform")
 
     system_fallback = "tbt_dispatch"
     # ActionMenu publishes final physical object rectangles, but GK3's

@@ -137,8 +137,29 @@ def _exercise() -> None:
     # A retained SIDNEY cannot take an active modal's input, regardless of
     # where its ownership query appears in the generated dispatcher.
     _exercise_modal(compiler, cpu, ROOT + 0x100)
-    _exercise_map(compiler, cpu, seen)
+    _exercise_map_lifetime(compiler, cpu, seen, layer)
     _exercise_action_positions(compiler, cpu, seen)
+
+
+def _exercise_map_lifetime(
+    compiler: SidneyPresentationCompiler, cpu: Uc, seen: list[tuple[int, int]], layer: int
+) -> None:
+    # A map can remain allocated after travel. Its retained-resource flag
+    # must not change room interaction coordinates, even after save restore.
+    for point in ((40, 200), (640, 200), (1240, 200)):
+        cpu.mem_write(STATE, bytes(128))
+        _write(cpu, STATE + 16, 1)
+        _write(cpu, compiler._physical_width_global_va, 1280, 800)
+        _write(cpu, POINT, *point)
+        _write(cpu, STACK, STOP, POINT)
+        cpu.reg_write(UC_X86_REG_ESP, STACK)
+        cpu.reg_write(UC_X86_REG_EAX, CALLBACK)
+        cpu.reg_write(UC_X86_REG_ECX, 123)
+        cpu.emu_start(BASE, STOP, count=1000)
+        assert seen[-1] == point
+    _write(cpu, layer, GOG_BUILD.address("driving_map.vtable"))
+    _exercise_map(compiler, cpu, seen)
+    _write(cpu, layer, 0)  # unrelated active owner, no map affine
 
 
 def _exercise_action_positions(
