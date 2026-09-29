@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING
 
 from gk3hd.patch.binary.x86 import Condition, X86Emitter
 from gk3hd.patch.definitions.runtime2d.layout import (
+    SIDNEY_CONSTRUCTION_SEGMENT,
+    SIDNEY_DRAW_DEPTH_OFFSET,
+    SIDNEY_PRESENTATION_SEGMENT,
+    SIDNEY_ROOT_POINTER_OFFSET,
+    SIDNEY_TOOLBAR_DRAW_OFFSET,
     SYSTEM_CONTROL_DROPDOWN_HIGHLIGHT_TRACE_OFFSET,
     SYSTEM_CONTROL_DROPDOWN_SEED_BUDGET_OFFSET,
 )
@@ -87,7 +92,9 @@ class DropdownFeatureCompiler(SystemCompilerContext):
             render_depth_va=system_va + self._off_render_depth,
             full_damage_region_va=control_va + self._off_control_full_damage_region,
             full_damage_rect_va=control_va + self._off_control_full_damage_rect,
-            target_va=self._native_resolution_dropdown_draw_va,
+            target_va=self.symbols.va(
+                SIDNEY_CONSTRUCTION_SEGMENT.logical_name, SIDNEY_TOOLBAR_DRAW_OFFSET
+            ),
         )
         fit = self.build_resolution_dropdown_fit_helper(
             wrapper_va=fit_va,
@@ -360,6 +367,23 @@ class DropdownFeatureCompiler(SystemCompilerContext):
         # base. The root's bottom grows to include Advanced/Graphics panels,
         # so averaging its current top and bottom would make this anchor follow
         # the expanded union and under-correct the popup overflow.
+        code.call_absolute(self.profile.address("ui.current_layer"))
+        code.raw(b"\x85\xc0")
+        code.jump_short_if(Condition.EQUAL, "room_fit")
+        code.raw(
+            b"\x3b\x05"
+            + struct.pack(
+                "<I",
+                self.symbols.va(
+                    SIDNEY_PRESENTATION_SEGMENT.logical_name, SIDNEY_ROOT_POINTER_OFFSET
+                ),
+            )
+        )
+        code.jump_short_if(Condition.NOT_EQUAL, "room_fit")
+        code.raw(b"\x8b\x6e\x28\x81\xed\x00\x03\x00\x00")
+        code.jump_short_if(Condition.LESS_OR_EQUAL, "done")
+        code.jump_short("translate")
+        code.label("room_fit")
         code.raw(b"\x8b\x6f\x20\x83\xc5\x25")
         # The direct renderer keeps toolbar coordinates in framebuffer space,
         # so its stable authored-base centre is already the presented anchor.
@@ -376,6 +400,7 @@ class DropdownFeatureCompiler(SystemCompilerContext):
         code.raw(b"\x69\xc0\x00\x03\x00\x00")
         code.raw(b"\x8b\x1d" + struct.pack("<I", self._physical_width_va + 4))
         code.raw(b"\x8d\x44\x18\xff\x31\xd2\xf7\xf3\x8b\xe8")
+        code.label("translate")
         code.raw(b"\x29\x6e\x20\x29\x6e\x28")
         code.raw(b"\x8b\x7e\x4c\x8b\x5e\x50\x31\xc9")
         code.label("child_loop")
@@ -424,6 +449,15 @@ class DropdownFeatureCompiler(SystemCompilerContext):
         # and four for the source/target X/Y centres shared by all four edges.
         code = X86Emitter(base_va=wrapper_va)
         code.raw(b"\x55\x8b\xec\x83\xec\x20\x53\x56\x57\x8b\xd9")
+        code.raw(
+            b"\x83\x3d"
+            + struct.pack(
+                "<I",
+                self.symbols.va(SIDNEY_PRESENTATION_SEGMENT.logical_name, SIDNEY_DRAW_DEPTH_OFFSET),
+            )
+            + b"\x00"
+        )
+        code.jump_if(Condition.NOT_EQUAL, "native")
         code.raw(b"\xa1" + struct.pack("<I", pending_ptr_va) + b"\x85\xc0")
         code.jump_if(Condition.EQUAL, "native")
         code.raw(b"\x05\x34\x01\x00\x00\x3b\xd8")

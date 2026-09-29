@@ -42,6 +42,12 @@ SIDNEY_PRESENTATION_SEGMENT = RuntimeSegment(
 )
 # Shared bitmap clipping consumes the same draw scope as SIDNEY presentation.
 SIDNEY_DRAW_DEPTH_OFFSET = 0x0C
+SIDNEY_ROOT_POINTER_OFFSET = 0x120
+SIDNEY_TOOLBAR_LAYOUT_OFFSET = 0xE00
+SIDNEY_TOOLBAR_DRAW_OFFSET = 0xE80
+SIDNEY_TOOLBAR_WARP_OFFSET = 0xF00
+SYSTEM_TOOLBAR_LAYOUT_OFFSET = 0x5D60
+SYSTEM_TOOLBAR_WARP_OFFSET = 0x55B0
 # The shared pointer dispatcher and SystemScreen's delayed-tooltip resolver
 # both need the toolbar's one canonical target-to-source inverse.  Keep the
 # helper address and its re-entrant call depth in the runtime layout owner so

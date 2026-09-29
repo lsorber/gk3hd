@@ -35,6 +35,7 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SIDNEY_PORTRAIT_SOURCE_OFFSET,
     SIDNEY_PORTRAIT_STATE_OFFSET,
     SIDNEY_PRESENTATION_SEGMENT,
+    SIDNEY_ROOT_POINTER_OFFSET,
     SIDNEY_SYSTEM_INPUT_HELPER_OFFSET,
     SIDNEY_TOOLBAR_INPUT_DEPTH_OFFSET,
     SIDNEY_TOOLBAR_INPUT_HELPER_OFFSET,
@@ -49,6 +50,7 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     TIMEBLOCK_LOGICAL_RECT_OFFSET,
     TIMEBLOCK_SEGMENT,
     TIMEBLOCK_TARGET_RECT_OFFSET,
+    UI_FILTER_SEGMENT,
     install_runtime_segment,
 )
 from gk3hd.patch.definitions.runtime2d.sidney_alpha import (
@@ -82,6 +84,7 @@ from gk3hd.patch.definitions.runtime2d.sidney_input import (
     build_reference_canvas_input_wrapper,
     build_tbt_input_wrapper,
 )
+from gk3hd.patch.definitions.runtime2d.ui_filter import WRAPPER_OFFSET as UI_FILTER_WRAPPER_OFFSET
 from gk3hd.patch.model import PatchError
 
 if TYPE_CHECKING:
@@ -150,7 +153,7 @@ class SidneyPresentationCompiler:
     _status_trace_capacity: ClassVar[int] = 64
     _status_trace_stride: ClassVar[int] = 40
     _off_blt_rect_scratch: ClassVar[int] = 0xC00
-    _off_root_ptr: ClassVar[int] = 0x120
+    _off_root_ptr: ClassVar[int] = SIDNEY_ROOT_POINTER_OFFSET
     _off_input_transform_count: ClassVar[int] = 0x124
     _off_input_source_x: ClassVar[int] = 0x128
     _off_input_logical_x: ClassVar[int] = 0x12C
@@ -660,6 +663,12 @@ class SidneyPresentationCompiler:
             ),
             cursor_surface_classifier_va=self.symbols.va(
                 SYSTEM_CONTROL_SEGMENT.logical_name, SYSTEM_CONTROL_CURSOR_CLASSIFIER_OFFSET
+            ),
+            # The renderer fast path must see final presentation coordinates.
+            # Installing it before SIDNEY's canvas fit drew opaque toolbar
+            # icons in model space while their alpha panel was fitted later.
+            final_transfer_va=self.symbols.va(
+                UI_FILTER_SEGMENT.logical_name, UI_FILTER_WRAPPER_OFFSET
             ),
         )
         tbt_input_wrapper = build_tbt_input_wrapper(

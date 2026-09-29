@@ -12,6 +12,7 @@ from gk3hd.patch.binary.x86 import BranchOpcode, decode_rel32_branch
 from gk3hd.patch.definitions.runtime2d.geometry import AUTHORED_FRAME_HEIGHT, AUTHORED_FRAME_WIDTH
 from gk3hd.patch.definitions.runtime2d.layout import (
     SIDNEY_CONSTRUCTION_SEGMENT,
+    SIDNEY_DRAW_DEPTH_OFFSET,
     SIDNEY_FINGERPRINT_DIMENSIONS_OFFSET,
     SIDNEY_FINGERPRINT_STATE_OFFSET,
     SIDNEY_FRAME_DIMENSIONS_OFFSET,
@@ -24,6 +25,14 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SIDNEY_IMAGE_DIMENSIONS_OFFSET,
     SIDNEY_PORTRAIT_STATE_OFFSET,
     SIDNEY_PRESENTATION_SEGMENT,
+    SIDNEY_ROOT_POINTER_OFFSET,
+    SIDNEY_TOOLBAR_DRAW_OFFSET,
+    SIDNEY_TOOLBAR_LAYOUT_OFFSET,
+    SIDNEY_TOOLBAR_WARP_OFFSET,
+    SYSTEM_CONTROL_SEGMENT,
+    SYSTEM_CONTROL_TOOLBAR_INPUT_VALID_OFFSET,
+    SYSTEM_TOOLBAR_LAYOUT_OFFSET,
+    SYSTEM_TOOLBAR_WARP_OFFSET,
     install_runtime_segment,
 )
 from gk3hd.patch.definitions.runtime2d.sidney_frame import (
@@ -39,6 +48,7 @@ from gk3hd.patch.definitions.runtime2d.sidney_images import (
     build_fingerprint_dimensions,
     build_image_dimensions,
 )
+from gk3hd.patch.definitions.runtime2d.sidney_toolbar import build_draw, build_layout, build_warp
 from gk3hd.patch.model import PatchError
 
 if TYPE_CHECKING:
@@ -190,6 +200,47 @@ class SidneyConstructionCompiler:
         payload.place(label="private dimension table", offset=0, payload=bytes(header))
         mutations = ExecutableMutationPlan(owner=self.id)
         self._install_frame(payload, mutations, section_va=section_va)
+        runtime_va = section_va - SIDNEY_CONSTRUCTION_SEGMENT.offset
+        root_va = runtime_va + SIDNEY_PRESENTATION_SEGMENT.offset + SIDNEY_ROOT_POINTER_OFFSET
+        control_va = runtime_va + SYSTEM_CONTROL_SEGMENT.offset
+        payload.place(
+            label="SIDNEY toolbar canvas bounds",
+            offset=SIDNEY_TOOLBAR_LAYOUT_OFFSET,
+            payload=build_layout(
+                wrapper_va=section_va + SIDNEY_TOOLBAR_LAYOUT_OFFSET,
+                current_layer_va=self.profile.address("ui.current_layer"),
+                root_va=root_va,
+                input_valid_va=control_va + SYSTEM_CONTROL_TOOLBAR_INPUT_VALID_OFFSET,
+                native_va=self.profile.address("ingame_toolbar.layout_commit"),
+                fallback_va=control_va + SYSTEM_TOOLBAR_LAYOUT_OFFSET,
+            ),
+            limit=SIDNEY_TOOLBAR_DRAW_OFFSET,
+        )
+        payload.place(
+            label="SIDNEY deferred toolbar draw scope",
+            offset=SIDNEY_TOOLBAR_DRAW_OFFSET,
+            payload=build_draw(
+                wrapper_va=section_va + SIDNEY_TOOLBAR_DRAW_OFFSET,
+                current_layer_va=self.profile.address("ui.current_layer"),
+                root_va=root_va,
+                depth_va=runtime_va + SIDNEY_PRESENTATION_SEGMENT.offset + SIDNEY_DRAW_DEPTH_OFFSET,
+                native_va=self.profile.address("resolution_dropdown.draw"),
+            ),
+            limit=SIDNEY_TOOLBAR_WARP_OFFSET,
+        )
+        payload.place(
+            label="SIDNEY slider pointer return",
+            offset=SIDNEY_TOOLBAR_WARP_OFFSET,
+            payload=build_warp(
+                wrapper_va=section_va + SIDNEY_TOOLBAR_WARP_OFFSET,
+                current_layer_va=self.profile.address("ui.current_layer"),
+                root_va=root_va,
+                physical_width_va=self.profile.address("display.dimensions"),
+                native_va=self.profile.address("input.set_cursor_position"),
+                fallback_va=control_va + SYSTEM_TOOLBAR_WARP_OFFSET,
+            ),
+            limit=SIDNEY_CONSTRUCTION_SEGMENT.size,
+        )
         pe.write_bytes(section.pointer_to_raw_data, payload.build())
         for site in self._sites:
             patched = site.patched_bytes(

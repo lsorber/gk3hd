@@ -17,6 +17,8 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     LOAD_SAVE_BUTTON_SEGMENT,
     LOAD_SAVE_SEGMENT,
     MOVIE_SEGMENT,
+    SPRITE_CACHE_SEGMENT,
+    SPRITE_CACHE_TRANSFER_OFFSET,
     SYSTEM_ACTION_LAYOUT_STATE_END_OFFSET,
     SYSTEM_CONTROL_HD_FONT_ACTIVE_OFFSET,
     SYSTEM_CONTROL_HD_FONT_STATE_END_OFFSET,
@@ -303,11 +305,16 @@ class SystemScreenCompiler(SystemCompilerContext):
             loadsave_frame_presenter_va=loadsave.frame_presenter_va,
             closeup_frame_presenter_va=control_screens.closeup_frame_presenter_va,
         )
+        install_area_adapter(
+            pe,
+            profile=self.profile,
+            native_va=self.symbols.va(
+                SPRITE_CACHE_SEGMENT.logical_name, SPRITE_CACHE_TRANSFER_OFFSET
+            ),
+        )
         blt_wrapper = blit_dispatch.build_blt_wrapper(
             wrapper_va=blt_wrapper_va,
-            downstream_va=install_area_adapter(
-                pe, profile=self.profile, native_va=self._hd_wrapper_va()
-            ),
+            downstream_va=self._hd_wrapper_va(),
             render_depth_va=section_va + self._off_render_depth,
             input_active_va=section_va + self._off_input_active,
             transform_mode_va=section_va + self._off_transform_mode,

@@ -50,6 +50,7 @@ def test_cursor_ownership_precedes_active_and_inactive_sidney_dispatch() -> None
         portrait_source_va=0x805000,
         frame_source_va=0x806000,
         cursor_surface_classifier_va=classifier,
+        final_transfer_va=0x810000 + SPRITE_CACHE_TRANSFER_OFFSET,
     )
     decoded = list(Cs(CS_ARCH_X86, CS_MODE_32).disasm(payload, base))
     assert any(

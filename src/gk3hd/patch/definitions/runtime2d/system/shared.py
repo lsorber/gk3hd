@@ -50,6 +50,8 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_RENDER_DEPTH_OFFSET,
     SYSTEM_ROOT_POINTER_OFFSET,
     SYSTEM_SEGMENT,
+    SYSTEM_TOOLBAR_LAYOUT_OFFSET,
+    SYSTEM_TOOLBAR_WARP_OFFSET,
     SYSTEM_TRANSFORM_MODE_OFFSET,
 )
 from gk3hd.patch.model import PatchError
@@ -319,7 +321,7 @@ class SystemCompilerContext:
     _off_toolbar_preview_surface: ClassVar[int] = 0x5500
     _off_toolbar_preview_prepare: ClassVar[int] = 0x5520
     _off_toolbar_preview_prepare_limit: ClassVar[int] = 0x55B0
-    _off_toolbar_cursor_warp: ClassVar[int] = 0x55B0
+    _off_toolbar_cursor_warp: ClassVar[int] = SYSTEM_TOOLBAR_WARP_OFFSET
     _off_ingame_toolbar_destructor_wrapper_limit: ClassVar[int] = 0x5700
     _off_control_action_destructor_wrapper: ClassVar[int] = 0x5700
     _off_control_action_destructor_wrapper_limit: ClassVar[int] = 0x5800
@@ -335,7 +337,7 @@ class SystemCompilerContext:
     _off_modal_tooltip_resolver_wrapper: ClassVar[int] = 0x5E00
     # The 82-byte fixed-layer epilogue leaves a bounded tail for the toolbar's
     # 132-byte layout commit; neither needs another runtime segment.
-    _off_toolbar_layout: ClassVar[int] = 0x5D60
+    _off_toolbar_layout: ClassVar[int] = SYSTEM_TOOLBAR_LAYOUT_OFFSET
     _off_modal_tooltip_resolver_wrapper_limit: ClassVar[int] = 0x6000
     # The native ActionMenu destructor can trail a successful action callback.
     # Validate current-layer membership at the render-thread ownership edge so

@@ -40,6 +40,7 @@ from gk3hd.patch.definitions.runtime2d.inventory_alpha import (
 from gk3hd.patch.definitions.runtime2d.layout import (
     RESOURCE_DRIVING_MAP_INPUT_ACTIVE_OFFSET,
     RESOURCE_SEGMENT,
+    SIDNEY_PRESENTATION_SEGMENT,
     SYSTEM_CONTROL_FULL_DAMAGE_RECT_OFFSET,
     SYSTEM_CONTROL_MODAL_DAMAGE_RECT_OFFSET,
     SYSTEM_CONTROL_TOOLBAR_SEED_BUDGET_OFFSET,
@@ -2082,7 +2083,9 @@ def test_toolbar_blt_ownership_includes_live_popup_outside_root() -> None:
     """An upward list owns its backing and first rows, without owning room art."""
     profile = next(iter(SUPPORTED_BUILDS.values()))
     compiler = SystemScreenCompiler(
-        symbols=RuntimeSymbols(segments=()),
+        symbols=RuntimeSymbols(
+            segments=(RuntimeSegmentAddress(SIDNEY_PRESENTATION_SEGMENT, 0, 0, 0x900000),)
+        ),
         profile=profile,
         room_rendering_abi=RoomRenderingABI(
             width_va=0x00790004,
@@ -2161,7 +2164,9 @@ def test_resolution_dropdown_highlight_uses_exact_child_identity() -> None:
     """The solid hover primitive shares the popup affine without heuristics."""
     profile = next(iter(SUPPORTED_BUILDS.values()))
     compiler = SystemScreenCompiler(
-        symbols=RuntimeSymbols(segments=()),
+        symbols=RuntimeSymbols(
+            segments=(RuntimeSegmentAddress(SIDNEY_PRESENTATION_SEGMENT, 0, 0, 0x900000),)
+        ),
         profile=profile,
         room_rendering_abi=RoomRenderingABI(
             width_va=0x00790004,
@@ -2362,7 +2367,9 @@ def test_resolution_dropdown_fit_is_driven_by_overflow_at_reference_height() -> 
     """The runtime mode list can overflow even on the 1024x768 reference screen."""
     profile = next(iter(SUPPORTED_BUILDS.values()))
     compiler = SystemScreenCompiler(
-        symbols=RuntimeSymbols(segments=()),
+        symbols=RuntimeSymbols(
+            segments=(RuntimeSegmentAddress(SIDNEY_PRESENTATION_SEGMENT, 0, 0, 0x900000),)
+        ),
         profile=profile,
         room_rendering_abi=RoomRenderingABI(
             width_va=0x00790004,

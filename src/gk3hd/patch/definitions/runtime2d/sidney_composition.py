@@ -99,6 +99,7 @@ def build_blt_wrapper(
     portrait_source_va: int,
     frame_source_va: int,
     cursor_surface_classifier_va: int,
+    final_transfer_va: int,
 ) -> bytes:
     """Map SIDNEY-local final blits through its fitted presentation affine."""
     # 0x54F980 is a thiscall whose second stack argument ([ESP+8]) is the
@@ -187,9 +188,7 @@ def build_blt_wrapper(
     code.label("restore")
     code += b"\x61"  # popad
     code.label("native")
-    code.jump_absolute(
-        owner.symbols.va(SPRITE_CACHE_SEGMENT.logical_name, SPRITE_CACHE_TRANSFER_OFFSET)
-    )
+    code.jump_absolute(final_transfer_va)
     code.label("trace_status")
     code += b"\xa1" + struct.pack("<I", status_trace_count_va)
     code += b"\x83\xf8" + bytes([owner._status_trace_capacity])

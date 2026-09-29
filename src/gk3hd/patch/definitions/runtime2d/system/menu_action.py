@@ -9,6 +9,12 @@ from typing import TYPE_CHECKING
 from gk3hd.patch.binary.x86 import Condition, X86Emitter
 from gk3hd.patch.definitions.runtime2d.geometry import AUTHORED_FRAME_HEIGHT
 from gk3hd.patch.definitions.runtime2d.layout import (
+    SIDNEY_CONSTRUCTION_SEGMENT,
+    SIDNEY_DRAW_DEPTH_OFFSET,
+    SIDNEY_PRESENTATION_SEGMENT,
+    SIDNEY_ROOT_POINTER_OFFSET,
+    SIDNEY_TOOLBAR_LAYOUT_OFFSET,
+    SIDNEY_TOOLBAR_WARP_OFFSET,
     SYSTEM_CONTROL_ACTION_LIFETIME_LAST_LAYER_OFFSET,
     SYSTEM_CONTROL_ACTION_LIFETIME_LAST_ROOT_OFFSET,
     SYSTEM_CONTROL_ACTION_LIFETIME_RETIRE_COUNT_OFFSET,
@@ -332,8 +338,12 @@ class ActionMenuFeatureCompiler(SystemCompilerContext):
             action_destructor_wrapper_va=action_destructor_va,
             toolbar_root_wrapper_va=toolbar_root_va,
             toolbar_destructor_wrapper_va=toolbar_destructor_va,
-            toolbar_layout_va=toolbar_layout_va,
-            toolbar_cursor_warp_va=toolbar_cursor_warp_va,
+            toolbar_layout_va=self.symbols.va(
+                SIDNEY_CONSTRUCTION_SEGMENT.logical_name, SIDNEY_TOOLBAR_LAYOUT_OFFSET
+            ),
+            toolbar_cursor_warp_va=self.symbols.va(
+                SIDNEY_CONSTRUCTION_SEGMENT.logical_name, SIDNEY_TOOLBAR_WARP_OFFSET
+            ),
             action_layout_helper_va=action_layout_va,
             action_lifetime_helper_va=action_lifetime_va,
             toolbar_blt_helper_va=toolbar_blt_va,
@@ -630,6 +640,33 @@ class ActionMenuFeatureCompiler(SystemCompilerContext):
         # EAX returns one when the caller's RECT changed.
         code = X86Emitter(base_va=wrapper_va)
         code.raw(b"\x60\xc7\x44\x24\x1c\x00\x00\x00\x00")
+        # SIDNEY's nested toolbar shares its authored canvas and final-blit
+        # affine. Do not first apply the room toolbar's local-anchor fit.
+        code.raw(
+            b"\x83\x3d"
+            + struct.pack(
+                "<I",
+                self.symbols.va(SIDNEY_PRESENTATION_SEGMENT.logical_name, SIDNEY_DRAW_DEPTH_OFFSET),
+            )
+            + b"\x00"
+        )
+        code.jump_if(Condition.NOT_EQUAL, "done")
+        # Visibility/hover updates can submit a toolbar blit outside its root
+        # Draw scope. They still belong to SIDNEY, never to the room affine.
+        code.call_absolute(self.profile.address("ui.current_layer"))
+        code.raw(b"\x85\xc0")
+        code.jump_short_if(Condition.EQUAL, "room_toolbar")
+        code.raw(
+            b"\x3b\x05"
+            + struct.pack(
+                "<I",
+                self.symbols.va(
+                    SIDNEY_PRESENTATION_SEGMENT.logical_name, SIDNEY_ROOT_POINTER_OFFSET
+                ),
+            )
+        )
+        code.jump_if(Condition.EQUAL, "done")
+        code.label("room_toolbar")
         code.raw(b"\x8b\x35" + struct.pack("<I", root_ptr_va) + b"\x85\xf6")
         code.jump_if(Condition.EQUAL, "done")
         # The toolbar root extends its bottom edge as the wrench, Advanced,
