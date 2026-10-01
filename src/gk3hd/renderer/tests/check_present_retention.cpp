@@ -63,6 +63,13 @@ int wmain(int argc, wchar_t** argv) {
       check("prime presentation mode", front->Flip(nullptr, DDFLIP_WAIT | DDFLIP_NOVSYNC));
       D3DRECT full{0, 0, 96, 64}, corner{80, 48, 96, 64};
       check("initial GPU clear", viewport->Clear2(1, &full, D3DCLEAR_TARGET, 0xffff0000, 1.f, 0));
+      // Exercise multiple in-flight presents without readbacks that would mask
+      // premature acquire/present semaphore reuse by synchronizing every frame.
+      for (unsigned frame = 0; frame < 64; ++frame) {
+        check("burst BeginScene", device->BeginScene());
+        check("burst EndScene", device->EndScene());
+        check("burst Flip", front->Flip(nullptr, DDFLIP_WAIT | DDFLIP_NOVSYNC));
+      }
       for (unsigned frame = 0; frame < 8; ++frame) {
         check("BeginScene", device->BeginScene());
         check("EndScene", device->EndScene());
@@ -84,7 +91,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     DestroyWindow(window);
     FreeLibrary(module);
-    std::cout << "Eight actual presents: " << wrong << " incorrect retained pixels\n";
+    std::cout << "Burst and checked presents: " << wrong << " incorrect retained pixels\n";
     return wrong ? 1 : 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

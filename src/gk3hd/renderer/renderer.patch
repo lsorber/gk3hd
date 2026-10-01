@@ -50,6 +50,40 @@ index acd746e..a210011 100644
  option('enable_d3d11', type : 'boolean', value : true, description: 'Build D3D11')
  option('build_id',     type : 'boolean', value : false)
 +option('gk3hd_version', type : 'string', value : 'v1.13.0-gk3hd.1', description : 'Modified GK3HD renderer version')
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -4643,9 +4643,10 @@ namespace dxvk {
+         if (unlikely(needsReadback) && pResource->GetImage() != nullptr) {
+           Rc<DxvkImage> resourceImage = pResource->GetImage();
+
+-          Rc<DxvkImage> mappedImage = resourceImage->info().sampleCount != 1
++          const bool needsResolve = resourceImage->info().sampleCount != VK_SAMPLE_COUNT_1_BIT;
++          Rc<DxvkImage> mappedImage = needsResolve
+             ? pResource->GetResolveImage()
+-            : std::move(resourceImage);
++            : resourceImage;
+
+           // When using any map mode which requires the image contents
+           // to be preserved, and if the GPU has write access to the
+@@ -4656,7 +4657,7 @@ namespace dxvk {
+           // lock MSAA render targets even though
+           // that's entirely illegal and they explicitly
+           // tell us that they do NOT want to lock them...
+-          if (resourceImage != nullptr) {
++          if (needsResolve) {
+             EmitCs([
+               cMainImage    = resourceImage,
+               cResolveImage = mappedImage,
+@@ -4669,7 +4670,7 @@ namespace dxvk {
+               region.dstOffset      = VkOffset3D { 0, 0, 0 };
+               region.extent         = cMainImage->mipLevelExtent(cSubresource.mipLevel);
+
+-              if (cSubresource.aspectMask != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
++              if (cSubresource.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) {
+                 ctx->resolveImage(
+                   cResolveImage, cMainImage, region,
+                   cMainImage->info().format);
 diff --git a/src/d3d9/d3d9_main.cpp b/src/d3d9/d3d9_main.cpp
 index e182b5f..b5bd467 100644
 --- a/src/d3d9/d3d9_main.cpp
@@ -3130,3 +3164,251 @@ index 0000000..1c9cebd
 +  return {valid || FAILED(hr),hr,valid};
 +}
 +}
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 040dd4a..2913a6e 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -3951,6 +3951,7 @@ namespace dxvk {
+     info.clearValueCount      = clearValueCount;
+     info.pClearValues         = clearValues;
+ 
++    m_renderPassBarrier = ops.barrier;
+     m_cmd->cmdBeginRenderPass(&info,
+       VK_SUBPASS_CONTENTS_INLINE);
+ 
+@@ -3967,6 +3968,13 @@ namespace dxvk {
+ 
+   void DxvkContext::renderPassUnbindFramebuffer() {
+     m_cmd->cmdEndRenderPass();
++    if (m_renderPassBarrier.srcStages && m_renderPassBarrier.dstStages) {
++      VkMemoryBarrier barrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
++        m_renderPassBarrier.srcAccess, m_renderPassBarrier.dstAccess };
++      m_cmd->cmdPipelineBarrier(DxvkCmdBuffer::ExecBuffer,
++        m_renderPassBarrier.srcStages, m_renderPassBarrier.dstStages, 0,
++        1, &barrier, 0, nullptr, 0, nullptr);
++    }
+   }
+ 
+ 
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 25b19ab..85ef9ee 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -1074,6 +1074,7 @@ namespace dxvk {
+     DxvkStagingBuffer       m_staging;
+ 
+     DxvkRenderTargetLayouts m_rtLayouts = { };
++    DxvkRenderPassBarrier m_renderPassBarrier = { };
+ 
+     VkPipeline m_gpActivePipeline = VK_NULL_HANDLE;
+     VkPipeline m_cpActivePipeline = VK_NULL_HANDLE;
+diff --git a/src/dxvk/dxvk_renderpass.cpp b/src/dxvk/dxvk_renderpass.cpp
+index 2bac170..663ee02 100644
+--- a/src/dxvk/dxvk_renderpass.cpp
++++ b/src/dxvk/dxvk_renderpass.cpp
+@@ -163,15 +163,9 @@ namespace dxvk {
+       renderStages |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                    |  VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+ 
+-      VkImageAspectFlags loadAspects = 0;
+-
+-      if (ops.depthOps.loadOpD == VK_ATTACHMENT_LOAD_OP_LOAD)
+-        loadAspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+-      if (ops.depthOps.loadOpS == VK_ATTACHMENT_LOAD_OP_LOAD)
+-        loadAspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+-
+-      if (loadAspects & imageFormatInfo(m_format.depth.format)->aspectMask)
+-        renderAccess |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
++      // Dependencies are part of render-pass compatibility, unlike load/store
++      // operations. Include reads even in the compatible clear-only variant.
++      renderAccess |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+       
+       if (m_format.depth.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+         renderAccess |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+@@ -189,8 +183,7 @@ namespace dxvk {
+       renderStages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+       renderAccess |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+ 
+-      if (ops.colorOps[i].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD)
+-        renderAccess |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
++      renderAccess |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+     }
+ 
+     if (renderStages) {
+@@ -200,10 +193,7 @@ namespace dxvk {
+         0, renderAccess };
+     }
+ 
+-    if (ops.barrier.srcStages & (
+-          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+-          VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT |
+-          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)) {
++    {
+       subpassDeps[subpassDepCount++] = { 0, 0,
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+@@ -212,14 +202,8 @@ namespace dxvk {
+         VK_DEPENDENCY_BY_REGION_BIT };
+     }
+ 
+-    if (ops.barrier.srcStages && ops.barrier.dstStages) {
+-      subpassDeps[subpassDepCount++] = {
+-        0, VK_SUBPASS_EXTERNAL,
+-        ops.barrier.srcStages,
+-        ops.barrier.dstStages,
+-        ops.barrier.srcAccess,
+-        ops.barrier.dstAccess, 0 };
+-    }
++    // The operation-specific outgoing dependency is emitted explicitly after
++    // ending the render pass, so framebuffer/pipeline variants stay compatible.
+     
+     VkRenderPassCreateInfo info;
+     info.sType                        = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+@@ -329,4 +313,4 @@ namespace dxvk {
+     return true;
+   }
+   
+-}
+\ No newline at end of file
++}
+diff --git a/src/vulkan/vulkan_presenter.cpp b/src/vulkan/vulkan_presenter.cpp
+index 6902d13..2781437 100644
+--- a/src/vulkan/vulkan_presenter.cpp
++++ b/src/vulkan/vulkan_presenter.cpp
+@@ -44,37 +44,61 @@ namespace dxvk::vk {
+ 
+ 
+   VkResult Presenter::acquireNextImage(PresenterSync& sync, uint32_t& index) {
+-    sync = m_semaphores.at(m_frameIndex);
+-
+     // Don't acquire more than one image at a time
+-    if (m_acquireStatus == VK_NOT_READY) {
+-      m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
+-        m_swapchain, std::numeric_limits<uint64_t>::max(),
+-        sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
+-    }
++    if (m_acquireStatus == VK_NOT_READY)
++      m_acquireStatus = acquireImage();
+ 
+     if (m_acquireStatus != VK_SUCCESS && m_acquireStatus != VK_SUBOPTIMAL_KHR)
+       return m_acquireStatus;
+ 
+     index = m_imageIndex;
++    sync.acquire = m_semaphores.at(m_frameIndex).acquire;
++    // Reacquiring this image orders the next signal after its previous present.
++    sync.present = m_semaphores.at(m_imageIndex).present;
+     return m_acquireStatus;
+   }
+ 
+ 
++  VkResult Presenter::acquireImage() {
++    // A ring index alone cannot prove that the GPU consumed an acquire wait.
++    // Wait only for this slot's preceding submission, not for the whole queue.
++    VkFence fence = m_acquireConsumed.at(m_frameIndex);
++    VkResult status = m_vkd->vkWaitForFences(m_vkd->device(), 1, &fence,
++      VK_TRUE, std::numeric_limits<uint64_t>::max());
++    if (status != VK_SUCCESS)
++      return status;
++
++    return m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
++      m_swapchain, std::numeric_limits<uint64_t>::max(),
++      m_semaphores.at(m_frameIndex).acquire, VK_NULL_HANDLE, &m_imageIndex);
++  }
++
++
+   VkResult Presenter::presentImage() {
+-    PresenterSync sync = m_semaphores.at(m_frameIndex);
++    VkSemaphore present = m_semaphores.at(m_imageIndex).present;
++    VkFence consumed = m_acquireConsumed.at(m_frameIndex);
++    VkResult status = m_vkd->vkResetFences(m_vkd->device(), 1, &consumed);
++    if (status != VK_SUCCESS)
++      return status;
++
++    // Submitted after the rendering batch, on its queue, under the queue lock.
++    // This fence covers the acquire wait, NOT presentation completion. Present
++    // semaphores therefore belong to images rather than these frame slots.
++    status = m_vkd->vkQueueSubmit(m_device.queue, 0, nullptr, consumed);
++    if (status != VK_SUCCESS)
++      return status;
+ 
+     VkPresentInfoKHR info;
+     info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+     info.pNext              = nullptr;
+     info.waitSemaphoreCount = 1;
+-    info.pWaitSemaphores    = &sync.present;
++    info.pWaitSemaphores    = &present;
+     info.swapchainCount     = 1;
+     info.pSwapchains        = &m_swapchain;
+     info.pImageIndices      = &m_imageIndex;
+     info.pResults           = nullptr;
+ 
+-    VkResult status = m_vkd->vkQueuePresentKHR(m_device.queue, &info);
++    status = m_vkd->vkQueuePresentKHR(m_device.queue, &info);
+ 
+     if (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR)
+       return status;
+@@ -84,11 +108,7 @@ namespace dxvk::vk {
+     m_frameIndex += 1;
+     m_frameIndex %= m_semaphores.size();
+ 
+-    sync = m_semaphores.at(m_frameIndex);
+-
+-    m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
+-      m_swapchain, std::numeric_limits<uint64_t>::max(),
+-      sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
++    m_acquireStatus = acquireImage();
+ 
+     bool vsync = m_info.presentMode == VK_PRESENT_MODE_FIFO_KHR
+               || m_info.presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+@@ -220,8 +240,15 @@ namespace dxvk::vk {
+ 
+     // Create one set of semaphores per swap image
+     m_semaphores.resize(m_info.imageCount);
++    m_acquireConsumed.resize(m_info.imageCount, VK_NULL_HANDLE);
+ 
+     for (uint32_t i = 0; i < m_semaphores.size(); i++) {
++      VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
++      fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
++      if ((status = m_vkd->vkCreateFence(m_vkd->device(),
++          &fenceInfo, nullptr, &m_acquireConsumed[i])) != VK_SUCCESS)
++        return status;
++
+       VkSemaphoreCreateInfo semInfo;
+       semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+       semInfo.pNext = nullptr;
+@@ -481,10 +508,14 @@ namespace dxvk::vk {
+       m_vkd->vkDestroySemaphore(m_vkd->device(), sem.present, nullptr);
+     }
+ 
++    for (VkFence fence : m_acquireConsumed)
++      m_vkd->vkDestroyFence(m_vkd->device(), fence, nullptr);
++
+     m_vkd->vkDestroySwapchainKHR(m_vkd->device(), m_swapchain, nullptr);
+ 
+     m_images.clear();
+     m_semaphores.clear();
++    m_acquireConsumed.clear();
+ 
+     m_swapchain = VK_NULL_HANDLE;
+   }
+diff --git a/src/vulkan/vulkan_presenter.h b/src/vulkan/vulkan_presenter.h
+index 8df19ea..2988180 100644
+--- a/src/vulkan/vulkan_presenter.h
++++ b/src/vulkan/vulkan_presenter.h
+@@ -187,6 +187,7 @@ namespace dxvk::vk {
+ 
+     std::vector<PresenterImage> m_images;
+     std::vector<PresenterSync>  m_semaphores;
++    std::vector<VkFence>        m_acquireConsumed;
+ 
+     uint32_t m_imageIndex = 0;
+     uint32_t m_frameIndex = 0;
+@@ -195,6 +196,8 @@ namespace dxvk::vk {
+ 
+     FpsLimiter m_fpsLimiter;
+ 
++    VkResult acquireImage();
++
+     VkResult getSupportedFormats(
+             std::vector<VkSurfaceFormatKHR>& formats,
+       const PresenterDesc&            desc);

@@ -23,6 +23,15 @@ the original glyph footprint when stretching an exact 4x atlas replica.
 Clipped/unsupported operations retain native DirectDraw fallback.
 Color-key draws do not temporarily replace the application's shaders/render
 state: the unnecessary GPU key-draw/cache path has been removed.
+Single-sample color and depth readbacks copy their pixels directly, without
+issuing an invalid multisample resolve into the same image. The native readback
+test covers depth reads and full/partial background save-and-restore operations;
+the previous path crashes the AMD Windows driver during GK3 startup.
+Render-pass variants keep compatible dependencies while preserving their
+operation-specific barriers after the pass. Presentation semaphores belong to
+swapchain images; acquire semaphores are recycled only after their previous GPU
+wait completes. This avoids relying on driver-specific synchronization behavior
+without waiting for the entire device to become idle every frame.
 GK3 also needs the `speed_up_surface_checks` engine patch: fixing the renderer
 alone does not remove the game's unnecessary full-screen readiness readbacks.
 Selecting D7VK in the installer now journals `dxvk.conf` as well as the DLL.
@@ -103,7 +112,7 @@ The `latest.json` record identifies the last successful build for installation
 and release commands. Interrupted/incomplete directories are never overwritten.
 The outputs are `dxvk-sarek-VERSION.dll`, `dxvk-sarek-VERSION.txt` (third-party notices), and
 `dxvk-sarek-VERSION.json` (build provenance), where `VERSION` includes the upstream
-version and our modification revision (currently `1.13.0-gk3hd.1`).
+version and our modification revision (currently `1.13.0-gk3hd.2`).
 Use `gk3hd package draft --renderer`;
 the release tool verifies and uploads all three files separately. The reviewed
 source patch stays in this repository at the release tag. Only the DLL is

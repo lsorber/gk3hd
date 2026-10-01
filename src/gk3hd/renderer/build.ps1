@@ -145,7 +145,7 @@ try {
     $env:D7VK_LOG_PATH = $output
     $env:DXVK_LOG_PATH = $output
     Invoke-Checked $test @($dll)
-    foreach ($unit in @('region_tests', 'check_lock_regions', 'check_baseline_damage', 'check_native_copy', 'check_stretch', 'check_area_blend', 'check_area_blt', 'check_present_retention', 'check_wine_log_abi', 'check_descriptor_pool')) {
+    foreach ($unit in @('region_tests', 'check_lock_regions', 'check_baseline_damage', 'check_native_copy', 'check_stretch', 'check_area_blend', 'check_area_blt', 'check_present_retention', 'check_readback', 'check_wine_log_abi', 'check_descriptor_pool')) {
         $unitExe = Join-Path $output "$unit.exe"
         Invoke-Checked cl @('/nologo', '/std:c++17', '/EHsc', '/O2',
             (Join-Path $PSScriptRoot "tests/$unit.cpp"), "/I$(Join-Path $source 'src/ddraw')",
@@ -153,7 +153,7 @@ try {
             "/I$(Join-Path $source 'include/spirv/include')",
             "/Fe:$unitExe", "/Fo:$(Join-Path $output "$unit.obj")", # codespell:ignore fo
             '/link', 'ddraw.lib', 'dxguid.lib', 'user32.lib', 'gdi32.lib')
-        if ($unit -in @('check_area_blend', 'check_area_blt', 'check_present_retention')) { Invoke-Checked $unitExe @($dll) }
+        if ($unit -in @('check_area_blend', 'check_area_blt', 'check_present_retention', 'check_readback')) { Invoke-Checked $unitExe @($dll) }
         else { Invoke-Checked $unitExe @() }
     }
 

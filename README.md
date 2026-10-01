@@ -130,7 +130,7 @@ From a checkout:
 uv run poe lint                   # Formatting, lint, types and spelling
 uv run poe test                   # Fast tests; never launches GK3
 uv run poe test --slow            # Also test reconstruction and native patch execution
-uv run poe coverage              # Both suites with coverage (slower instrumentation)
+uv run poe coverage               # Both suites with coverage (slower instrumentation)
 uv run poe visual                 # 12 views: ten day-one scenes, SIDNEY and the driving map
 uv run poe visual --suite medium  # 25 views across all three days, including key interfaces
 uv run poe visual --suite large   # 100 views: varied locations, characters and interface states
