@@ -1,8 +1,8 @@
 {
-  "asset_url": "https://github.com/lsorber/gk3hd/releases/download/v1.1.0/dxvk-sarek-1.13.0-gk3hd.1.dll",
-  "dll_sha256": "657654d264eb9ddddb26f10c3f86d54fc56d91c099328c2891fe86f99d3c305d",
-  "dll_size": "2306048",
+  "asset_url": "https://github.com/lsorber/gk3hd/releases/download/v1.1.1/dxvk-sarek-1.13.0-gk3hd.2.dll",
+  "dll_sha256": "d9a4e944f49335bd7c16853b3ab8a13398b618879a536943fb8aebbe6c1bf4b3",
+  "dll_size": "2301952",
   "license": "Zlib",
   "repository": "lsorber/gk3hd",
-  "version": "1.13.0-gk3hd.1"
+  "version": "1.13.0-gk3hd.2"
 }

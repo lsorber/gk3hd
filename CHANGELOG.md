@@ -1,3 +1,11 @@
+## v1.1.1 (2026-09-29)
+
+### Fix
+
+- **renderer**: preserve cursor and tooltip backgrounds on AMD GPUs
+- **patch**: keep SIDNEY menus aligned and reachable
+- **patch**: keep pointer aligned after motorcycle travel
+
 ## v1.1.0 (2026-09-27)
 
 ### Feat
