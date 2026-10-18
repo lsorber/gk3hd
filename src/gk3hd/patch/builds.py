@@ -92,10 +92,9 @@ class BuildProfile:
             raise ProfileError(detail) from exc
 
 
-# Steamless normalization produces the same patch-relevant code/data layout as
-# the DRM-free GOG executable. The hashes stay distinct because support is
-# explicitly bound to the two complete input binaries rather than inferred
-# from a handful of matching sites.
+# The stock GOG installer, GOG's CD-check hotfix and normalized Steam game share
+# the patch-relevant code/data layout. Keep each complete input hash distinct:
+# matching a handful of sites does not establish support for an unknown build.
 _SHARED_SITES = MappingProxyType(
     {
         "bitmap.rgb565_creation_case": PatchSite(
@@ -1613,8 +1612,16 @@ _SHARED_SYMBOLS = MappingProxyType(
 
 GOG_BUILD = BuildProfile(
     id=BuildId("gog"),
-    label="GOG",
+    label="GOG (CD-check hotfix)",
     original_sha256="ca544d6d6fe940da1b7787faefbf675990779dc5de4bbeca75f684d177996875",
+    sites=_SHARED_SITES,
+    symbols=_SHARED_SYMBOLS,
+)
+
+GOG_INSTALLER_BUILD = BuildProfile(
+    id=BuildId("gog_installer"),
+    label="GOG (standard installer)",
+    original_sha256="e9605cc8f3adefd29c74afa87a3b5426c540e45015e5ecc4ba33dd13b931c93a",
     sites=_SHARED_SITES,
     symbols=_SHARED_SYMBOLS,
 )
@@ -1635,7 +1642,7 @@ STEAM_BUILD = BuildProfile(
     symbols=_SHARED_SYMBOLS,
 )
 
-_BUILD_ITEMS = (GOG_BUILD, STEAM_NORMALIZED_BUILD, STEAM_BUILD)
+_BUILD_ITEMS = (GOG_BUILD, GOG_INSTALLER_BUILD, STEAM_NORMALIZED_BUILD, STEAM_BUILD)
 
 
 def _index_build_profiles(
