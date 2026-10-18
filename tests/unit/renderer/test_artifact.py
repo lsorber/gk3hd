@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from gk3hd.renderer import artifact
+from gk3hd.vr import artifact as vr_artifact
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,6 +50,7 @@ def renderer_dll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "notices_sha256": hashlib.sha256(notices).hexdigest(),
         "surface_tests": "passed",
         "helper_tests": "passed",
+        "openxr_prototype": False,
     }
     path.with_suffix(".json").write_text(json.dumps(build))
     (recipe / "upstream.json").write_text(json.dumps(pin))
@@ -79,6 +81,32 @@ def test_renderer_rejects_old_prefix_for_a_new_build(renderer_dll: Path) -> None
     renderer_dll.rename(wrong_name)
     with pytest.raises(ValueError, match="expected the build recipe's dxvk-sarek-"):
         artifact.inspect_dll(wrong_name)
+
+
+def test_renderer_prototype_cannot_be_published_as_the_release(renderer_dll: Path) -> None:
+    prototype = renderer_dll.with_name(renderer_dll.stem + "-xr-prototype.dll")
+    renderer_dll.rename(prototype)
+    with pytest.raises(ValueError, match="expected the build recipe's"):
+        artifact.inspect_dll(prototype)
+
+
+def test_renaming_a_prototype_does_not_make_it_a_flat_release(renderer_dll: Path) -> None:
+    provenance = renderer_dll.with_suffix(".json")
+    record = json.loads(provenance.read_text())
+    record["openxr_prototype"] = True
+    provenance.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="provenance"):
+        artifact.inspect_dll(renderer_dll)
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", None])
+def test_flat_variant_requires_an_actual_boolean(renderer_dll: Path, value: object) -> None:
+    provenance = renderer_dll.with_suffix(".json")
+    record = json.loads(provenance.read_text())
+    record["openxr_prototype"] = value
+    provenance.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="provenance"):
+        artifact.inspect_dll(renderer_dll)
 
 
 @pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"])
@@ -222,3 +250,124 @@ def test_renderer_replacement_before_tag_is_detected(renderer_dll: Path, suffix:
 def test_renderer_refuses_mutable_or_foreign_url(url: str) -> None:
     with pytest.raises(ValueError, match="immutable"):
         artifact.release_target({"asset_url": url, "dll_sha256": "a" * 64})
+
+
+@pytest.fixture
+def vr_dll(renderer_dll: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    recipe = artifact._TOOLS
+    xr = recipe / "vr"
+    xr.mkdir()
+    for name in ("CMakeLists.txt", "scene.cpp", "frame_bridge.h", "sarek.patch"):
+        (xr / name).write_bytes(b"synthetic VR source\n")
+    monkeypatch.setattr(vr_artifact, "RECIPE", recipe)
+    path = renderer_dll.with_name(renderer_dll.stem + "-xr-prototype.dll")
+    renderer_dll.rename(path)
+    record = json.loads(renderer_dll.with_suffix(".json").read_text())
+    notices = renderer_dll.with_suffix(".txt").read_bytes()
+    notices += b"=== OpenXR.txt ===\nOpenXR notice\n=== JsonCpp.txt ===\nJsonCpp notice\n"
+    path.with_suffix(".txt").write_bytes(notices)
+    record.update(
+        version=record["version"] + "-xr-prototype",
+        openxr_prototype=True,
+        openxr_inputs=vr_artifact.source_hashes(),
+        openxr_native_tests="passed",
+        openxr_gpu_tests="passed",
+        notices_sha256=hashlib.sha256(notices).hexdigest(),
+    )
+    path.with_suffix(".json").write_text(json.dumps(record))
+    return path
+
+
+def test_vr_prototype_is_verified_but_not_a_flat_release(vr_dll: Path) -> None:
+    candidate = vr_artifact.inspect_vr_dll(vr_dll)
+    candidate.verify_unchanged()
+    assert candidate.path == vr_dll
+    assert candidate.dll_sha256 == hashlib.sha256(vr_dll.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="expected the build recipe"):
+        artifact.inspect_dll(vr_dll)
+
+
+def test_private_installed_renderer_requires_the_full_vr_recipe(vr_dll: Path) -> None:
+    installed = vr_dll.with_name("ddraw.dll")
+    for suffix in (".dll", ".json", ".txt"):
+        installed.with_suffix(suffix).write_bytes(vr_dll.with_suffix(suffix).read_bytes())
+    asset = vr_artifact.inspect_installed_vr_dll(installed)
+    assert asset.dll_sha256 == vr_artifact.inspect_vr_dll(vr_dll).dll_sha256
+    provenance = installed.with_suffix(".json")
+    record = json.loads(provenance.read_bytes())
+    record["openxr_gpu_tests"] = "failed"
+    provenance.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="provenance"):
+        vr_artifact.inspect_installed_vr_dll(installed)
+
+
+@pytest.mark.parametrize(
+    "field", ["openxr_prototype", "openxr_inputs", "openxr_native_tests", "openxr_gpu_tests"]
+)
+def test_vr_requires_complete_native_and_gpu_qualification(vr_dll: Path, field: str) -> None:
+    provenance = vr_dll.with_suffix(".json")
+    record = json.loads(provenance.read_text())
+    record.pop(field)
+    provenance.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="provenance"):
+        vr_artifact.inspect_vr_dll(vr_dll)
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", None])
+def test_vr_variant_requires_an_actual_boolean(vr_dll: Path, value: object) -> None:
+    provenance = vr_dll.with_suffix(".json")
+    record = json.loads(provenance.read_text())
+    record["openxr_prototype"] = value
+    provenance.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="provenance"):
+        vr_artifact.inspect_vr_dll(vr_dll)
+
+
+@pytest.mark.parametrize("name", ["scene.cpp", "frame_bridge.h", "sarek.patch", "CMakeLists.txt"])
+def test_vr_rejects_changed_sources_and_tests(vr_dll: Path, name: str) -> None:
+    (vr_artifact.RECIPE / "vr" / name).write_bytes(b"changed\n")
+    with pytest.raises(ValueError, match="provenance"):
+        vr_artifact.inspect_vr_dll(vr_dll)
+
+
+@pytest.mark.parametrize("change", ["added", "removed", "changed-record"])
+def test_vr_inventory_must_match_exactly(vr_dll: Path, change: str) -> None:
+    if change == "added":
+        (vr_artifact.RECIPE / "vr/new_test.cpp").write_bytes(b"new test\n")
+    elif change == "removed":
+        (vr_artifact.RECIPE / "vr/scene.cpp").unlink()
+    else:
+        provenance = vr_dll.with_suffix(".json")
+        record = json.loads(provenance.read_text())
+        record["openxr_inputs"]["scene.cpp"] = "0" * 64
+        provenance.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="provenance"):
+        vr_artifact.inspect_vr_dll(vr_dll)
+
+
+def test_vr_source_hashes_accept_equivalent_crlf(vr_dll: Path) -> None:
+    before = vr_artifact.inspect_vr_dll(vr_dll)
+    source = vr_artifact.RECIPE / "vr/frame_bridge.h"
+    source.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
+    assert vr_artifact.inspect_vr_dll(vr_dll) == before
+
+
+@pytest.mark.parametrize("name", ["OpenXR.txt", "JsonCpp.txt"])
+def test_vr_requires_loader_notices_even_when_hash_matches(vr_dll: Path, name: str) -> None:
+    notices = vr_dll.with_suffix(".txt")
+    notices.write_text(notices.read_text().replace(f"=== {name} ===", "missing"))
+    provenance = vr_dll.with_suffix(".json")
+    record = json.loads(provenance.read_text())
+    record["notices_sha256"] = hashlib.sha256(notices.read_bytes()).hexdigest()
+    provenance.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="missing required third-party"):
+        vr_artifact.inspect_vr_dll(vr_dll)
+
+
+@pytest.mark.parametrize("suffix", [".dll", ".json", ".txt"])
+def test_vr_rechecks_files_before_installation(vr_dll: Path, suffix: str) -> None:
+    candidate = vr_artifact.inspect_vr_dll(vr_dll)
+    changed = vr_dll.with_suffix(suffix)
+    changed.write_bytes(b"x" * changed.stat().st_size)
+    with pytest.raises(ValueError, match="changed after verification"):
+        candidate.verify_unchanged()

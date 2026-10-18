@@ -22,15 +22,25 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_CONTROL_ACTION_TOOLTIP_FRAME_REQUEST_PENDING_OFFSET,
     SYSTEM_CONTROL_ACTION_TOOLTIP_TOOLBAR_INVERSE_COUNT_OFFSET,
     SYSTEM_CONTROL_ACTION_TOOLTIP_VISIBILITY_PRESENT_COUNT_OFFSET,
+    SYSTEM_CONTROL_SEGMENT,
     SYSTEM_CONTROL_TOOLBAR_INPUT_VALID_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_CACHE_ABI_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_CACHE_MAGIC,
+    SYSTEM_CONTROL_TOOLTIP_CACHE_VERSION,
     SYSTEM_CONTROL_TOOLTIP_CAPTURED_HOVER_OWNER_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_COMPOSITION_PENDING_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_LIMIT,
+    SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_DAMAGE_PTR_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_DEST_HANDLE_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_FRAME_PRESENT_COUNT_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_HOVER_IDENTITY_VALID_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_HOVER_TARGET_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_INNER_RECT_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_ISOLATION_ENABLED_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_LOCAL_TRANSFER_LIMIT,
+    SYSTEM_CONTROL_TOOLTIP_LOCAL_TRANSFER_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_LOCAL_WRAPPER_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_MOUSE_OWNER_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_OBJECT_PTR_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_OUTER_RECT_OFFSET,
@@ -48,18 +58,35 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_CONTROL_TOOLTIP_PANEL_WHITE_BLTFX_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_PRESENTED_RECT_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_RENDER_DAMAGE_REGION_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_REPLAY_COUNT_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_TEXT_LENGTH_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_TEXT_POINTER_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_VISIBLE_LATCH_OFFSET,
+    RuntimeImage,
 )
 from gk3hd.patch.definitions.runtime2d.system.menu_exports import (
     ActionMenuRuntimeExports,
     TooltipRuntimeExports,
 )
 from gk3hd.patch.definitions.runtime2d.system.shared import SystemCompilerContext
+from gk3hd.patch.model import PatchError
 
 if TYPE_CHECKING:
+    from gk3hd.patch.binary.image import PEFile
     from gk3hd.patch.binary.payload import SegmentPayloadBuilder
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TooltipCacheABI:
+    """Completed local pixels with a current-frame producer publication."""
+
+    surface_va: int
+    visible_va: int
+    pending_va: int
+    replay_count_va: int
+    isolation_enabled_va: int
+    source_rect_va: int
+    destination_rect_va: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -78,7 +105,7 @@ class TooltipFeatureCompiler(SystemCompilerContext):
 
     After:
         Tooltip lookup uses the owning menu's inverse affine; one bounded cache
-        captures panel and text as an atomic generation and the frame presenter
+        composes panel and text as an atomic generation and the frame presenter
         reuses or withdraws that generation on the correct page.
 
     Strategy:
@@ -91,6 +118,39 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         Native tooltip wording, cursor animation, room rendering, and cadence
         policy are unchanged.
     """
+
+    @classmethod
+    def cache_abi(cls, image: PEFile) -> TooltipCacheABI:
+        """Verify independent CPU pixels before publishing their native cells."""
+        section = RuntimeImage(image).get_section(SYSTEM_CONTROL_SEGMENT.logical_name)
+        if section is None:
+            msg = "tooltip cache dependency is missing"
+            raise PatchError(msg)
+        base = image.rva_to_va(section.virtual_address)
+        descriptor = base + SYSTEM_CONTROL_TOOLTIP_PANEL_DESCRIPTOR_OFFSET
+        if (
+            image.read_bytes(image.va_to_offset(base + SYSTEM_CONTROL_TOOLTIP_CACHE_ABI_OFFSET), 8)
+            != SYSTEM_CONTROL_TOOLTIP_CACHE_MAGIC
+            or image.read_u32_va(base + SYSTEM_CONTROL_TOOLTIP_CACHE_ABI_OFFSET + 8)
+            != SYSTEM_CONTROL_TOOLTIP_CACHE_VERSION
+            or image.read_u32_va(descriptor) != cls._ddsd_size
+            or image.read_u32_va(descriptor + 4) != cls._ddsd_caps_height_width
+            or image.read_u32_va(descriptor + 0x68) != cls._tooltip_panel_caps
+        ):
+            msg = "tooltip cache dependency is incompatible"
+            raise PatchError(msg)
+        # Pixel format is inherited when DirectDraw creates the cache. The XR
+        # consumer validates that live surface; an unstarted executable cannot
+        # promise its masks by inspecting an otherwise empty descriptor.
+        return TooltipCacheABI(
+            surface_va=base + SYSTEM_CONTROL_TOOLTIP_PANEL_SURFACE_OFFSET,
+            visible_va=base + SYSTEM_CONTROL_TOOLTIP_VISIBLE_LATCH_OFFSET,
+            pending_va=base + SYSTEM_CONTROL_TOOLTIP_COMPOSITION_PENDING_OFFSET,
+            replay_count_va=base + SYSTEM_CONTROL_TOOLTIP_REPLAY_COUNT_OFFSET,
+            isolation_enabled_va=base + SYSTEM_CONTROL_TOOLTIP_ISOLATION_ENABLED_OFFSET,
+            source_rect_va=base + SYSTEM_CONTROL_TOOLTIP_PANEL_SOURCE_RECT_OFFSET,
+            destination_rect_va=base + SYSTEM_CONTROL_TOOLTIP_OUTER_RECT_OFFSET,
+        )
 
     def emit_runtime(
         self,
@@ -110,6 +170,8 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         frame_presenter_va = control_va + self._off_tooltip_frame_presenter
         background_va = control_va + self._off_tooltip_background_helper
         transfer_va = control_va + self._off_tooltip_transfer_affine
+        local_transfer_va = control_va + SYSTEM_CONTROL_TOOLTIP_LOCAL_TRANSFER_OFFSET
+        control_gate_va = control_va + SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_OFFSET
         draw = self.build_tooltip_draw_wrapper(
             wrapper_va=draw_va,
             depth_va=control_va + self._off_tooltip_draw_depth,
@@ -223,6 +285,16 @@ class TooltipFeatureCompiler(SystemCompilerContext):
             object_ptr_va=control_va + SYSTEM_CONTROL_TOOLTIP_OBJECT_PTR_OFFSET,
             dest_rect_va=system_va + self._off_dest_rect,
             transform_count_va=system_va + self._off_transform_count,
+            local_transfer_va=local_transfer_va,
+        )
+        local_transfer = self.build_tooltip_local_transfer(
+            wrapper_va=local_transfer_va,
+            local_wrapper_va=control_va + SYSTEM_CONTROL_TOOLTIP_LOCAL_WRAPPER_OFFSET,
+            panel_surface_va=control_va + SYSTEM_CONTROL_TOOLTIP_PANEL_SURFACE_OFFSET,
+            panel_dimensions_va=control_va + SYSTEM_CONTROL_TOOLTIP_PANEL_DIMENSIONS_OFFSET,
+            outer_rect_va=control_va + SYSTEM_CONTROL_TOOLTIP_OUTER_RECT_OFFSET,
+            dest_rect_va=system_va + self._off_dest_rect,
+            composition_mode_va=control_va + SYSTEM_CONTROL_TOOLTIP_PANEL_CAPTURE_MODE_OFFSET,
         )
         visibility = self.build_tooltip_visibility_wrapper(
             wrapper_va=visibility_va,
@@ -246,6 +318,12 @@ class TooltipFeatureCompiler(SystemCompilerContext):
             ),
         )
         for label, offset, code, limit in (
+            (
+                "tooltip isolation ownership gate",
+                SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_OFFSET,
+                self.build_tooltip_compositor_gate(wrapper_va=control_gate_va),
+                SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_LIMIT,
+            ),
             (
                 "tooltip visibility transition",
                 self._off_tooltip_visibility_wrapper,
@@ -300,6 +378,12 @@ class TooltipFeatureCompiler(SystemCompilerContext):
                 transfer,
                 self._off_tooltip_transfer_affine_limit,
             ),
+            (
+                "isolated tooltip glyph destination",
+                SYSTEM_CONTROL_TOOLTIP_LOCAL_TRANSFER_OFFSET,
+                local_transfer,
+                SYSTEM_CONTROL_TOOLTIP_LOCAL_TRANSFER_LIMIT,
+            ),
         ):
             payload.place(label=label, offset=offset, payload=code, limit=limit)
         return TooltipRuntimeExports(
@@ -314,16 +398,44 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         )
 
     def _emit_native_tooltip_gate(self, code: X86Emitter, *, target: str) -> None:
-        """Keep native tooltips except for scaled output or full-map redraws."""
-        code.raw(b"\x81\x3d" + struct.pack("<I", self._physical_width_va + 4))
-        code.raw(struct.pack("<I", AUTHORED_FRAME_HEIGHT))
-        code.jump_short_if(Condition.ABOVE, "tooltip_compositor")
+        """Keep native tooltips unless an explicit compositor owns them."""
+        code.call_absolute(
+            self.symbols.va(
+                SYSTEM_CONTROL_SEGMENT.logical_name, SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_OFFSET
+            )
+        )
+        code.jump_if(Condition.EQUAL, target)
+
+    def build_tooltip_compositor_gate(self, *, wrapper_va: int) -> bytes:
+        """Return ZF=0 for HD, full-map or explicitly enabled XR isolation.
+
+        No general register or native object is changed. The shared predicate
+        keeps small decoration thunks within their proven byte allocations.
+        Flat reference-height rendering retains its native owner by default.
+        """
+        code = X86Emitter(base_va=wrapper_va)
+        code.raw(b"\x50\xa1" + struct.pack("<I", self._physical_width_va + 4))
+        code.raw(b"\x3d" + struct.pack("<I", AUTHORED_FRAME_HEIGHT))
+        code.jump_short_if(Condition.ABOVE, "done")
         active_va = self.symbols.va(
             RESOURCE_SEGMENT.logical_name, RESOURCE_DRIVING_MAP_INPUT_ACTIVE_OFFSET
         )
         code.raw(b"\x83\x3d" + struct.pack("<I", active_va) + b"\x00")
-        code.jump_if(Condition.EQUAL, target)
-        code.label("tooltip_compositor")
+        code.jump_short_if(Condition.NOT_EQUAL, "done")
+        code.raw(
+            b"\x83\x3d"
+            + struct.pack(
+                "<I",
+                self.symbols.va(
+                    SYSTEM_CONTROL_SEGMENT.logical_name,
+                    SYSTEM_CONTROL_TOOLTIP_ISOLATION_ENABLED_OFFSET,
+                ),
+            )
+            + b"\x00"
+        )
+        code.label("done")
+        code.raw(b"\x58\xc3")
+        return code.build()
 
     def build_tooltip_decoration_wrapper(
         self,
@@ -336,8 +448,8 @@ class TooltipFeatureCompiler(SystemCompilerContext):
 
         The wrapped call is ``stdcall`` and its arguments are already on the
         caller's stack. Reference-height paths tail-enter GK3's original callee
-        unchanged except on the fully redrawn driving map. Above 768 lines every
-        ToolTip is composed by the same scaled
+        unchanged except on the fully redrawn driving map or with explicit XR
+        isolation ownership. Above 768 lines every ToolTip uses the same scaled
         panel owner, including pure-2D title and Load/Save screens; returning
         locally prevents native-size chrome from clipping the scaled text.
         Runtime height—not an install-time resolution—selects the policy.
@@ -372,12 +484,14 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         At any output above the authored height, publish the live visible
         object, destination, and caller-owned damage collection, then return.
         The shared pre-Flip owner consumes that same-frame collection and
-        invokes native Draw exactly once on the proven current back page. This
+        invokes native Draw exactly once into an isolated local cache, then
+        presents that cache onto the proven current back page. This
         same policy covers title, Load/Save, room, and ActionMenu tooltips, so
         native-size decoration can never be paired with scaled text. Hidden
         traversals remain synchronous because they own GK3's hover-delay state
-        machine but paint no pixels. Reference-height operation remains fully
-        native. The local return is initialized because a deferred caller must
+        machine but paint no pixels. Reference-height flat operation remains
+        native unless XR explicitly owns isolation. The local return is initialized
+        because a deferred caller must
         never observe arbitrary stack contents.
         """
         code = X86Emitter(base_va=wrapper_va)
@@ -709,7 +823,7 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         code = X86Emitter(base_va=wrapper_va)
         code.raw(b"\x9c\x60")
         code.raw(b"\xff\x05" + struct.pack("<I", frame_call_count_va))
-        # Every tooltip above the authored height uses one panel compositor.
+        # HD, full-map and explicitly enabled XR tooltips use one compositor.
         # This avoids a second, subtly different path for title/LoadSave while
         # retaining the pristine renderer at 1024x768.
         self._emit_native_tooltip_gate(code, target="inactive")
@@ -852,7 +966,7 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         # The private damage collection covers the full panel, so
         # ToolTip::Draw cannot clip the label to incidental cursor damage.
         # One means that this generation still needs native composition and a
-        # successful cache capture; zero means replay is authoritative.
+        # successful completed-panel presentation; zero means replay is authoritative.
         code.raw(b"\xc7\x05" + struct.pack("<I", composition_pending_va) + b"\x01\x00\x00\x00")
         code.raw(b"\x8d\x73\x1c\xbf" + struct.pack("<I", presented_rect_va))
         code.raw(b"\xb9\x04\x00\x00\x00\xf3\xa5")
@@ -893,6 +1007,17 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         # every frame. Replay this tiny cached overlay after that traversal;
         # relying on obsolete private-stage retention makes it disappear.
         code.label("panel_present")
+        code.raw(
+            b"\xc7\x05"
+            + struct.pack(
+                "<I",
+                self.symbols.va(
+                    SYSTEM_CONTROL_SEGMENT.logical_name,
+                    SYSTEM_CONTROL_TOOLTIP_PANEL_BLT_RESULT_OFFSET,
+                ),
+            )
+            + struct.pack("<I", 0x80004005)
+        )
         code.raw(b"\xc7\x05" + struct.pack("<I", panel_capture_mode_va) + b"\x00\x00\x00\x00")
         code.raw(b"\x8b\xcb")
         code.call_absolute(background_helper_va)
@@ -900,13 +1025,16 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         code.jump_if(Condition.EQUAL, "consume_damage")
         code.raw(b"\xa1" + struct.pack("<I", destination_handle_va) + b"\x85\xc0")
         code.jump_if(Condition.EQUAL, "consume_damage")
+        # Redirect only each glyph's saved final-transfer destination, not the
+        # live page wrapper or any native object. Mode 2 is bounded by Draw.
+        code.raw(b"\xc7\x05" + struct.pack("<I", panel_capture_mode_va) + b"\x02\x00\x00\x00")
         code.raw(b"\xff\x05" + struct.pack("<I", depth_va))
         code.raw(b"\x68" + struct.pack("<I", render_damage_region_va))
         code.raw(b"\x50\x8b\xcb")
         code.call_absolute(target_va)
         code.raw(b"\xff\x0d" + struct.pack("<I", depth_va))
         code.raw(b"\xff\x05" + struct.pack("<I", present_count_va))
-        # Capture the now-complete physical panel back into its cache. A
+        # Present the now-complete isolated cache onto the physical page. A
         # failed/missing DirectDraw transaction leaves the seed armed so the
         # next frame retries native composition instead of retaining a blank.
         code.raw(b"\xc7\x05" + struct.pack("<I", panel_capture_result_va))
@@ -923,6 +1051,33 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         # text above receives the private complete-panel collection; never
         # replay this caller-owned stack vector after its bounded transaction.
         code.label("consume_damage")
+        # Publish only completed pixels successfully replayed in this frame.
+        # A counter snapshot around the shared presenter rejects stale caches
+        # after failed transfers, hidden labels or producer lifetime changes.
+        code.raw(b"\x83\x3d" + struct.pack("<I", composition_pending_va) + b"\x00")
+        code.jump_if(Condition.NOT_EQUAL, "consume_damage_pointer")
+        code.raw(
+            b"\x83\x3d"
+            + struct.pack(
+                "<I",
+                self.symbols.va(
+                    SYSTEM_CONTROL_SEGMENT.logical_name,
+                    SYSTEM_CONTROL_TOOLTIP_PANEL_BLT_RESULT_OFFSET,
+                ),
+            )
+            + b"\x00"
+        )
+        code.jump_if(Condition.NOT_EQUAL, "consume_damage_pointer")
+        code.raw(
+            b"\xff\x05"
+            + struct.pack(
+                "<I",
+                self.symbols.va(
+                    SYSTEM_CONTROL_SEGMENT.logical_name, SYSTEM_CONTROL_TOOLTIP_REPLAY_COUNT_OFFSET
+                ),
+            )
+        )
+        code.label("consume_damage_pointer")
         code.raw(b"\xc7\x05" + struct.pack("<I", damage_ptr_va) + b"\x00\x00\x00\x00")
         code.jump("done")
 
@@ -1002,18 +1157,19 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         its authored extent uniformly about the already-physical top-left,
         derive an inset rectangle with one scaled reference pixel, and lazily
         materialize that black-outline/white-interior image in a same-format
-        off-screen DirectDraw surface. Persistent frames issue only one normal
-        source Blt before native text. Direct color fills against the physical
+        system-memory DirectDraw surface. Native glyphs draw into that same
+        isolated cache through a private destination wrapper. Persistent frames
+        issue only one normal source Blt. Direct color fills against the physical
         page synchronize on current Windows even without ``DDBLT_WAIT`` and
         halve 120 Hz presentation to 60 FPS, whereas the cached source follows
-        GK3's ordinary asynchronous bitmap path. A capture-mode call made just
-        after native text copies the completed pixels back into this surface;
-        all later calls therefore replay one composed panel, not every glyph.
+        GK3's ordinary asynchronous bitmap path. A completion-mode call made
+        after native text presents the finished cache, without copying pixels
+        back from the page. Later calls replay one composed panel, not each glyph.
         A changed output extent or DirectDraw owner releases and recreates the
         cache; the toolbar's exact destructor releases its final generation.
         The helper resolves ToolTip::Draw's own same-frame destination handle
         and proves that wrapper's raw surface is the current back page before
-        either presenting or capturing. It never borrows CursorManager's last
+        presenting. It never borrows CursorManager's last
         surface: on a static pure-2D screen that independently valid owner can
         remain bound to the alternating peer which is not about to Flip.
         """
@@ -1163,8 +1319,6 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         code.jump_if(Condition.EQUAL, "done")
         code.raw(b"\x8b\x35" + struct.pack("<I", panel_surface_va) + b"\x85\xf6")
         code.jump_if(Condition.EQUAL, "done")
-        code.raw(b"\x83\x3d" + struct.pack("<I", capture_mode_va) + b"\x00")
-        code.jump_if(Condition.NOT_EQUAL, "capture")
         code.raw(b"\x8b\x7d\x00")
         # The cache exactly matches the destination extent. BltFast follows
         # the same non-synchronizing path as GK3's glyph sprites; using the
@@ -1176,16 +1330,10 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         code.raw(b"\xff\x35" + struct.pack("<I", outer_rect_va))
         code.raw(b"\x55\xff\x57\x1c")
         code.raw(b"\xa3" + struct.pack("<I", blt_result_va))
-        code.jump("done")
-
-        code.label("capture")
-        # Destination and source reverse for the one-time composition capture:
-        # cache.BltFast(0, 0, physicalBack, &outer, 0).
-        code.raw(b"\x8b\x3e")
-        code.raw(b"\x6a\x00")
-        code.raw(b"\x68" + struct.pack("<I", outer_rect_va))
-        code.raw(b"\x55\x6a\x00\x6a\x00")
-        code.raw(b"\x56\xff\x57\x1c")
+        # The generation is complete only if its final cache-to-page transfer
+        # succeeded. There is deliberately no page-to-cache readback path.
+        code.raw(b"\x83\x3d" + struct.pack("<I", capture_mode_va) + b"\x01")
+        code.jump_if(Condition.NOT_EQUAL, "done")
         code.raw(b"\xa3" + struct.pack("<I", capture_result_va))
         code.jump("done")
 
@@ -1215,15 +1363,17 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         object_ptr_va: int,
         dest_rect_va: int,
         transform_count_va: int,
+        local_transfer_va: int = 0,
     ) -> bytes:
         """Map one native tooltip transfer about its physical top-left.
 
         ``ECX`` points at the common blitter's live PUSHAD frame. Tooltip
         layout has already positioned the anchor in physical coordinates, but
         native glyph/border submissions retain 768-line offsets and extents.
-        Replace only the saved destination RECT, restore the dispatcher frame,
-        and tail-enter the unchanged downstream blitter. The separate panel
-        helper owns the non-blitted background.
+        Replace the saved destination RECT and, during the exact composition
+        scope, route that final glyph into the private local cache. Restore the
+        dispatcher frame and tail-enter the unchanged downstream blitter. The
+        separate panel helper owns the non-blitted background.
         """
         code = X86Emitter(base_va=wrapper_va)
         code.raw(b"\x8b\xe9")
@@ -1249,6 +1399,9 @@ class TooltipFeatureCompiler(SystemCompilerContext):
 
         code.raw(b"\xc7\x45\x28" + struct.pack("<I", dest_rect_va))
         code.raw(b"\xff\x05" + struct.pack("<I", transform_count_va))
+        if local_transfer_va:
+            code.raw(b"\x8b\xcd")
+            code.call_absolute(local_transfer_va)
         code.label("done")
         code.raw(b"\x61")
         code.jump_absolute(downstream_va)
@@ -1258,4 +1411,47 @@ class TooltipFeatureCompiler(SystemCompilerContext):
         code.label("scale_edge")
         code.raw(b"\x0f\xaf\x05" + struct.pack("<I", self._physical_width_va + 4))
         code.raw(b"\x03\xc7\x99\xb9\x00\x03\x00\x00\xf7\xf9\x03\xc3\xc3")
+        return code.build()
+
+    @staticmethod
+    def build_tooltip_local_transfer(
+        *,
+        wrapper_va: int,
+        local_wrapper_va: int,
+        panel_surface_va: int,
+        panel_dimensions_va: int,
+        outer_rect_va: int,
+        dest_rect_va: int,
+        composition_mode_va: int,
+    ) -> bytes:
+        """Route a final physical glyph into a private local CPU destination.
+
+        ECX is the live PUSHAD frame. Copy its native 48-byte raw wrapper and
+        replace only that transfer's saved ECX. The private copy does not borrow
+        its owner's inline critical section. Other producers, caller rectangles
+        and the live page wrapper remain untouched.
+        """
+        code = X86Emitter(base_va=wrapper_va)
+        code.raw(b"\x83\x3d" + struct.pack("<I", composition_mode_va) + b"\x02")
+        code.jump_if(Condition.NOT_EQUAL, "done")
+        code.raw(b"\x8b\xe9\x8b\x75\x18\x85\xf6")
+        code.jump_if(Condition.EQUAL, "done")
+        code.raw(b"\xa1" + struct.pack("<I", panel_surface_va) + b"\x85\xc0")
+        code.jump_if(Condition.EQUAL, "done")
+        code.raw(b"\xbf" + struct.pack("<I", local_wrapper_va))
+        code.raw(b"\xb9\x0c\x00\x00\x00\xf3\xa5")
+        code.raw(b"\xa3" + struct.pack("<I", local_wrapper_va + 0x2C))
+        # Native lock/unlock pairs test the inline lock's initialized DWORD at
+        # +0x28. Copying a CRITICAL_SECTION is invalid. This private render-thread
+        # destination has no other owners, so it explicitly has no native lock.
+        code.raw(b"\xc7\x05" + struct.pack("<I", local_wrapper_va + 0x28) + bytes(4))
+        for offset in (0, 4):
+            code.raw(b"\xa1" + struct.pack("<I", panel_dimensions_va + offset))
+            code.raw(b"\xa3" + struct.pack("<I", local_wrapper_va + 0x08 + offset))
+        code.raw(b"\xc7\x45\x18" + struct.pack("<I", local_wrapper_va))
+        for edge, origin in ((0, 0), (4, 4), (8, 0), (12, 4)):
+            code.raw(b"\xa1" + struct.pack("<I", outer_rect_va + origin))
+            code.raw(b"\x29\x05" + struct.pack("<I", dest_rect_va + edge))
+        code.label("done")
+        code.raw(b"\xc3")
         return code.build()

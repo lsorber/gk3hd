@@ -6,19 +6,24 @@ import struct
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
-from gk3hd.patch.binary.x86 import Condition, X86Emitter
+from gk3hd.patch.binary.mutations import ExecutableMutationPlan
+from gk3hd.patch.binary.x86 import BranchOpcode, Condition, X86Emitter
 from gk3hd.patch.definitions.runtime2d.geometry import AUTHORED_FRAME_HEIGHT
 from gk3hd.patch.definitions.runtime2d.layout import (
     CAPTION_ACTIVE_CLIP_OFFSET,
     CAPTION_ACTIVE_OBJECT_OFFSET,
     CAPTION_CACHE_GENERATION_RECT_OFFSET,
     CAPTION_DAMAGE_AUGMENTER_OFFSET,
+    CAPTION_FONT_POINT_OFFSET,
     CAPTION_GLYPH_RECORDER_OFFSET,
     CAPTION_GLYPH_RECT_OFFSET,
     CAPTION_GLYPH_RECT_VALID_OFFSET,
     CAPTION_PRESENTER_OFFSET,
     CAPTION_SEGMENT,
+    LOAD_SAVE_HUD_FONT_ACTIVE_OFFSET,
+    LOAD_SAVE_SEGMENT,
     SYSTEM_CONTROL_CURSOR_STATE_OFFSET,
+    RuntimeImage,
     install_runtime_segment,
 )
 from gk3hd.patch.model import PatchError
@@ -29,6 +34,17 @@ if TYPE_CHECKING:
     from gk3hd.patch.definitions.repair_2d_to_3d_transition_frames import TransitionFrameABI
     from gk3hd.patch.definitions.runtime2d.layout import RuntimeSymbols
     from gk3hd.patch.definitions.runtime2d.room_rendering import RoomRenderingABI
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CaptionCacheABI:
+    """Isolated keyed content and current-frame replay proof, not a desktop crop."""
+
+    surface_va: int
+    ready_va: int
+    replay_count_va: int
+    rect_va: int
+    key: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -45,12 +61,14 @@ class CaptionFeatureCompiler:
         A complete caption generation is composed at mapped bounds on the final
         page, and its outgoing footprint is cleaned on both DirectDraw pages.
     Strategy:
-        Hook only Caption's Draw/destructor slots, defer the at-most-three live
+        Hook Caption's initial layout and Draw/destructor slots, defer the at-most-three live
         CaptionMgr objects to the pre-Flip owner, and key one transparent cache
         by object identity plus mapped bounds. Replay uses one color-keyed
         ``BltFast``; allocation failure falls back to the same-frame native draw.
         The shared font hook height-scales glyph positions and extents about the
-        live box centre/bottom, and the damage callback carries two generations.
+        live box centre/framebuffer bottom, and the damage callback carries two generations.
+        Native line breaking receives inverse-scaled width; stacking shares the
+        framebuffer anchor so glyph size and inter-caption spacing agree.
     Boundaries:
         This feature recognizes neither output resolutions nor text content and
         does not own room presentation, menu tooltips, or status-line glyphs.
@@ -136,10 +154,15 @@ class CaptionFeatureCompiler:
     _off_cache_ensure_helper_limit: ClassVar[int] = 0x1500
     _off_glyph_recorder: ClassVar[int] = CAPTION_GLYPH_RECORDER_OFFSET
     _off_glyph_recorder_limit: ClassVar[int] = 0x1580
+    _off_font_point: ClassVar[int] = CAPTION_FONT_POINT_OFFSET
+    _off_font_point_limit: ClassVar[int] = 0x1800
+    _off_initial_layout: ClassVar[int] = 0x1800
 
     _ddsd_size: ClassVar[int] = 0x6C
     _ddsd_caps_height_width: ClassVar[int] = 0x00000007
-    _offscreen_caps: ClassVar[int] = 0x00000040
+    # CPU-authored glyphs must remain in system memory. In particular, VR
+    # isolation can upload this cache without a graphics-target readback.
+    _offscreen_caps: ClassVar[int] = 0x00000840
     _ddbltfx_size: ClassVar[int] = 0x64
     _ddblt_colorfill_wait: ClassVar[int] = 0x01000400
     # The presenter already runs at the serialized pre-Flip edge.  Asking the
@@ -152,6 +175,32 @@ class CaptionFeatureCompiler:
     # A one-bit-blue RGB565 value is outside the caption's native magenta/black
     # ramp while preserving its true black outline during keyed replay.
     _cache_transparent_pixel: ClassVar[int] = 0x00000001
+
+    @classmethod
+    def cache_abi(cls, image: PEFile) -> CaptionCacheABI:
+        """Return cache cells only after checking the producer's layout and key."""
+        section = RuntimeImage(image).get_section(cls._section_name)
+        if section is None:
+            msg = "caption cache dependency is missing"
+            raise PatchError(msg)
+        base = image.rva_to_va(section.virtual_address)
+        if (
+            image.read_bytes(section.pointer_to_raw_data, len(cls._magic)) != cls._magic
+            or image.read_u32_va(base + cls._off_layout_version) != cls._layout_version
+            or image.read_u32_va(base + cls._off_cache_descriptor + 0x68) != cls._offscreen_caps
+            or image.read_u32_va(base + cls._off_cache_color_key) != cls._cache_transparent_pixel
+            or image.read_u32_va(base + cls._off_cache_color_key + 4)
+            != cls._cache_transparent_pixel
+        ):
+            msg = "caption cache dependency is incompatible"
+            raise PatchError(msg)
+        return CaptionCacheABI(
+            surface_va=base + cls._off_cache_surface,
+            ready_va=base + cls._off_cache_ready,
+            replay_count_va=base + cls._off_cache_replay_count,
+            rect_va=base + cls._off_cache_rect,
+            key=cls._cache_transparent_pixel,
+        )
 
     @property
     def _draw_slot_va(self) -> int:
@@ -212,8 +261,8 @@ class CaptionFeatureCompiler:
 
         ESI receives the native rectangle consumed by Caption::Draw. EDI
         receives the complete scaled physical footprint used for clipping and
-        stage cleanup. The affine is centred horizontally and bottom-anchored
-        vertically, matching Caption's live layout contract.
+        stage cleanup. The affine is centred horizontally and anchored to the
+        framebuffer bottom vertically, including the native stacked offsets.
         """
         code = X86Emitter(base_va=wrapper_va)
         code.raw(b"\x60\x8b\xd9")
@@ -229,7 +278,7 @@ class CaptionFeatureCompiler:
             code.raw(b"\x89\x06" if target_offset == 0 else b"\x89\x46" + bytes([target_offset]))
 
         code.raw(b"\x8b\x43\x1c\x03\x43\x24\xd1\xf8\x50")  # centre X
-        code.raw(b"\xff\x73\x28")  # bottom Y
+        code.raw(b"\xff\x35" + struct.pack("<I", self._physical_width_va + 4))  # screen bottom
         for source_offset, target_offset, anchor_stack_offset, dimension_va, name in (
             (0x1C, 0, 4, self._physical_width_va, "left"),
             (0x20, 4, 0, self._physical_width_va + 4, "top"),
@@ -290,18 +339,114 @@ class CaptionFeatureCompiler:
         glyph_rect_valid_va: int,
         glyph_rect_va: int,
         damage_record_helper_va: int,
+        font_active_va: int | None = None,
     ) -> bytes:
         """Union ESI's final clipped glyph only during Caption rasterization."""
         code = X86Emitter(base_va=wrapper_va)
         code.raw(b"\x60")
         code.raw(b"\x83\x3d" + struct.pack("<I", active_object_va) + b"\x00")
         code.jump_if(Condition.EQUAL, "done")
+        if font_active_va is not None:
+            code.raw(b"\x83\x3d" + struct.pack("<I", font_active_va) + b"\x00")
+            code.jump_if(Condition.EQUAL, "done")
+            # Called from the final blitter's PUSHAD frame. Our return PC and
+            # PUSHAD add 36 bytes to its +0x28 destination-rectangle argument.
+            code.raw(b"\x8b\x74\x24\x4c\x85\xf6")
+            code.jump_if(Condition.EQUAL, "done")
         code.raw(b"\xbf" + struct.pack("<I", glyph_rect_valid_va))
         code.raw(b"\xba" + struct.pack("<I", glyph_rect_va))
         code.call_absolute(damage_record_helper_va)
         code.label("done")
         code.raw(b"\x61\xc3")
         return code.build()
+
+    def _build_font_point(self, *, wrapper_va: int, active_object_va: int) -> bytes:
+        """Map ECX's stack-owned glyph point about the live caption's anchors.
+
+        Return one only inside the synchronous native Caption draw. The caller
+        publishes the mapped-point font scope for opaque and faded glyphs;
+        source rectangles, effect records and the caption object stay native.
+        """
+        code = X86Emitter(base_va=wrapper_va)
+        code.raw(b"\x60\x31\xc0\x89\x44\x24\x1c\x8b\xf9\x85\xff")
+        code.jump_if(Condition.EQUAL, "done")
+        code.raw(b"\x8b\x35" + struct.pack("<I", active_object_va) + b"\x85\xf6")
+        code.jump_if(Condition.EQUAL, "done")
+        code.raw(b"\x8b\x1d" + struct.pack("<I", self._physical_width_va + 4) + b"\x85\xdb")
+        code.jump_if(Condition.LESS_OR_EQUAL, "done")
+        # Native stacked captions have authored line heights between their
+        # anchors. Map all of them about the framebuffer bottom so that their
+        # inter-caption spacing scales along with their glyphs, not independently.
+        code.raw(b"\x8b\x6e\x1c\x03\x6e\x24\xd1\xfd")
+        for axis in (0, 4):
+            if axis:
+                code.raw(b"\x8b\xeb")
+            code.raw(b"\x8b\x07" if not axis else b"\x8b\x47\x04")
+            code.raw(b"\x2b\xc5\x0f\xaf\xc3\x99\xb9\x00\x03\x00\x00\xf7\xf9\x03\xc5")
+            code.raw(b"\x89\x07" if not axis else b"\x89\x47\x04")
+        code.raw(b"\xc7\x44\x24\x1c\x01\x00\x00\x00")
+        code.label("done")
+        code.raw(b"\x61\xc3")
+        return code.build()
+
+    def _build_initial_layout(self, *, wrapper_va: int) -> bytes:
+        """Wrap once in unscaled font units without changing the physical centre.
+
+        Caption construction supplies a physical width, but its line-breaking
+        routine consumes authored font metrics. Inverse-scale that width before
+        the original layout and shift its left anchor by half the difference.
+        The existing centre/bottom glyph affine then produces a fitting physical
+        caption. Only the constructor call is intercepted, never subsequent
+        native anchor moves or copied, already-laid-out captions.
+        """
+        code = X86Emitter(base_va=wrapper_va)
+        # Retain this and the left-anchor delta across the native no-arg call.
+        code.raw(b"\x56\x8b\xf1\x6a\x00\x60")
+        code.raw(b"\x8b\x0d" + struct.pack("<I", self._physical_width_va + 4) + b"\x85\xc9")
+        code.jump_if(Condition.LESS_OR_EQUAL, "native")
+        code.raw(b"\x8b\x9e\xf8\x00\x00\x00\x85\xdb")
+        code.jump_if(Condition.LESS_OR_EQUAL, "native")
+        # Use a signed 64-bit product, not an overflowing low-word multiply.
+        code.raw(b"\x8b\xc3\xbf\x00\x03\x00\x00\xf7\xef\xf7\xf9")
+        code.raw(b"\x85\xc0")
+        code.jump_if(Condition.GREATER, "width_ready")
+        code.raw(b"\x6a\x01\x58")
+        code.label("width_ready")
+        code.raw(b"\x89\x86\xf8\x00\x00\x00\x2b\xd8\xd1\xfb")
+        code.raw(b"\x01\x9e\xfc\x00\x00\x00")
+        code.raw(b"\x89\x5c\x24\x20")
+        code.label("native")
+        code.raw(b"\x61")
+        code.call_absolute(self.profile.address("caption.layout"))
+        # Native Caption::Draw treats these line X offsets as absolute, not
+        # relative to its box. Carry the same constructor shift into all live
+        # line origins after the native routine has balanced and wrapped them.
+        # Twenty entries is the original layout's fixed-capacity contract.
+        code.raw(b"\x60\x8b\x5c\x24\x20\x85\xdb")
+        code.jump_if(Condition.EQUAL, "done")
+        code.raw(b"\x8b\x4e\x50\x85\xc9")
+        code.jump_if(Condition.LESS_OR_EQUAL, "done")
+        code.raw(b"\x83\xf9\x14")
+        code.jump_if(Condition.GREATER, "done")
+        code.raw(b"\x8d\xbe\xa4\x00\x00\x00")
+        code.label("line")
+        code.raw(b"\x01\x1f\x83\xc7\x04\x49")
+        code.jump_if(Condition.NOT_EQUAL, "line")
+        code.label("done")
+        code.raw(b"\x61\x83\xc4\x04\x5e\xc3")
+        return code.build()
+
+    def _layout_mutations(self) -> ExecutableMutationPlan:
+        site = self.profile.site("caption.initial_layout")
+        plan = ExecutableMutationPlan(owner=self.id)
+        plan.branch(
+            label="initial font-unit layout",
+            opcode=BranchOpcode.CALL,
+            site_va=site.va,
+            expected=site.original,
+            target_va=self.symbols.va(self._section_name, self._off_initial_layout),
+        )
+        return plan
 
     def _build_draw_wrapper(
         self,
@@ -892,6 +1037,16 @@ class CaptionFeatureCompiler:
             glyph_rect_valid_va=section_va + self._off_glyph_rect_valid,
             glyph_rect_va=section_va + self._off_glyph_rect,
             damage_record_helper_va=damage_record_helper_va,
+            font_active_va=self.symbols.va(
+                LOAD_SAVE_SEGMENT.logical_name, LOAD_SAVE_HUD_FONT_ACTIVE_OFFSET
+            ),
+        )
+        font_point = self._build_font_point(
+            wrapper_va=section_va + self._off_font_point,
+            active_object_va=section_va + self._off_active_object,
+        )
+        initial_layout = self._build_initial_layout(
+            wrapper_va=section_va + self._off_initial_layout
         )
         for label, offset, payload, limit in (
             ("Draw wrapper", self._off_draw_wrapper, draw_wrapper, self._off_draw_wrapper_limit),
@@ -932,6 +1087,8 @@ class CaptionFeatureCompiler:
                 glyph_recorder,
                 self._off_glyph_recorder_limit,
             ),
+            ("font point", self._off_font_point, font_point, self._off_font_point_limit),
+            ("initial layout", self._off_initial_layout, initial_layout, self._section_size),
         ):
             if offset + len(payload) > limit:
                 msg = f"{self.id} {label} exceeds its reserved slot"
@@ -978,6 +1135,8 @@ class CaptionFeatureCompiler:
             (self._off_damage_record_helper, damage_record_helper),
             (self._off_cache_ensure_helper, cache_ensure_helper),
             (self._off_glyph_recorder, glyph_recorder),
+            (self._off_font_point, font_point),
+            (self._off_initial_layout, initial_layout),
         ):
             payload[offset : offset + len(body)] = body
         return bytes(payload)
@@ -986,6 +1145,10 @@ class CaptionFeatureCompiler:
         """Require pristine Caption vtable ownership and an absent segment."""
         if image.get_section(self._section_name) is not None:
             msg = f"{self.id} requires a pristine caption segment"
+            raise PatchError(msg)
+        site = self.profile.site("caption.initial_layout")
+        if image.read_bytes(image.va_to_offset(site.va), len(site.original)) != site.original:
+            msg = f"{self.id} initial layout source mismatch"
             raise PatchError(msg)
         for label, slot, expected in (
             ("Draw", self._draw_slot_va, self.profile.address("caption.draw")),
@@ -1006,9 +1169,11 @@ class CaptionFeatureCompiler:
         image.write_bytes(section.pointer_to_raw_data, self._payload(section_va=section_va))
         image.write_u32_va(self._draw_slot_va, section_va + self._off_draw_wrapper)
         image.write_u32_va(self._destructor_slot_va, section_va + self._off_destructor_wrapper)
+        self._layout_mutations().apply(image)
 
     def postcheck(self, image: PEFile) -> None:
         """Verify the complete deterministic caption payload and redirects."""
+        self._layout_mutations().verify(image)
         section = image.get_section(self._section_name)
         if section is None:
             msg = f"{self.id} caption segment is missing"

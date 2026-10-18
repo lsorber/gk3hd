@@ -10,7 +10,9 @@ The output directory must not exist. All downloaded source and binaries stay the
 param(
     [Parameter(Mandatory = $true)]
     [string]$OutputRoot,
-    [ValidateRange(1, 64)][int]$Jobs = 12
+    [ValidateRange(1, 64)][int]$Jobs = 12,
+    # Development-only candidate, deliberately not accepted by the release CLI.
+    [switch]$OpenXR
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +29,11 @@ function Assert-Hash([string]$Path, [string]$Expected) {
     }
 }
 
+function Get-SourceHash([string]$Path) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($Path).Replace("`r`n", "`n"))
+    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
 $pin = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'upstream.json') -Raw | ConvertFrom-Json
 $patch = Join-Path $PSScriptRoot 'renderer.patch'
 $patchHash = (Get-FileHash -LiteralPath $patch).Hash
@@ -34,6 +41,13 @@ $pinHash = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'upstream.json'))
 foreach ($command in @('uvx', 'git')) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "Missing $command; install it and make it available on PATH."
+    }
+}
+if ($OpenXR) {
+    foreach ($command in @('cmake', 'ctest')) {
+        if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
+            throw "Missing $command; install CMake for the optional OpenXR build."
+        }
     }
 }
 if ($env:CL -or $env:_CL_ -or $env:LINK -or $env:_LINK_) {
@@ -47,16 +61,29 @@ New-Item -ItemType Directory -Path $output | Out-Null
 $source = Join-Path $output 'source'
 $build = Join-Path $output 'build'
 $sourcePatch = Join-Path $output 'renderer.patch'
+$xrInputs = [ordered]@{}
+$xrStage = $null
+$candidateVersion = $pin.version
 # Git may check out the recipe with CRLF; git apply needs an LF-only diff.
 [IO.File]::WriteAllText($sourcePatch, [IO.File]::ReadAllText($patch).Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
 $shaderArchive = Join-Path $output 'glslang.zip'
 $shaderRoot = Join-Path $output 'glslang'
 $oldPath = $env:PATH
 $oldConfig = $env:DXVK_CONFIG_FILE
+$oldInlineConfig = $env:DXVK_CONFIG
 $oldLogPath = $env:D7VK_LOG_PATH
 $oldDxvkLogPath = $env:DXVK_LOG_PATH
 $oldCl = $env:CL
+$oldXrPrototype = $env:GK3HD_XR_PROTOTYPE
+$oldXrRuntime = $env:XR_RUNTIME_JSON
+$oldXrBgra = $env:GK3HD_XR_TEST_BGRA
+$oldXrEyeSize = $env:GK3HD_XR_TEST_EYE_SIZE
+$oldXrSkipReadback = $env:GK3HD_XR_TEST_SKIP_PIXEL_READBACK
 try {
+    # Flat checks must not inherit a development VR launch setting.
+    $env:GK3HD_XR_PROTOTYPE = $null
+    # Qualification owns its compile policy, including inline overrides.
+    $env:DXVK_CONFIG = $null
     # Preserve assertions while making their __FILE__ paths independent of
     # the builder. This compiler version requires both options together.
     $env:CL = '/experimental:deterministic /pathmap:"' + $output + '=gk3hd-build"'
@@ -70,16 +97,49 @@ try {
     }
     Invoke-Checked git @('-C', $source, 'apply', '--check', $sourcePatch)
     Invoke-Checked git @('-C', $source, 'apply', $sourcePatch)
+    if ($OpenXR) {
+        $xrRecipe = Join-Path $PSScriptRoot 'vr'
+        $xrSource = Join-Path $output 'xr-source'
+        $xrBuild = Join-Path $output 'xr-build'
+        $xrStage = Join-Path $source 'src/gk3hd_xr'
+        New-Item -ItemType Directory -Path $xrSource | Out-Null
+        foreach ($input in (Get-ChildItem -LiteralPath $xrRecipe -File | Sort-Object Name)) {
+            if ($input.Extension -in @('.cpp', '.h', '.patch') -or $input.Name -eq 'CMakeLists.txt') {
+                $xrInputs[$input.Name] = Get-SourceHash $input.FullName
+                Copy-Item -LiteralPath $input.FullName -Destination (Join-Path $xrSource $input.Name)
+            }
+        }
+        $xrPatch = Join-Path $xrSource 'sarek.patch'
+        [IO.File]::WriteAllText($xrPatch, [IO.File]::ReadAllText($xrPatch).Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
+        Invoke-Checked git @('-C', $source, 'apply', '--check', $xrPatch)
+        Invoke-Checked git @('-C', $source, 'apply', $xrPatch)
+        Invoke-Checked cmake @('-S', $xrSource, '-B', $xrBuild, '-G', 'Visual Studio 17 2022',
+            '-A', 'Win32', '-T', "version=$($env:VCToolsVersion.TrimEnd('\'))",
+            "-DCMAKE_SYSTEM_VERSION=$($pin.windows_sdk)",
+            "-DFETCHCONTENT_SOURCE_DIR_VULKAN_HEADERS=$(Join-Path $source 'include/vulkan')")
+        & cmake --build $xrBuild --config Release --parallel "$Jobs"
+        if ($LASTEXITCODE -ne 0) {
+            # A failed parallel MSBuild worker can leave otherwise valid units
+            # unfinished. One serial retry still requires a successful compile
+            # and the same independent tests before any artifact is accepted.
+            Write-Host 'Parallel native build failed; retrying once serially.'
+            Invoke-Checked cmake @('--build', $xrBuild, '--config', 'Release', '--parallel', '1')
+        }
+        Invoke-Checked ctest @('--test-dir', $xrBuild, '-C', 'Release', '--output-on-failure')
+        Invoke-Checked cmake @('--install', $xrBuild, '--config', 'Release', '--component', 'Renderer', '--prefix', $xrStage)
+        $candidateVersion += '-xr-prototype'
+    }
     Invoke-WebRequest -Uri $pin.glslang_url -OutFile $shaderArchive
     Assert-Hash $shaderArchive $pin.glslang_archive_sha256
     Expand-Archive -LiteralPath $shaderArchive -DestinationPath $shaderRoot
     Assert-Hash (Join-Path $shaderRoot 'bin/glslang.exe') $pin.glslang_exe_sha256
     $env:PATH = (Join-Path $shaderRoot 'bin') + [IO.Path]::PathSeparator + $env:PATH
     $meson = @('--from', "meson==$($pin.meson)", '--with', "ninja==$($pin.ninja)", 'meson')
+    $xrOptions = if ($OpenXR) { @('-Dgk3hd_openxr=true') } else { @() }
     Invoke-Checked uvx ($meson + @('setup', $build, $source, '--buildtype=release', '--wrap-mode=nodownload',
         '-Denable_ddraw=true', '-Denable_d3d9=true', '-Denable_dxgi=false', '-Denable_d3d8=false',
         '-Denable_d3d10=false', '-Denable_d3d11=false', '-Dbuild_id=false',
-        "-Dgk3hd_version=v$($pin.version)"))
+        "-Dgk3hd_version=v$candidateVersion") + $xrOptions)
     $machines = Get-Content -LiteralPath (Join-Path $build 'meson-info/intro-machines.json') -Raw | ConvertFrom-Json
     $compilers = Get-Content -LiteralPath (Join-Path $build 'meson-info/intro-compilers.json') -Raw | ConvertFrom-Json
     if ($machines.host.cpu_family -ne 'x86' -or $machines.host.system -ne 'windows' -or
@@ -156,11 +216,51 @@ try {
         if ($unit -in @('check_area_blend', 'check_area_blt', 'check_present_retention', 'check_readback')) { Invoke-Checked $unitExe @($dll) }
         else { Invoke-Checked $unitExe @() }
     }
+    if ($OpenXR) {
+        # Select the test runtime for this process only. It uses real GPU images
+        # and synthetic tracking, never a headset or a persistent registration.
+        $env:XR_RUNTIME_JSON = Join-Path $xrBuild 'Release/gpu-runtime.json'
+        $env:GK3HD_XR_PROTOTYPE = '1'
+        $env:GK3HD_XR_TEST_BGRA = $null
+        # Fidelity qualification must not inherit a profiling-only workload.
+        $env:GK3HD_XR_TEST_EYE_SIZE = $null
+        $env:GK3HD_XR_TEST_SKIP_PIXEL_READBACK = $null
+        Invoke-Checked (Join-Path $output 'check_readback.exe') @($dll)
+        $xrLog = Get-Content -LiteralPath (Join-Path $output 'check_readback_ddraw.log') -Raw
+        if ([regex]::Matches($xrLog, 'GK3HD: Native OpenXR renderer bootstrap enabled').Count -ne 1 -or
+            [regex]::Matches($xrLog, 'GK3HD: OpenXR session and separate eye images created').Count -ne 2) {
+            throw 'The GPU fixture must exercise one shared XR instance and two device/session lifecycles.'
+        }
+        Invoke-Checked (Join-Path $xrBuild 'Release/gk3hd-xr-transport-tests.exe') @(
+            $dll, (Join-Path $xrBuild 'Release/gk3hd-xr-gpu-runtime.dll'))
+        $env:GK3HD_XR_TEST_BGRA = '1'
+        Invoke-Checked (Join-Path $xrBuild 'Release/gk3hd-xr-transport-tests.exe') @(
+            $dll, (Join-Path $xrBuild 'Release/gk3hd-xr-gpu-runtime.dll'))
+        # Critical presentation copies cannot skip or reuse a gamma/alpha
+        # variant during compilation. Test first use, not warmed-up retries,
+        # under both async policies while ordinary game shaders keep theirs.
+        foreach ($method in @('dyasync', 'async')) {
+            $env:DXVK_CONFIG = "dxvk.shaderCompilationMethod = $method"
+            foreach ($layout in @('', '1')) {
+                $env:GK3HD_XR_TEST_BGRA = if ($layout) { $layout } else { $null }
+                Invoke-Checked (Join-Path $xrBuild 'Release/gk3hd-xr-transport-tests.exe') @(
+                    $dll, (Join-Path $xrBuild 'Release/gk3hd-xr-gpu-runtime.dll'), '--critical-copy')
+            }
+        }
+        $env:DXVK_CONFIG = $oldInlineConfig
+        $env:GK3HD_XR_TEST_BGRA = $null
+        $env:GK3HD_XR_PROTOTYPE = $null
+    }
 
     # Package only after the freshly compiled native tests pass. No game files.
     Assert-Hash $patch $patchHash
     Assert-Hash (Join-Path $PSScriptRoot 'upstream.json') $pinHash
-    $name = "dxvk-sarek-$($pin.version)"
+    foreach ($input in $xrInputs.Keys) {
+        if ((Get-SourceHash (Join-Path $PSScriptRoot "vr/$input")) -ne $xrInputs[$input]) {
+            throw "OpenXR source changed during compilation: $input"
+        }
+    }
+    $name = "dxvk-sarek-$candidateVersion"
     $releaseDll = Join-Path $output "$name.dll"
     $notices = Join-Path $output "$name.txt"
     Copy-Item -LiteralPath $dll -Destination $releaseDll
@@ -173,9 +273,15 @@ try {
         $noticeText += "`n=== $($license.Name) ===`n"
         $noticeText += Get-Content -LiteralPath (Join-Path $source $license.Value) -Raw
     }
+    if ($OpenXR) {
+        foreach ($license in (Get-ChildItem -LiteralPath (Join-Path $xrStage 'notices') -File | Sort-Object Name)) {
+            $noticeText += "`n=== $($license.Name) ===`n"
+            $noticeText += Get-Content -LiteralPath $license.FullName -Raw
+        }
+    }
     Set-Content -LiteralPath $notices -Value $noticeText -Encoding utf8NoBOM
     [ordered]@{
-        version = $pin.version
+        version = $candidateVersion
         upstream_commit = $pin.commit
         submodules = $submodules
         msvc = $pin.msvc
@@ -188,13 +294,23 @@ try {
         notices_sha256 = (Get-FileHash -LiteralPath $notices).Hash.ToLowerInvariant()
         surface_tests = 'passed'
         helper_tests = 'passed'
+        openxr_prototype = [bool]$OpenXR
+        openxr_inputs = $xrInputs
+        openxr_native_tests = if ($OpenXR) { 'passed' } else { 'not enabled' }
+        openxr_gpu_tests = if ($OpenXR) { 'passed' } else { 'not enabled' }
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output "$name.json") -Encoding utf8NoBOM
     Get-FileHash -LiteralPath $releaseDll
     Write-Host "Candidate only; not installed or published: $releaseDll"
 } finally {
     $env:PATH = $oldPath
     $env:DXVK_CONFIG_FILE = $oldConfig
+    $env:DXVK_CONFIG = $oldInlineConfig
     $env:D7VK_LOG_PATH = $oldLogPath
     $env:DXVK_LOG_PATH = $oldDxvkLogPath
     $env:CL = $oldCl
+    $env:GK3HD_XR_PROTOTYPE = $oldXrPrototype
+    $env:XR_RUNTIME_JSON = $oldXrRuntime
+    $env:GK3HD_XR_TEST_BGRA = $oldXrBgra
+    $env:GK3HD_XR_TEST_EYE_SIZE = $oldXrEyeSize
+    $env:GK3HD_XR_TEST_SKIP_PIXEL_READBACK = $oldXrSkipReadback
 }

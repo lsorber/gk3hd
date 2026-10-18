@@ -13,6 +13,7 @@ from tests.visual.support.readiness import (
     startup_escape_safe,
     timeblock_complete,
     title_play_center,
+    title_quit_center,
     title_ready,
     title_restore_center,
 )
@@ -90,6 +91,36 @@ def test_recognizes_four_aligned_title_buttons() -> None:
     assert title_restore_center(frame) == (600, 715)
     assert title_play_center(frame) == (400, 715)
     assert title_play_center(Image.new("RGB", (1024, 768), "black")) is None
+
+
+@pytest.mark.parametrize("size", [(1024, 768), (1280, 800), (3840, 2160)])
+def test_fresh_game_is_playable_without_an_enabled_restore(size: tuple[int, int]) -> None:
+    frame = Image.new("RGB", (1024, 768), "black")
+    draw = ImageDraw.Draw(frame)
+    for left in (160, 360, 760):
+        draw.rectangle((left, 700, left + 80, 730), fill=(190, 110, 40))
+    draw.rectangle((560, 700, 640, 730), fill=(80, 55, 20))
+    frame = frame.resize(size, Image.Resampling.NEAREST)
+    assert title_ready(frame)
+    assert title_restore_center(frame) is None
+    play = title_play_center(frame)
+    quit_center = title_quit_center(frame)
+    assert play is not None
+    assert quit_center is not None
+    assert play[0] == pytest.approx(400 * size[0] / 1024, abs=4)
+    assert quit_center[0] == pytest.approx(800 * size[0] / 1024, abs=4)
+
+
+@pytest.mark.parametrize("missing", [160, 360, 760])
+def test_incomplete_title_cannot_masquerade_as_disabled_restore(missing: int) -> None:
+    frame = Image.new("RGB", (1024, 768), "black")
+    draw = ImageDraw.Draw(frame)
+    for left in (160, 360, 560, 760):
+        if left != missing:
+            draw.rectangle((left, 700, left + 80, 730), fill=(190, 110, 40))
+    assert not title_ready(frame)
+    assert title_play_center(frame) is None
+    assert title_quit_center(frame) is None
 
 
 def test_rejects_logo_like_warm_art_above_title_band() -> None:

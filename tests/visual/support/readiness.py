@@ -92,20 +92,28 @@ def developer_console_visible(image: Image) -> bool:
 
 
 def title_ready(image: Image) -> bool:
-    """Recognize GK3's four aligned warm or green title controls."""
+    """Recognize usable title controls, including a fresh game with Restore disabled."""
     return _title_button_centers(image) is not None
 
 
 def title_restore_center(image: Image) -> tuple[int, int] | None:
     """Return the exact detected center of the title's Restore control."""
     centers = _title_button_centers(image)
-    return None if centers is None else centers[_RESTORE_BUTTON_INDEX]
+    return (
+        None if centers is None or len(centers) != _BUTTON_COUNT else centers[_RESTORE_BUTTON_INDEX]
+    )
 
 
 def title_play_center(image: Image) -> tuple[int, int] | None:
     """Return the detected Play control without assuming an output resolution."""
     centers = _title_button_centers(image)
     return None if centers is None else centers[1]
+
+
+def title_quit_center(image: Image) -> tuple[int, int] | None:
+    """Return the enabled Quit control, whether or not a save slot exists."""
+    centers = _title_button_centers(image)
+    return None if centers is None else centers[-1]
 
 
 def _title_button_centers(image: Image) -> tuple[tuple[int, int], ...] | None:
@@ -160,7 +168,7 @@ def _sample_title_button_centers(image: Image) -> tuple[tuple[int, int], ...] | 
     spans = _contiguous_spans(active)
     minimum_width = max(10, int(width * _MIN_BUTTON_WIDTH))
     spans = [span for span in spans if span[1] - span[0] + 1 >= minimum_width]
-    if len(spans) < _BUTTON_COUNT:
+    if len(spans) < _BUTTON_COUNT - 1:
         return None
     strongest = sorted(
         spans,
@@ -182,7 +190,15 @@ def _sample_title_button_centers(image: Image) -> tuple[tuple[int, int], ...] | 
         or max(centers_y) - min(centers_y) > height * _BUTTON_Y_SPAN_MAX
     ):
         return None
-    return tuple(centers)
+    complete = len(centers) == _BUTTON_COUNT
+    if not complete:
+        # With no saves, only Intro, Play and Quit retain their warm fill.
+        # Restore is the missing third slot: Play-to-Quit spans two ordinary
+        # intervals. Do not accept an arbitrary three-control or partial page.
+        first_gap = centers[1][0] - centers[0][0]
+        last_gap = centers[2][0] - centers[1][0]
+        complete = first_gap > 0 and 1.8 * first_gap <= last_gap <= 2.2 * first_gap
+    return tuple(centers) if complete else None
 
 
 def startup_escape_safe(image: Image) -> bool:

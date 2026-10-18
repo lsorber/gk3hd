@@ -5,9 +5,56 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from PIL import Image
 
 from gk3hd.system.locking import ExclusiveFileLock, LockError
 from tests.visual.support import windows
+
+
+@pytest.mark.parametrize("border", [(0, 0, 0, 0), (2, 30, 2, 2), (0, 63, 0, 0)])
+def test_window_capture_keeps_exact_client_pixels_without_chrome(
+    monkeypatch: pytest.MonkeyPatch, border: tuple[int, int, int, int]
+) -> None:
+    left, top, right, bottom = border
+    width, height = 64 + left + right, 48 + top + bottom
+    api, dwm = Mock(), Mock()
+
+    def client_rect(_window: int, pointer: ctypes.c_void_p) -> bool:
+        target = ctypes.cast(pointer, ctypes.POINTER(windows._Rect)).contents
+        target.left, target.top, target.right, target.bottom = 0, 0, 64, 48
+        return True
+
+    def client_origin(_window: int, pointer: ctypes.c_void_p) -> bool:
+        target = ctypes.cast(pointer, ctypes.POINTER(windows._Point)).contents
+        target.x, target.y = -200 + left, 90 + top
+        return True
+
+    def window_bounds(_window: int, _attribute: int, pointer: ctypes.c_void_p, _size: int) -> int:
+        target = ctypes.cast(pointer, ctypes.POINTER(windows._Rect)).contents
+        target.left, target.top, target.right, target.bottom = -200, 90, -200 + width, 90 + height
+        return 0
+
+    api.GetClientRect.side_effect = client_rect
+    api.ClientToScreen.side_effect = client_origin
+    dwm.DwmGetWindowAttribute.side_effect = window_bounds
+    monkeypatch.setattr(windows, "_user32", Mock(return_value=api))
+    monkeypatch.setattr(windows.ctypes, "WinDLL", Mock(return_value=dwm))
+    client = Image.new("RGB", (64, 48), "green")
+    client.putpixel((0, 0), (1, 2, 3))
+    client.putpixel((63, 47), (4, 5, 6))
+    captured = Image.new("RGB", (width, height), "red")
+    captured.paste(client, (left, top))
+    result = windows._client_capture_image(captured, 42)
+    assert result.size == client.size
+    assert result.tobytes() == client.tobytes()
+
+    with pytest.raises(windows.CaptureError, match="changed size"):
+        windows._client_capture_image(captured.crop((0, 0, width - 1, height)), 42)
+
+    api.ClientToScreen.return_value = False
+    api.ClientToScreen.side_effect = None
+    with pytest.raises(windows.CaptureError, match="client bounds"):
+        windows._client_capture_image(captured, 42)
 
 
 @pytest.mark.parametrize("name", ["C_PLAYACTION", "C_WAIT", "C_POINT", "C_" + "X" * 30, "BAD"])

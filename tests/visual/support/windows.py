@@ -192,6 +192,7 @@ class FrameGrabber:
             raw = self._latest
         bgr = raw[:, :, :3]
         image = Image.fromarray(bgr[:, :, ::-1], mode="RGB")
+        image = _client_capture_image(image, self._window)
         return _normalize_frame(image, width=width, height=height)
 
     def close(self) -> None:
@@ -936,6 +937,39 @@ def _capture_gdi(window: int, *, width: int, height: int) -> Image.Image:
         all_screens=True,
     )
     return _normalize_frame(image.convert("RGB"), width=width, height=height)
+
+
+def _client_capture_image(image: Image.Image, window: int) -> Image.Image:
+    """Remove window chrome before mapping captured pixels to client input."""
+    user32 = _user32()
+    client = _Rect()
+    origin = _Point()
+    if not user32.GetClientRect(window, ctypes.byref(client)) or not user32.ClientToScreen(
+        window, ctypes.byref(origin)
+    ):
+        message = "could not resolve captured GK3 client bounds"
+        raise CaptureError(message)
+    dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
+    dwm.DwmGetWindowAttribute.argtypes = (
+        wintypes.HWND,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    dwm.DwmGetWindowAttribute.restype = ctypes.c_long
+    bounds = _Rect()
+    if dwm.DwmGetWindowAttribute(window, 9, ctypes.byref(bounds), ctypes.sizeof(bounds)) < 0:
+        message = "could not resolve captured GK3 window bounds"
+        raise CaptureError(message)
+    if image.size != (bounds.right - bounds.left, bounds.bottom - bounds.top):
+        message = "GK3 window changed size before its capture"
+        raise CaptureError(message)
+    left, top = origin.x - bounds.left, origin.y - bounds.top
+    right, bottom = left + client.right - client.left, top + client.bottom - client.top
+    if not (0 <= left < right <= image.width and 0 <= top < bottom <= image.height):
+        message = "captured GK3 client bounds are empty or outside the window"
+        raise CaptureError(message)
+    return image.crop((left, top, right, bottom))
 
 
 def _normalize_frame(image: Image.Image, *, width: int, height: int) -> Image.Image:

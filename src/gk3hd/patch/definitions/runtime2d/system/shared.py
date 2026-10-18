@@ -78,7 +78,7 @@ class SystemCompilerContext:
     _section_size: ClassVar[int] = SYSTEM_SEGMENT.size
     _section_characteristics: ClassVar[int] = SYSTEM_SEGMENT.characteristics
     _magic: ClassVar[bytes] = SYSTEM_SEGMENT.magic
-    _layout_version: ClassVar[int] = 213
+    _layout_version: ClassVar[int] = 215
     _off_layout_version: ClassVar[int] = 0x08
     _off_render_depth: ClassVar[int] = SYSTEM_RENDER_DEPTH_OFFSET
     _off_input_active: ClassVar[int] = SYSTEM_INPUT_ACTIVE_OFFSET
@@ -1046,7 +1046,7 @@ class SystemCompilerContext:
     _ddblt_colorfill_wait: ClassVar[int] = 0x01000400
     _ddsd_size: ClassVar[int] = 0x6C
     _ddsd_caps_height_width: ClassVar[int] = 0x00000007
-    _tooltip_panel_caps: ClassVar[int] = 0x00000040  # DDSCAPS_OFFSCREENPLAIN
+    _tooltip_panel_caps: ClassVar[int] = 0x00000840  # OFFSCREENPLAIN | SYSTEMMEMORY
     # GK3's software-cursor atlas has this authored extent. Other compositors
     # use the constant only where exact source identity is not yet available.
     _cursor_atlas_size: ClassVar[int] = 128

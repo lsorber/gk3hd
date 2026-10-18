@@ -42,6 +42,36 @@ static void expect(Surface* surface, RECT region, uint16_t expected) {
   expect_pixels<Description>(surface, region, [expected](LONG, LONG) { return expected; });
 }
 
+template<class Description, class Surface>
+static void check_opaque_crop_copy(Surface* source, Surface* target, IDirect3DViewport3* viewport, bool fast) {
+  RECT whole{0,0,1280,800}, crop{0,0,32,32}, written{97,251,129,283};
+  D3DRECT full{0,0,1280,800}, outside{1264,784,1280,800};
+  DDBLTFX fill{}; fill.dwSize=sizeof(fill); fill.dwFillColor=0x07e0;
+  // The backing exists, but these subsequent GPU clears invalidate its pixels.
+  // No target read is allowed to prime the destination before the fast copy.
+  for (unsigned frame=0;frame<3;++frame) {
+    // Dirty a CPU-authored source on every transaction. A crop must never
+    // overwrite unrelated destination pixels, regardless of its copy path.
+    check("prepare opaque green source", source->Blt(&crop,nullptr,nullptr,DDBLT_COLORFILL|DDBLT_WAIT,&fill));
+    check("invalidate opaque destination", viewport->Clear2(1,&full,D3DCLEAR_TARGET,0xffff0000,1.f,0));
+    if (fast)
+      check("opaque fast copy onto GPU-only scene", target->BltFast(written.left,written.top,source,&crop,DDBLTFAST_WAIT));
+    else
+      check("opaque crop copy onto GPU-only scene", target->Blt(&written,source,&crop,DDBLT_WAIT,nullptr));
+    check("flush copy and change unrelated corner", viewport->Clear2(1,&outside,D3DCLEAR_TARGET,0xff0000ff,1.f,0));
+    expect_pixels<Description>(target,whole,[&](LONG x,LONG y) {
+      if (x>=outside.x1 && y>=outside.y1) return uint16_t(0x001f);
+      if (x>=written.left && x<written.right && y>=written.top && y<written.bottom) return uint16_t(0x07e0);
+      return uint16_t(0xf800);
+    });
+    RECT invalid{-1,0,31,32};
+    const auto rejected = fast ? target->BltFast(0,0,source,&invalid,DDBLTFAST_WAIT) :
+      target->Blt(&written,source,&invalid,DDBLT_WAIT,nullptr);
+    if (SUCCEEDED(rejected)) throw std::runtime_error("invalid opaque crop copy succeeded");
+    expect<Description>(target,written,0x07e0);
+  }
+}
+
 static void check_overlay_backgrounds(IDirectDraw* dd, IDirect3D3* d3d) {
   // GK3 uses the original DirectDraw surface interface for save-under blits.
   // Exercise those transactions, including ROP copies and the cross-interface
@@ -86,7 +116,13 @@ static void check_overlay_backgrounds(IDirectDraw* dd, IDirect3D3* d3d) {
         check("end legacy scene", device->EndScene());
       }
       const DWORD flags = DDBLT_WAIT | (useRop ? DDBLT_ROP : 0);
-      check("save overlay background", saved->Blt(&local, target.Get(), &region, flags, useRop ? &copy : nullptr));
+      // Cursor save-under uses BltFast. A small GPU source crop must keep its
+      // exact pixels, including crops that span the backing's readback bands.
+      if (useRop)
+        check("save overlay background with ROP", saved->Blt(&local, target.Get(), &region, flags, &copy));
+      else
+        check("save cursor background with BltFast", saved->BltFast(0, 0, target.Get(), &region,
+              DDBLTFAST_NOCOLORKEY | DDBLTFAST_WAIT));
       expect<DDSURFACEDESC>(saved.Get(), local, 0xf800);
       if (local.right < 1280) {
         // A transparent cursor/button must preserve the GPU scene around
@@ -106,13 +142,21 @@ static void check_overlay_backgrounds(IDirectDraw* dd, IDirect3D3* d3d) {
         check("unlock keyed overlay", overlay->Unlock(nullptr));
         DDCOLORKEY key{0xf81f, 0xf81f};
         check("set magenta color key", overlay->SetColorKey(DDCKEY_SRCBLT, &key));
-        check("draw keyed overlay", target->Blt(&region, overlay.Get(), &local, DDBLT_KEYSRC | DDBLT_WAIT, nullptr));
+        if (rasterized)
+          check("draw keyed overlay", target->Blt(&region, overlay.Get(), &local, DDBLT_KEYSRC | DDBLT_WAIT, nullptr));
+        else
+          check("draw keyed fast cursor", target->BltFast(region.left, region.top, overlay.Get(), &local,
+                DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT));
         check("invalidate keyed CPU snapshot", viewport->Clear2(1, &outside, D3DCLEAR_TARGET, 0xff0000ff, 1.f, 0));
         expect_pixels<DDSURFACEDESC>(target.Get(), region,
             [opaque](LONG x, LONG y) { return uint16_t(opaque(x, y) ? 0x07e0 : 0xf800); });
       }
       check("draw temporary overlay", target->Blt(&region, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fill));
-      check("restore overlay background", target->Blt(&region, saved.Get(), &local, flags, useRop ? &copy : nullptr));
+      if (useRop)
+        check("restore overlay background", target->Blt(&region, saved.Get(), &local, flags, &copy));
+      else
+        check("restore fast cursor background", target->BltFast(region.left, region.top, saved.Get(), &local,
+              DDBLTFAST_NOCOLORKEY | DDBLTFAST_WAIT));
       expect<DDSURFACEDESC>(target.Get(), region, 0xf800);
       check("invalidate legacy CPU snapshot", viewport->Clear2(1, &outside, D3DCLEAR_TARGET, 0xff0000ff, 1.f, 0));
       RECT restored = region;
@@ -120,6 +164,22 @@ static void check_overlay_backgrounds(IDirectDraw* dd, IDirect3D3* d3d) {
       expect<DDSURFACEDESC>(target.Get(), restored, 0xf800);
     }
   }
+  desc.dwWidth=32; desc.dwHeight=32;
+  desc.ddsCaps.dwCaps=DDSCAPS_OFFSCREENPLAIN|DDSCAPS_SYSTEMMEMORY;
+  ComPtr<IDirectDrawSurface> opaque;
+  check("create opaque fast-copy source",dd->CreateSurface(&desc,opaque.GetAddressOf(),nullptr));
+  for (bool fast : {false,true}) check_opaque_crop_copy<DDSURFACEDESC>(opaque.Get(),target.Get(),viewport.Get(),fast);
+  auto opaque2=query<IDirectDrawSurface2>(opaque.Get(),IID_IDirectDrawSurface2);
+  auto target2=query<IDirectDrawSurface2>(target.Get(),IID_IDirectDrawSurface2);
+  for (bool fast : {false,true}) check_opaque_crop_copy<DDSURFACEDESC>(opaque2.Get(),target2.Get(),viewport.Get(),fast);
+  auto opaque3=query<IDirectDrawSurface3>(opaque.Get(),IID_IDirectDrawSurface3);
+  auto target3=query<IDirectDrawSurface3>(target.Get(),IID_IDirectDrawSurface3);
+  for (bool fast : {false,true}) check_opaque_crop_copy<DDSURFACEDESC>(opaque3.Get(),target3.Get(),viewport.Get(),fast);
+  auto opaque4=query<IDirectDrawSurface4>(opaque.Get(),IID_IDirectDrawSurface4);
+  for (bool fast : {false,true}) check_opaque_crop_copy<DDSURFACEDESC2>(opaque4.Get(),target4.Get(),viewport.Get(),fast);
+  auto opaque7=query<IDirectDrawSurface7>(opaque.Get(),IID_IDirectDrawSurface7);
+  auto target7=query<IDirectDrawSurface7>(target.Get(),IID_IDirectDrawSurface7);
+  for (bool fast : {false,true}) check_opaque_crop_copy<DDSURFACEDESC2>(opaque7.Get(),target7.Get(),viewport.Get(),fast);
   check("detach legacy viewport", device->DeleteViewport(viewport.Get()));
 }
 
@@ -182,6 +242,10 @@ int wmain(int argc, wchar_t** argv) {
         // Single-sample depth must copy directly, not resolve into itself. This
         // triggers the same startup readback that crashed the AMD Vulkan driver.
         expect<DDSURFACEDESC2>(depth.Get(), all, 0xffff);
+        RECT savedCursor{0, 0, cursor.right - cursor.left, cursor.bottom - cursor.top};
+        check("save Surface4 cursor crop", saved->BltFast(0, 0, color.Get(), &cursor,
+              DDBLTFAST_NOCOLORKEY | DDBLTFAST_WAIT));
+        expect<DDSURFACEDESC2>(saved.Get(), savedCursor, 0xf800);
         expect<DDSURFACEDESC2>(color.Get(), cursor, 0xf800);
         check("save complete background", saved->Blt(nullptr, color.Get(), nullptr, DDBLT_WAIT, nullptr));
         check("overwrite background", viewport->Clear2(1, &full, D3DCLEAR_TARGET, 0xff0000ff, 1.f, 0));

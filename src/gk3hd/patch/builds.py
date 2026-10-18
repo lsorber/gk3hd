@@ -92,12 +92,32 @@ class BuildProfile:
             raise ProfileError(detail) from exc
 
 
+# Native UserScene subclasses: name, base-constructor call, type assignment,
+# primary vtable. All retain the ordinary room/input layout and virtual picker.
+NATIVE_USER_SCENE_SUBCLASSES = (
+    ("angel", 0x0041E84F, 0x0041E8A0, 0x006663F4),
+    ("bridge", 0x004453A1, 0x0044540F, 0x00668AFC),
+    ("chess", 0x0045696A, 0x004569CB, 0x00673D74),
+    ("circle", 0x0045788C, 0x004578EF, 0x00673FCC),
+    ("coordinate_device", 0x0046F092, 0x0046F152, 0x00675E0C),
+    ("holy", 0x004B616B, 0x004B61A8, 0x0067B4D4),
+    ("langolier", 0x004C221E, 0x004C2241, 0x0067C0B4),
+    ("laser", 0x004C2726, 0x004C2799, 0x0067C218),
+)
+
 # Steamless normalization produces the same patch-relevant code/data layout as
 # the DRM-free GOG executable. The hashes stay distinct because support is
 # explicitly bound to the two complete input binaries rather than inferred
 # from a handful of matching sites.
 _SHARED_SITES = MappingProxyType(
     {
+        "caption.initial_layout": PatchSite(
+            symbol="caption.initial_layout",
+            va=0x004507DA,
+            original=bytes.fromhex("e8 06 03 00 00"),
+            context_before=bytes.fromhex("89 86 f8 00 00 00 8b ce"),
+            context_after=bytes.fromhex("8b 4d f4 8b c6 5f 5e 5b"),
+        ),
         "bitmap.rgb565_creation_case": PatchSite(
             symbol="bitmap.rgb565_creation_case",
             va=0x0054E778,
@@ -409,10 +429,388 @@ _SHARED_SITES = MappingProxyType(
             va=0x0055C49B,
             original=bytes.fromhex("a1 44 d2 70 00 56 6a 00 50 8b 08 ff 51 2c"),
         ),
+        "vr.windowed_present": PatchSite(
+            symbol="vr.windowed_present",
+            va=0x0055C51D,
+            original=bytes.fromhex("8b 3d 80 51 66 00"),
+            context_before=bytes.fromhex("eb 66"),
+            context_after=bytes.fromhex("be 9f 86 01 00 8b 15 48 d2 70 00"),
+        ),
+        "vr.presentation_mode": PatchSite(
+            symbol="vr.presentation_mode",
+            va=0x0055C459,
+            original=bytes.fromhex(
+                "a1 d0 b0 70 00 c7 45 fc 00 00 00 00 80 38 00 0f 84 af 00 00 00"
+            ),
+        ),
+        "vr.mirror_preferences": PatchSite(
+            symbol="vr.mirror_preferences",
+            va=0x004F8B3D,
+            original=bytes.fromhex("ff 15 0c 50 66 00"),
+            # The game's DWORD registry writer. Key open/close and other values
+            # retain their native behavior; the VR guard owns only display values.
+            context_before=bytes.fromhex("04 50 6a 04 6a 00 ff 75 0c ff 75 08"),
+            context_after=bytes.fromhex("ff 75 08 ff 15 08 50 66 00"),
+        ),
+        "vr.windowed_gamma_query": PatchSite(
+            symbol="vr.windowed_gamma_query",
+            va=0x00575DBC,
+            original=bytes.fromhex("80 3a 00 74 3b"),
+            context_before=bytes.fromhex("8b 15 d0 b0 70 00"),
+            # Keep the native gamma capability and rasterizer checks. Active VR
+            # can query the real gamma interface even with a windowed mirror.
+            context_after=bytes.fromhex("f7 85 44 fc ff ff 00 00 02 00 74 2f 8b 83 10 02 00 00"),
+        ),
+        "vr.inactive_update": PatchSite(
+            symbol="vr.inactive_update",
+            va=0x005335CF,
+            original=bytes.fromhex("8b 51 64 a1 3c d2 70 00"),
+            context_before=bytes.fromhex("85 c9 74 55"),
+            # Keep the DirectDraw cooperative-level test and failure wait intact.
+            context_after=bytes.fromhex("85 d2 7f 43 85 c0 74 10 8b 08 50 ff 51 68 85 c0 7c 35"),
+        ),
+        "vr.inactive_present": PatchSite(
+            symbol="vr.inactive_present",
+            va=0x0055C39F,
+            original=bytes.fromhex("8b 46 64 85 c0"),
+            context_before=bytes.fromhex("8b f1 57"),
+            # The original inactive-window return and missing-device guard remain.
+            context_after=bytes.fromhex(
+                "0f 8f 06 02 00 00 8b 86 cc 00 00 00 85 c0 0f 84 f8 01 00 00"
+            ),
+        ),
         "transition.seed_hook": PatchSite(
             symbol="transition.seed_hook",
             va=0x0052A5DD,
             original=bytes.fromhex("b8 22 3d 61 00"),
+        ),
+        "vr.camera_setup": PatchSite(
+            symbol="vr.camera_setup",
+            va=0x005588D0,
+            original=bytes.fromhex("55 8b ec 83 ec 20"),
+        ),
+        "vr.pick_ray": PatchSite(
+            symbol="vr.pick_ray",
+            va=0x005431A0,
+            original=bytes.fromhex("55 8b ec 83 ec 30"),
+            context_after=bytes.fromhex("8b 0d d4 b0 70 00 56 e8 1e 57 01 00"),
+        ),
+        "vr.pick_origin": PatchSite(
+            symbol="vr.pick_origin",
+            va=0x00548740,
+            original=bytes.fromhex("8b 81 c8 01 00 00"),
+            context_after=bytes.fromhex("83 c0 1c c3"),
+        ),
+        "vr.geometry_segment": PatchSite(
+            symbol="vr.geometry_segment",
+            va=0x00548350,
+            original=bytes.fromhex("55 8b ec 8b 45 2c 8b 55 28"),
+        ),
+        "vr.floor_scene_data": PatchSite(
+            symbol="vr.floor_scene_data",
+            # UserScene's serialized mpSceneData member is at +0x54.
+            va=0x004FFC36,
+            original=bytes.fromhex(
+                "8b 07 8d 4e 54 68 90 63 70 00 51 68 f0 5d 68 00 8b cf ff 50 40"
+            ),
+        ),
+        "vr.floor_data_name": PatchSite(
+            symbol="vr.floor_data_name",
+            # SceneData owns the actual SIF floor name at +4, not scenery's name.
+            va=0x00501F89,
+            original=bytes.fromhex("8d 46 04 50 68 10 5f 68 00 57 e8 e2 14 f0 ff"),
+        ),
+        "vr.floor_string_buffer": PatchSite(
+            symbol="vr.floor_string_buffer",
+            # Native string data lives at +4; hence SceneData's buffer is at +8.
+            va=0x00402548,
+            original=bytes.fromhex("57 ff 74 24 10 ff 76 04 e8 2b fa 1b 00 8b 46 04"),
+        ),
+        "vr.geometry_bsp": PatchSite(
+            symbol="vr.geometry_bsp",
+            va=0x00564440,
+            original=bytes.fromhex("55 8b ec b8 d8 32 00 00 e8 f3 d7 05 00"),
+        ),
+        **{
+            f"vr.{name}_scene_{kind}": PatchSite(
+                symbol=f"vr.{name}_scene_{kind}", va=va, original=original
+            )
+            for name, base_call, type_assignment, vtable in NATIVE_USER_SCENE_SUBCLASSES
+            for kind, va, original in (
+                (
+                    "base",
+                    base_call,
+                    b"\xe8" + (0x004FFB7B - base_call - 5).to_bytes(4, "little", signed=True),
+                ),
+                ("type", type_assignment, b"\xc7\x06" + vtable.to_bytes(4, "little")),
+                ("input", vtable + 0x70, bytes.fromhex("42 06 50 00 25 f3 41 00 1d 07 50 00")),
+                ("pick", vtable + 0xA0, bytes.fromhex("4a 07 50 00")),
+            )
+        },
+        "vr.geometry_actor_enumerate": PatchSite(
+            symbol="vr.geometry_actor_enumerate",
+            va=0x00547FE0,
+            original=bytes.fromhex("55 8b ec 51 8b 91 6c 01 00 00"),
+        ),
+        "vr.geometry_actor_segment": PatchSite(
+            symbol="vr.geometry_actor_segment",
+            va=0x00547C60,
+            original=bytes.fromhex("55 8b ec 83 ec 08 8b 45 10"),
+        ),
+        "vr.geometry_model_color_key": PatchSite(
+            symbol="vr.geometry_model_color_key",
+            va=0x0057AFBB,
+            original=bytes.fromhex(
+                "8b 0e 85 c9 0f 84 39 01 00 00 6a 00 e8 c4 6e fd ff f6 40 04 01 0f 84 28 01 00 00"
+            ),
+        ),
+        "vr.geometry_bsp_color_key": PatchSite(
+            symbol="vr.geometry_bsp_color_key",
+            va=0x0056569A,
+            original=bytes.fromhex("6a 00 8b cf e8 ed c7 fe ff f6 40 04 01 75 14"),
+        ),
+        "vr.geometry_texture_color_key": PatchSite(
+            symbol="vr.geometry_texture_color_key",
+            va=0x00550064,
+            original=bytes.fromhex("f6 46 04 01 75 09 5f 5e 33 c0 5b 5d c2 08 00"),
+        ),
+        "vr.pick_rectangle": PatchSite(
+            symbol="vr.pick_rectangle",
+            va=0x0052A101,
+            original=bytes.fromhex("ff 90 94 00 00 00"),
+            context_after=bytes.fromhex("84 c0 75 07 33 c0"),
+        ),
+        "vr.pick_actor_rectangle": PatchSite(
+            symbol="vr.pick_actor_rectangle",
+            va=0x0052BC13,
+            original=bytes.fromhex("8b 73 04 8b cf"),
+            context_after=bytes.fromhex("e8 a3 b1 fa ff"),
+        ),
+        "vr.pick_actor_accept": PatchSite(
+            symbol="vr.pick_actor_accept",
+            va=0x0052BC35,
+            original=bytes.fromhex("8b 47 50 8b 0b 89 45 08 8d 45 08 50"),
+        ),
+        "vr.world_pick": PatchSite(
+            symbol="vr.world_pick",
+            va=0x0052A0E2,
+            original=bytes.fromhex("b8 bf 3c 61 00 e8 34 77 09 00"),
+        ),
+        "vr.world_hover": PatchSite(
+            symbol="vr.world_hover",
+            va=0x00500B06,
+            original=bytes.fromhex("b8 64 9c 60 00 e8 10 0d 0c 00"),
+            context_after=bytes.fromhex("83 ec 1c 8a 45 0b 53 56 8b f1"),
+        ),
+        "vr.camera_translate": PatchSite(
+            symbol="vr.camera_translate",
+            va=0x0044AE02,
+            original=bytes.fromhex("55 8b ec 83 ec 4c d9 45 0c 53 8b d9"),
+        ),
+        "vr.camera_input_lock": PatchSite(
+            symbol="vr.camera_input_lock",
+            va=0x004498C9,
+            original=bytes.fromhex(
+                "8b 0d 38 f8 6f 00 33 db 33 ff 8b 89 44 04 00 00 8b 49 28 38 99 c5 01 00 00"
+            ),
+        ),
+        "vr.camera_controller_top": PatchSite(
+            symbol="vr.camera_controller_top",
+            va=0x00444D8B,
+            # Read the top of the original controller deque using a local iterator.
+            original=bytes.fromhex(
+                "55 8b ec 83 ec 10 56 57 8d 71 64 8d 7d f0 a5 a5 a5 6a ff 8d 4d f0 a5 "
+                "e8 09 00 00 00 8b 45 f8 5f 5e 8b 00 c9 c3"
+            ),
+        ),
+        "vr.camera_controller_stack": PatchSite(
+            symbol="vr.camera_controller_stack",
+            va=0x0044BABF,
+            original=bytes.fromhex("83 bb b0 00 00 00 00 74 39 8b cb e8 bc 92 ff ff"),
+        ),
+        "vr.user_camera_controller": PatchSite(
+            symbol="vr.user_camera_controller",
+            va=0x0044975C,
+            original=bytes.fromhex("c7 06 e4 93 66 00"),
+        ),
+        "vr.user_scene_controller": PatchSite(
+            symbol="vr.user_scene_controller",
+            va=0x00449D9A,
+            original=bytes.fromhex("c7 06 08 95 66 00 89 b6 f4 00 00 00"),
+        ),
+        "vr.camera_rotate": PatchSite(
+            symbol="vr.camera_rotate",
+            va=0x0044B239,
+            original=bytes.fromhex("55 8b ec d9 45 0c 56 8b f1"),
+        ),
+        "vr.conversation_scene_owner": PatchSite(
+            symbol="vr.conversation_scene_owner",
+            va=0x0047BEC4,
+            original=bytes.fromhex("a1 38 f8 6f 00 8b 80 44 04 00 00 8b 40 60 8b 40 0c c3"),
+        ),
+        "vr.conversation_context": PatchSite(
+            symbol="vr.conversation_context",
+            va=0x0047BEC0,
+            original=bytes.fromhex("8b 41 08 c3"),
+        ),
+        "vr.conversation_active": PatchSite(
+            symbol="vr.conversation_active",
+            va=0x0046C03E,
+            original=bytes.fromhex("8b 01 c3"),
+        ),
+        "vr.cinematics_policy": PatchSite(
+            symbol="vr.cinematics_policy",
+            va=0x0044B993,
+            original=bytes.fromhex("8b 45 08 53 56 8b f1 57 50 8d be c4 01 00 00 88 07"),
+        ),
+        "vr.camera_commit": PatchSite(
+            symbol="vr.camera_commit",
+            va=0x0044B55A,
+            original=bytes.fromhex("55 8b ec 83 ec 58 53 8b d9"),
+        ),
+        "vr.client_point": PatchSite(
+            symbol="vr.client_point",
+            va=0x0056C8E0,
+            original=bytes.fromhex("55 8b ec 83 ec 08"),
+            context_after=bytes.fromhex("8d 45 f8 56 50 ff 15 84 53 66 00"),
+        ),
+        "vr.set_client_point": PatchSite(
+            symbol="vr.set_client_point",
+            va=0x0056C920,
+            original=bytes.fromhex("55 8b ec 8b 0d d4 b0 70 00"),
+            context_after=bytes.fromhex("8b 55 08 56 8b 41 48"),
+        ),
+        "vr.key_down": PatchSite(
+            symbol="vr.key_down",
+            va=0x0049AE16,
+            original=bytes.fromhex("8b 44 24 04 83 e8 10 74 18 48 74 0c 48 75 19 83"),
+        ),
+        "vr.key_up": PatchSite(
+            symbol="vr.key_up",
+            va=0x0049AE5C,
+            original=bytes.fromhex("8b 44 24 04 83 e8 10 74 18 48 74 0c 48 75 19 83"),
+        ),
+        "vr.host_key_down_slot": PatchSite(
+            symbol="vr.host_key_down_slot",
+            va=0x0067A04C,
+            original=bytes.fromhex("16 ae 49 00"),
+        ),
+        "vr.host_key_up_slot": PatchSite(
+            symbol="vr.host_key_up_slot",
+            va=0x0067A050,
+            original=bytes.fromhex("5c ae 49 00"),
+        ),
+        "vr.host_character_slot": PatchSite(
+            symbol="vr.host_character_slot",
+            va=0x0067A038,
+            original=bytes.fromhex("ab ae 49 00"),
+        ),
+        "vr.button_wait": PatchSite(
+            symbol="vr.button_wait",
+            va=0x004472B2,
+            original=bytes.fromhex("8b 3d 80 51 66 00"),
+            context_before=bytes.fromhex("57"),
+            context_after=bytes.fromhex(
+                "6a 46 ff d7 8b ce e8 9a 05 00 00 8b 0d 38 f8 6f 00 "
+                "6a 01 53 53 e8 6f 53 05 00 6a 32 ff d7 38 5d ff 5f"
+            ),
+        ),
+        "vr.character_event": PatchSite(
+            symbol="vr.character_event",
+            va=0x0049AEAB,
+            original=bytes.fromhex(
+                "a1 38 f8 6f 00 ff 74 24 08 8b 80 44 04 00 00 "
+                "ff 74 24 08 8b 48 44 e8 6c 46 02 00 c2 08 00"
+            ),
+        ),
+        "vr.movie_character": PatchSite(
+            symbol="vr.movie_character",
+            va=0x004D86B9,
+            original=bytes.fromhex(
+                "56 8b f1 8b 0d 38 f8 6f 00 8b 54 24 08 57 6a 01 8b 81 44 04 00 00 5f"
+            ),
+        ),
+        "vr.movie_character_slot": PatchSite(
+            symbol="vr.movie_character_slot",
+            va=0x0067E5BC,
+            original=bytes.fromhex("b9 86 4d 00"),
+        ),
+        "vr.action_skip_key": PatchSite(
+            symbol="vr.action_skip_key",
+            va=0x0049DC78,
+            original=bytes.fromhex(
+                "a1 38 f8 6f 00 56 8b 54 24 08 57 8b 80 44 04 00 00 "
+                "8b f9 33 f6 8b 48 44 8b 49 6c 3b 91 f8 00 00 00 75 20"
+            ),
+        ),
+        "vr.action_skip_key_slot": PatchSite(
+            symbol="vr.action_skip_key_slot",
+            va=0x0067A3B0,
+            original=bytes.fromhex("78 dc 49 00"),
+        ),
+        "vr.text_key": PatchSite(
+            symbol="vr.text_key",
+            va=0x004871F9,
+            original=bytes.fromhex("55 8b ec 51 53 56 8b f1 33 db 8b 0d 38 f8 6f 00"),
+        ),
+        "vr.text_character": PatchSite(
+            symbol="vr.text_character",
+            va=0x00487341,
+            original=bytes.fromhex("55 8b ec 8a 45 08 80 65 0b 00 56 8b f1 88 45 0a"),
+        ),
+        "vr.multiline_text_key": PatchSite(
+            symbol="vr.multiline_text_key",
+            va=0x004889D3,
+            original=bytes.fromhex(
+                "56 57 8b f1 33 ff 8b 0d 38 f8 6f 00 57 e8 da 0f 01 00 "
+                "a8 38 75 19 8b 44 24 0c 6a 01 83 e8 23 5f 74 3c 48 74 30 "
+                "48 48 74 23 48 48 74 16 33 ff 6a 00 8b ce ff 74 24 10 "
+                "e8 ea e7 ff ff 8b c7 5f 5e c2 08 00 8b ce e8 1d 00 00 00 eb f0 "
+                "8b ce e8 a0 01 00 00 eb e7 8b ce e8 21 03 00 00 eb de "
+                "8b ce e8 ab 03 00 00 eb d5"
+            ),
+        ),
+        "vr.save_character": PatchSite(
+            symbol="vr.save_character",
+            va=0x004CB2CD,
+            original=bytes.fromhex("83 7c 24 04 1b 75 0d 8b 49 78 e8 63 fd ff ff"),
+        ),
+        "vr.container_text_route": PatchSite(
+            symbol="vr.container_text_route",
+            va=0x004447EE,
+            original=bytes.fromhex(
+                "33 d2 b8 58 4d 44 00 52 50 ff 74 24 10 ff 74 24 10 e8 8c 8b 09 00 c2 08 00"
+            ),
+        ),
+        "vr.container_text_dispatch": PatchSite(
+            symbol="vr.container_text_dispatch",
+            va=0x004DD390,
+            original=bytes.fromhex("b8 74 60 60 00 e8 86 44 0e 00 51 51 53 56 8b f1"),
+        ),
+        "vr.no_text": PatchSite(
+            symbol="vr.no_text",
+            va=0x0041F7D8,
+            original=bytes.fromhex("33 c0 c2 08 00"),
+        ),
+        "vr.menu_down": PatchSite(
+            symbol="vr.menu_down",
+            va=0x0049A9BE,
+            original=bytes.fromhex("a1 38 f8 6f 00 56 57 8b 7c 24 0c 8b 80 44 04 00"),
+        ),
+        "vr.menu_up": PatchSite(
+            symbol="vr.menu_up",
+            va=0x0049AD8E,
+            original=bytes.fromhex("56 8b f1 33 c9 57 8b 7c 24 0c b8 25 4d 44 00 51"),
+        ),
+        "vr.camera_end": PatchSite(
+            symbol="vr.camera_end",
+            va=0x00558750,
+            original=bytes.fromhex("a1 30 0a 71 00"),
+        ),
+        "vr.room_clear": PatchSite(
+            symbol="vr.room_clear",
+            va=0x0052A605,
+            original=bytes.fromhex("8b 43 34 33 f6 3b c6"),
         ),
         "transition.begin_hook": PatchSite(
             symbol="transition.begin_hook",
@@ -490,13 +888,13 @@ _SHARED_SITES = MappingProxyType(
             original=bytes.fromhex("e8 5a 44 02 00"),
             context_after=bytes.fromhex("a1 10 6f 70 00 89 03"),
         ),
-        "input.right_press_dispatch_call": PatchSite(
-            symbol="input.right_press_dispatch_call",
+        "input.middle_press_dispatch_call": PatchSite(
+            symbol="input.middle_press_dispatch_call",
             va=0x0049A993,
             original=bytes.fromhex("e8 54 4b 02 00"),
         ),
-        "input.middle_press_dispatch_call": PatchSite(
-            symbol="input.middle_press_dispatch_call",
+        "input.right_press_dispatch_call": PatchSite(
+            symbol="input.right_press_dispatch_call",
             va=0x0049A9D5,
             original=bytes.fromhex("e8 35 4b 02 00"),
         ),
@@ -505,13 +903,13 @@ _SHARED_SITES = MappingProxyType(
             va=0x0049ACA3,
             original=bytes.fromhex("e8 ad 42 02 00"),
         ),
-        "input.right_release_dispatch_call": PatchSite(
-            symbol="input.right_release_dispatch_call",
+        "input.middle_release_dispatch_call": PatchSite(
+            symbol="input.middle_release_dispatch_call",
             va=0x0049AD2F,
             original=bytes.fromhex("e8 21 42 02 00"),
         ),
-        "input.middle_release_dispatch_call": PatchSite(
-            symbol="input.middle_release_dispatch_call",
+        "input.right_release_dispatch_call": PatchSite(
+            symbol="input.right_release_dispatch_call",
             va=0x0049ADAE,
             original=bytes.fromhex("e8 a2 41 02 00"),
         ),
@@ -520,13 +918,13 @@ _SHARED_SITES = MappingProxyType(
             va=0x0049AD05,
             original=bytes.fromhex("e8 dc 42 02 00"),
         ),
-        "input.right_click_dispatch_call": PatchSite(
-            symbol="input.right_click_dispatch_call",
+        "input.middle_click_dispatch_call": PatchSite(
+            symbol="input.middle_click_dispatch_call",
             va=0x0049AD84,
             original=bytes.fromhex("e8 c0 41 02 00"),
         ),
-        "input.middle_click_dispatch_call": PatchSite(
-            symbol="input.middle_click_dispatch_call",
+        "input.right_click_dispatch_call": PatchSite(
+            symbol="input.right_click_dispatch_call",
             va=0x0049AE0C,
             original=bytes.fromhex("e8 d5 41 02 00"),
         ),
@@ -696,6 +1094,11 @@ _SHARED_SITES = MappingProxyType(
             symbol="editbox.caret_fill_call",
             va=0x0048755F,
             original=bytes.fromhex("e8 f2 20 01 00"),
+        ),
+        "multiline_editbox.caret_fill_call": PatchSite(
+            symbol="multiline_editbox.caret_fill_call",
+            va=0x0048813A,
+            original=bytes.fromhex("e8 17 15 01 00"),
         ),
         "console.layout_width": PatchSite(
             symbol="console.layout_width",
@@ -1256,6 +1659,45 @@ _SHARED_SITES = MappingProxyType(
             va=0x00496240,
             original=bytes.fromhex("8b 06 8b 0d 54 55 66 00"),
         ),
+        "vr.scene_owner_create": PatchSite(
+            symbol="vr.scene_owner_create",
+            # Shared scene owner loads graphics/assets before UserScene exists.
+            va=0x0051DF4C,
+            original=bytes.fromhex("b8 8c 2c 61 00"),
+            context_after=bytes.fromhex("e8 ca 38 0a 00 83 ec 40 a1 98 6b 70 00"),
+        ),
+        "vr.scene_resource_retire": PatchSite(
+            symbol="vr.scene_resource_retire",
+            # The location manager purges cached graphics before scene-owner
+            # teardown. Preserve its native register-save prologue verbatim.
+            va=0x00520ADE,
+            original=bytes.fromhex("53 8b d9 56 57"),
+            context_before=bytes.fromhex("55 8b ec 83 ec 10"),
+            context_after=bytes.fromhex("8d 73 44 8d 7d f0 a5 a5 a5 a5"),
+        ),
+        "vr.scene_owner_retire": PatchSite(
+            symbol="vr.scene_owner_retire",
+            # Before scene unregistration and the UserScene's exit callback.
+            va=0x0051E660,
+            original=bytes.fromhex("b8 76 2d 61 00"),
+            context_after=bytes.fromhex("e8 b6 31 0a 00 83 ec 24 53 8b d9 56"),
+        ),
+        "vr.scene_create": PatchSite(
+            symbol="vr.scene_create",
+            # Before the first UserScene initializes assets or publishes its
+            # active global. The incoming object is not constructed yet.
+            va=0x004FFA43,
+            original=bytes.fromhex("b8 26 9b 60 00"),
+            context_after=bytes.fromhex("e8 d3 1d 0c 00 83 ec 10 53 56 57 8b d9"),
+        ),
+        "vr.scene_retire": PatchSite(
+            symbol="vr.scene_retire",
+            # UserScene's shared destructor, before releasing camera/assets
+            # and clearing the active scene global. Preserve its SEH prologue.
+            va=0x004FFD4E,
+            original=bytes.fromhex("b8 6b 9b 60 00"),
+            context_after=bytes.fromhex("e8 c8 1a 0c 00 51 53 56 8b f1 57"),
+        ),
         "shutdown.stale_release": PatchSite(
             symbol="shutdown.stale_release",
             va=0x0053448C,
@@ -1289,10 +1731,32 @@ _SHARED_SITES = MappingProxyType(
 
 _SHARED_SYMBOLS = MappingProxyType(
     {
+        # Original-engine stereo uses the same normalized engine in Steam/GOG.
+        # Camera fields and CPU projection remain scoped to draw-only calls.
+        "vr.renderer_global": 0x0070B0D4,
+        "vr.fullscreen_flag_ptr": 0x0070B0D0,
+        "vr.room_global": 0x00706374,
+        "vr.scene_owner_global": 0x00706BDC,
+        "vr.room_layer_vtable": 0x0067A248,
+        "vr.user_scene_vtable": 0x00685C40,
+        **{
+            f"vr.{name}_scene_vtable": vtable
+            for name, _base_call, _type_assignment, vtable in NATIVE_USER_SCENE_SUBCLASSES
+        },
+        "vr.camera_manager_vtable": 0x006695F8,
+        "vr.user_camera_controller_vtable": 0x006693E4,
+        "vr.user_scene_controller_vtable": 0x00669508,
+        "vr.action_menu_vtable": 0x00692E9C,
+        "vr.action_skip_vtable": 0x0067A34C,
+        "vr.toolbar_vtable": 0x00684FA4,
+        "vr.seh_prologue": 0x005C1820,
+        "vr.projection_globals": 0x00710928,
+        "vr.projection_nesting": 0x00710A30,
         "bitmap.creation_descriptor_ready": 0x0054E4E2,
         "movies.complete": 0x00591880,
         "movies.layout": 0x004D87DB,
         "movies.bink_vtable": 0x00698ED0,
+        "movies.layer_vtable": 0x0067E550,
         "movies.set_rect": 0x00591790,
         "movies.update": 0x00591FE0,
         # Same variadic formatting ABI as the modal reporter used by
@@ -1347,12 +1811,14 @@ _SHARED_SYMBOLS = MappingProxyType(
         # which the result can be synchronized to the other DirectDraw peer.
         "room_text.vtable": 0x00675810,
         "room_text.draw": 0x00467989,
+        "room_text.destructor": 0x004676DA,
         # CaptionMgr retains up to three instances of this concrete Caption
         # class.  Its unique Draw and destructor slots let the fixed-interface
         # runtime hand those overlays to the final staged-room page owner
         # without classifying arbitrary font coordinates or shared drawables.
         "caption.vtable": 0x00669A14,
         "caption.draw": 0x00450C3C,
+        "caption.layout": 0x00450AE5,
         "caption.destructor": 0x004507F2,
         # Publisher/splash layer active before GK3 publishes the first usable
         # input graph. Physical mode-switch movement must not enter it.
@@ -1442,6 +1908,7 @@ _SHARED_SYMBOLS = MappingProxyType(
         "bitmap_node.destructor_slot": 0x00668548,
         "bitmap_node.destructor": 0x00443CF4,
         "win32.Ellipse": 0x00665038,
+        "win32.Sleep": 0x00665180,
         "timeblock.vtable": 0x0067DF90,
         "timeblock.draw": 0x004D4F22,
         "sequence.series_vtable": 0x00666AC4,
@@ -1463,16 +1930,18 @@ _SHARED_SYMBOLS = MappingProxyType(
         "input.left_down": 0x0049A92D,
         "input.left_up_slot": 0x0067A058,
         "input.left_up": 0x0049AC83,
-        "input.right_down_slot": 0x0067A05C,
-        "input.right_down": 0x0049A97C,
-        "input.right_up_slot": 0x0067A060,
-        "input.right_up": 0x0049AD0F,
+        # WM_RBUTTONDOWN/UP dispatch +0x68/+0x6c; +0x50/+0x54 are
+        # WM_MBUTTONDOWN/UP. Right click opens RoomBar; middle invokes Escape.
+        "input.middle_down_slot": 0x0067A05C,
+        "input.middle_down": 0x0049A97C,
+        "input.middle_up_slot": 0x0067A060,
+        "input.middle_up": 0x0049AD0F,
         "input.pointer_move_slot": 0x0067A064,
         "input.pointer_move": 0x0049AA00,
-        "input.middle_down_slot": 0x0067A074,
-        "input.middle_down": 0x0049A9BE,
-        "input.middle_up_slot": 0x0067A078,
-        "input.middle_up": 0x0049AD8E,
+        "input.right_down_slot": 0x0067A074,
+        "input.right_down": 0x0049A9BE,
+        "input.right_up_slot": 0x0067A078,
+        "input.right_up": 0x0049AD8E,
         "death.vtable": 0x0067E114,
         "ui.destructor": 0x004D59A2,
         "ui.show": 0x004C3E5E,

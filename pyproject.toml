@@ -55,6 +55,7 @@ dev = [
   "numpy>=2.5.3",
   "poethepoet>=0.48.0",
   "pytest>=9.1.1",
+  "pytest-xdist>=3.8.0",
   "ruff>=0.16.9",
   "scipy>=1.18.1",
   "ty>=0.0.84",
@@ -185,7 +186,7 @@ lint = [
   { cmd = "codespell ." },
 ]
 visual = { cmd = "pytest tests/visual --visual", help = "Opt-in visual comparisons (small=12, medium=25, large=100)" }
-test = { cmd = "pytest", help = "Fast tests; add --slow to include reconstruction and native emulation" }
+test = { cmd = "pytest -n auto --maxprocesses=4 --dist=loadscope", help = "Fast tests; add --slow to include reconstruction and native emulation" }
 
 [tool.poe.tasks.coverage]
 sequence = [

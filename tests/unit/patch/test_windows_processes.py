@@ -38,8 +38,10 @@ def _process_api(
     return kernel
 
 
-@pytest.mark.parametrize("name", ["GK3.exe", "gk3.EXE", "gk3hd-visual-reference.exe"])
-def test_both_game_identities_block_changes(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+@pytest.mark.parametrize(
+    "name", ["GK3.exe", "gk3.EXE", "GK3-VR.exe", "gk3-vr.EXE", "gk3hd-visual-reference.exe"]
+)
+def test_all_game_identities_block_changes(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     kernel = _process_api(monkeypatch, ("unrelated.exe", name))
     assert windows.is_gk3_running()
     kernel.CloseHandle.assert_called_once_with(0x1_0000_0123)

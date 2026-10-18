@@ -626,7 +626,11 @@ def is_gk3_running() -> bool:
     try:
         present = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
         while present:
-            if entry.szExeFile.casefold() in {"gk3.exe", "gk3hd-visual-reference.exe"}:
+            if entry.szExeFile.casefold() in {
+                "gk3.exe",
+                "gk3-vr.exe",
+                "gk3hd-visual-reference.exe",
+            }:
                 return True
             present = bool(kernel32.Process32NextW(snapshot, ctypes.byref(entry)))
         # ERROR_NO_MORE_FILES is the only successful end of enumeration.

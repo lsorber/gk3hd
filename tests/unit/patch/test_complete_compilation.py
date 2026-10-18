@@ -1,18 +1,32 @@
 """Compile complete public plans without distributing a copyrighted executable."""
 
 import struct
+from dataclasses import replace
+from functools import cache
 
 import pytest
 
 from gk3hd.patch.binary.executor import OperationExecutor
 from gk3hd.patch.binary.image import PEFile
 from gk3hd.patch.binary.mutations import ExecutableMutationPlan, MutableExecutableImage
-from gk3hd.patch.builds import SUPPORTED_BUILDS, BuildProfile
+from gk3hd.patch.builds import GOG_BUILD, SUPPORTED_BUILDS, BuildProfile
 from gk3hd.patch.catalog import PLANNER
-from gk3hd.patch.model import BuildContext, ProfileId
+from gk3hd.patch.model import BuildContext, BuildId, ProfileId
 
 
 def _source(profile: BuildProfile) -> PEFile:
+    """Return a fresh image; reuse only bytes for immutable supported profiles."""
+    if SUPPORTED_BUILDS.get(profile.id) is profile:
+        return PEFile(_supported_source_bytes(profile.id))
+    return _sparse_source(profile)
+
+
+@cache
+def _supported_source_bytes(build_id: BuildId) -> bytes:
+    return _sparse_source(SUPPORTED_BUILDS[build_id]).to_bytes()
+
+
+def _sparse_source(profile: BuildProfile) -> PEFile:
     """Sparse PE containing only the signatures already declared by the patcher."""
     data = bytearray(0x400000)
     data[:2] = b"MZ"
@@ -77,6 +91,19 @@ def _source(profile: BuildProfile) -> PEFile:
     width = profile.site("display.width_initializer")
     image.write_u32_va(width.va + len(width.original), profile.address("display.dimensions"))
     return image
+
+
+def test_source_fixture_images_are_independent_and_honor_custom_profiles() -> None:
+    original = _source(GOG_BUILD)
+    address = GOG_BUILD.address("inventory.vtable")
+    native = original.read_u32_va(address)
+    original.write_u32_va(address, 123)
+    assert _source(GOG_BUILD).read_u32_va(address) == native
+    changed = replace(
+        GOG_BUILD, symbols=dict(GOG_BUILD.symbols) | {"inventory.destructor": native + 16}
+    )
+    assert _source(changed).read_u32_va(address) == native + 16
+    assert _source(GOG_BUILD).read_u32_va(address) == native
 
 
 @pytest.mark.parametrize("profile", SUPPORTED_BUILDS.values(), ids=lambda item: str(item.id))

@@ -1,0 +1,1878 @@
+diff --git a/meson.build b/meson.build
+index 3529218..6b0a758 100644
+--- a/meson.build
++++ b/meson.build
+@@ -35,6 +35,9 @@ if get_option('build_id')
+ endif
+ 
+ dxvk_include_dirs = ['.', './include']
++if get_option('gk3hd_openxr')
++  dxvk_include_dirs += ['src/gk3hd_xr/include']
++endif
+ if fs.is_dir('./include/vulkan/include')
+   dxvk_include_dirs += ['./include/vulkan/include']
+ elif not cpp.check_header('vulkan/vulkan.h')
+@@ -117,6 +120,9 @@ dxvk_include_path = include_directories(dxvk_include_dirs)
+ 
+ add_project_arguments(cpp.get_supported_arguments(compiler_args), language: 'cpp')
+ add_project_arguments(cc.get_supported_arguments(compiler_args), language: 'c')
++if get_option('gk3hd_openxr')
++  add_project_arguments('-DGK3HD_OPENXR', language : 'cpp')
++endif
+ add_project_link_arguments(cpp.get_supported_link_arguments(link_args), language: 'cpp')
+ add_project_link_arguments(cc.get_supported_link_arguments(link_args), language: 'c')
+ 
+diff --git a/meson_options.txt b/meson_options.txt
+index a210011..003ed1a 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -6,3 +6,4 @@ option('enable_d3d10', type : 'boolean', value : true, description: 'Build D3D10
+ option('enable_d3d11', type : 'boolean', value : true, description: 'Build D3D11')
+ option('build_id',     type : 'boolean', value : false)
+ option('gk3hd_version', type : 'string', value : 'v1.13.0-gk3hd.1', description : 'Modified GK3HD renderer version')
++option('gk3hd_openxr', type : 'boolean', value : false, description : 'Build opt-in native GK3HD XR prototype')
+diff --git a/src/d3d9/d3d9_bridge.h b/src/d3d9/d3d9_bridge.h
+index 61a8e79..6b64d97 100644
+--- a/src/d3d9/d3d9_bridge.h
++++ b/src/d3d9/d3d9_bridge.h
+@@ -121,6 +121,16 @@ __CRT_UUID_DECL(IDxvkLegacyD3DInterfaceBridge, 0xD3D0D3D9, 0xA407, 0x773E, 0x18,
+ #endif
+ 
+ namespace dxvk {
++#ifdef GK3HD_OPENXR
++  // Keep D3D9 implementation headers out of legacy DDraw translation units,
++  // which intentionally put the Windows D3D9 interfaces in another namespace.
++  HRESULT D3D9XrFrame(void* device, uint32_t operation, void* output);
++  HRESULT D3D9XrScene(void* device, const void* scene);
++  HRESULT D3D9XrPanel(void* device, uint32_t operation, void* request, const void* overlay = nullptr,
++                       const void* displayOverlay = nullptr, const void* subtitleOverlay = nullptr);
++  HRESULT D3D9XrText(void* device, void* request);
++  HRESULT D3D9XrMirror(void* device);
++#endif
+ 
+   using D3DCompatibility = DxvkD3DCompatibility;
+   using D3DCompatibilityFlags = Flags<D3DCompatibility>;
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index ca17240..54ec24c 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -1,4 +1,8 @@
+ #include "d3d9_device.h"
++#ifdef GK3HD_OPENXR
++#include "../gk3hd_xr/frame_bridge.h"
++#include "../gk3hd_xr/panel_cursor.h"
++#endif
+ 
+ #include "d3d9_annotation.h"
+ #include "d3d9_interface.h"
+@@ -5648,6 +5651,512 @@ namespace dxvk {
+ 
+ 
+ 
++#ifdef GK3HD_OPENXR
++  HRESULT D3D9XrMirror(void* device) {
++    auto* modern = static_cast<D3D9DeviceEx*>(device);
++    Com<IDirect3DSurface9> source, back;
++    HRESULT result = modern->GetRenderTarget(0, &source);
++    if (FAILED(result)) return result;
++    result = modern->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back);
++    if (FAILED(result)) return result;
++    if (source.ptr() != back.ptr()) {
++      result = modern->StretchRect(source.ptr(), nullptr, back.ptr(), nullptr, D3DTEXF_NONE);
++      if (FAILED(result)) return result;
++    }
++    return modern->Present(nullptr, nullptr, nullptr, nullptr);
++  }
++
++  struct XrTransport final : gk3hd::vr::FrameTransport {
++    D3D9DeviceEx* device;
++    const gk3hd::vr::PanelGeometry* keyboard = nullptr;
++    const gk3hd::vr::PanelGeometry* subtitle = nullptr;
++    // The auxiliary quad is either a modal keyboard or display-only labels.
++    bool auxiliaryTransparent = false;
++    explicit XrTransport(D3D9DeviceEx* value) : device(value) { }
++    bool begin(gk3hd::vr::FrameViews& frame) override {
++      auto gpu = device->GetDXVKDevice();
++      if (!gpu->beginXrFrame()) return false;
++      const auto& runtime = gpu->instance()->xr()->runtime();
++      frame.input = runtime.input();
++      for (unsigned eye = 0; eye < 2; ++eye) {
++        const auto& view = runtime.views()[eye];
++        const auto& config = runtime.configuration()[eye];
++        frame.eyes[eye] = {config.recommendedImageRectWidth, config.recommendedImageRectHeight,
++          {view.pose.orientation.x, view.pose.orientation.y, view.pose.orientation.z, view.pose.orientation.w},
++          {view.pose.position.x, view.pose.position.y, view.pose.position.z},
++          {view.fov.angleLeft, view.fov.angleRight, view.fov.angleUp, view.fov.angleDown}};
++      }
++      return true;
++    }
++    void end(bool world, const gk3hd::vr::PanelGeometry* panel) override {
++      gk3hd::vr::PanelLayer layer{};
++      if (panel) {
++        layer = {{{panel->orientation[0], panel->orientation[1], panel->orientation[2], panel->orientation[3]},
++                   {panel->position[0], panel->position[1], panel->position[2]}},
++                 {panel->size[0], panel->size[1]}, device->XrPanel().transparent()};
++      }
++      gk3hd::vr::PanelLayer keys{};
++      if (keyboard) keys = {{{keyboard->orientation[0], keyboard->orientation[1], keyboard->orientation[2], keyboard->orientation[3]},
++                           {keyboard->position[0], keyboard->position[1], keyboard->position[2]}},
++                          {keyboard->size[0], keyboard->size[1]}, auxiliaryTransparent};
++      gk3hd::vr::PanelLayer captions{};
++      if (subtitle) captions = {{{subtitle->orientation[0], subtitle->orientation[1], subtitle->orientation[2], subtitle->orientation[3]},
++                               {subtitle->position[0], subtitle->position[1], subtitle->position[2]}},
++                              {subtitle->size[0], subtitle->size[1]}, true};
++      device->GetDXVKDevice()->endXrFrame(world, panel ? &layer : nullptr, keyboard ? &keys : nullptr,
++                                        subtitle ? &captions : nullptr);
++    }
++  };
++
++  HRESULT D3D9XrFrame(void* device, uint32_t operation, void* output) {
++    if (operation > uint32_t(gk3hd::vr::FrameOperation::Cancel)) return E_INVALIDARG;
++    auto* modern = static_cast<D3D9DeviceEx*>(device);
++    if (!modern || !modern->GetDXVKDevice()->instance()->xr()) return E_NOTIMPL;
++    // The raw diagnostic bridge must never steal a coordinated engine frame.
++    if (modern->XrFrames().pending()) return E_UNEXPECTED;
++    auto gpu = modern->GetDXVKDevice();
++    try {
++      gpu->stopLoadingXrFrames();
++      switch (gk3hd::vr::FrameOperation(operation)) {
++        case gk3hd::vr::FrameOperation::Begin: {
++          auto* frame = static_cast<gk3hd::vr::FrameViews*>(output);
++          if (!frame || frame->size != sizeof(*frame)) return E_INVALIDARG;
++          frame->input = {};
++          XrTransport transport{modern};
++          if (!transport.begin(*frame)) return S_FALSE;
++          return S_OK;
++        }
++        case gk3hd::vr::FrameOperation::Left: modern->WriteXrEye(0); break;
++        case gk3hd::vr::FrameOperation::Right: modern->WriteXrEye(1); break;
++        case gk3hd::vr::FrameOperation::Submit: gpu->endXrFrame(true); break;
++        case gk3hd::vr::FrameOperation::Cancel: gpu->endXrFrame(false); break;
++      }
++      return S_OK;
++    } catch (const DxvkError& error) {
++      Logger::err(str::format("GK3HD: XR frame bridge: ", error.message()));
++      return E_FAIL;
++    } catch (const std::exception& error) {
++      Logger::err(str::format("GK3HD: XR frame bridge: ", error.what()));
++      return E_FAIL;
++    } catch (...) {
++      Logger::err("GK3HD: unknown XR frame bridge failure");
++      return E_FAIL;
++    }
++  }
++
++  void D3D9DeviceEx::BindXrEye(unsigned eye, uint32_t width, uint32_t height) {
++    if (eye >= 2 || !width || !height) throw DxvkError("GK3HD: invalid XR eye target");
++    auto check = [](HRESULT result) {
++      if (FAILED(result)) throw DxvkError("GK3HD: XR eye target allocation/bind failed");
++    };
++    Com<IDirect3DSurface9> source, depth;
++    check(GetRenderTarget(0, &source));
++    D3DSURFACE_DESC colorDesc{}, depthDesc{};
++    check(source->GetDesc(&colorDesc));
++    const auto hasDepth = GetDepthStencilSurface(&depth);
++    if (FAILED(hasDepth) && hasDepth != D3DERR_NOTFOUND)
++      check(hasDepth);
++    if (depth != nullptr) check(depth->GetDesc(&depthDesc));
++    const D3DFORMAT depthFormat = depth != nullptr ? depthDesc.Format : D3DFMT_D16;
++    const VkExtent2D extent{width, height};
++    auto& target = m_xrEyeTargets[eye];
++    if (target.color == nullptr || target.extent != extent ||
++        target.colorFormat != colorDesc.Format || target.depthFormat != depthFormat) {
++      Com<IDirect3DSurface9> colorTarget, depthTarget;
++      check(CreateRenderTarget(width, height, colorDesc.Format, D3DMULTISAMPLE_NONE,
++                               0, FALSE, &colorTarget, nullptr));
++      check(CreateDepthStencilSurface(width, height, depthFormat, D3DMULTISAMPLE_NONE,
++                                     0, FALSE, &depthTarget, nullptr));
++      // Internal references cannot retain their owning device in a cycle.
++      target.color = static_cast<D3D9Surface*>(colorTarget.ptr());
++      target.depth = static_cast<D3D9Surface*>(depthTarget.ptr());
++      target.extent = extent;
++      target.colorFormat = colorDesc.Format; target.depthFormat = depthFormat;
++    }
++    check(SetDepthStencilSurface(nullptr));
++    check(SetRenderTarget(0, target.color.ptr()));
++    check(SetDepthStencilSurface(target.depth.ptr()));
++    D3DVIEWPORT9 viewport{0, 0, width, height, 0.f, 1.f};
++    check(SetViewport(&viewport));
++    check(SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE));
++  }
++
++  void D3D9DeviceEx::WriteXrEye(unsigned eye, float visibility) {
++    D3D9DeviceLock lock = LockDevice();
++    if (!m_state.renderTargets[0]) throw DxvkError("GK3HD: XR draw has no render target");
++    const auto image = m_state.renderTargets[0]->GetCommonTexture()->GetImage();
++    // A full clear can stay deferred in the producer context even after a
++    // command-list flush. Finish its render pass before another context reads
++    // the image. An identity transform flushes deferred clears without a
++    // readback, an extra copy, or changing the image's default layout.
++    EmitCs([image](DxvkContext* ctx) {
++      ctx->transformImage(image, image->getAvailableSubresources(), image->info().layout, image->info().layout);
++    });
++    Flush();
++    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++    m_dxvkDevice->writeXrEye(eye, image, m_implicitSwapchain->GetXrGammaBlitter(visibility != 1.f),
++                           false, {}, visibility);
++  }
++
++  void D3D9DeviceEx::MirrorXrEye(uint32_t width, uint32_t height) {
++    D3D9DeviceLock lock = LockDevice();
++    const auto& eye = m_xrEyeTargets[0];
++    if (eye.color == nullptr) throw DxvkError("GK3HD: no completed XR mirror eye");
++    Com<IDirect3DSurface9> target;
++    D3DSURFACE_DESC desc{};
++    if (FAILED(GetRenderTarget(0, &target)) || FAILED(target->GetDesc(&desc)) ||
++        desc.Width != width || desc.Height != height || target.ptr() == eye.color.ptr())
++      throw DxvkError(str::format("GK3HD: XR mirror target ", desc.Width, "x", desc.Height,
++        " does not match canvas ", width, "x", height));
++    const auto crop = gk3hd::vr::mirrorCrop(eye.extent.width, eye.extent.height, width, height);
++    const RECT source{crop.left, crop.top, crop.right, crop.bottom};
++    // Copy the engine color before OpenXR/desktop presentation gamma. No eye
++    // acquisition, readback, state change, geometry pass or page flip here.
++    if (FAILED(StretchRect(eye.color.ptr(), &source, target.ptr(), nullptr, D3DTEXF_LINEAR)))
++      throw DxvkError("GK3HD: XR eye mirror copy failed");
++  }
++
++  void D3D9DeviceEx::WriteXrPanel(const gk3hd::vr::PanelFrame& frame,
++                               const gk3hd::vr::OverlayImage* subtitles) {
++    D3D9DeviceLock lock = LockDevice();
++    if (!m_state.renderTargets[0]) throw DxvkError("GK3HD: XR panel has no render target");
++    const auto image = m_state.renderTargets[0]->GetCommonTexture()->GetImage();
++    if (image->info().extent.width != frame.canvasWidth || image->info().extent.height != frame.canvasHeight)
++      throw DxvkError(str::format("GK3HD: XR panel canvas ", frame.canvasWidth, "x", frame.canvasHeight,
++        " does not match target ", image->info().extent.width, "x", image->info().extent.height));
++    EmitCs([image](DxvkContext* ctx) {
++      ctx->transformImage(image, image->getAvailableSubresources(), image->info().layout, image->info().layout);
++    });
++    Flush();
++    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++    m_dxvkDevice->configureXrPanel(frame.canvasWidth, frame.canvasHeight);
++    VkRect2D matte{};
++    if (subtitles) {
++      const auto& bounds = subtitles->bounds;
++      if (subtitles->width != frame.canvasWidth || subtitles->height != frame.canvasHeight ||
++          bounds.empty() || bounds.right > frame.canvasWidth || bounds.bottom > frame.canvasHeight)
++        throw DxvkError("GK3HD: invalid modal subtitle region");
++      matte = {{int32_t(bounds.left), int32_t(bounds.top)}, {bounds.width(), bounds.height()}};
++    }
++    m_dxvkDevice->writeXrEye(2, image, m_implicitSwapchain->GetXrGammaBlitter(), false, {}, 1.f, matte, &frame.pointer);
++  }
++
++  void D3D9DeviceEx::WriteXrOverlay(const gk3hd::vr::OverlayImage& overlay, unsigned target,
++                                  const gk3hd::vr::PanelPointer* pointer) {
++    D3D9DeviceLock lock = LockDevice();
++    const auto crop = gk3hd::vr::overlayUploadRegion(overlay);
++    VkExtent2D capacity{gk3hd::vr::overlayTextureExtent(crop.width(), overlay.width),
++                        gk3hd::vr::overlayTextureExtent(crop.height(), overlay.height)};
++    const VkExtent2D canvas{overlay.width, overlay.height};
++    if (canvas == m_xrOverlayCanvas) {
++      capacity.width = std::max(capacity.width, m_xrOverlayExtent.width);
++      capacity.height = std::max(capacity.height, m_xrOverlayExtent.height);
++    }
++    if (m_xrOverlayTexture == nullptr || m_xrOverlayExtent != capacity || m_xrOverlayCanvas != canvas) {
++      Com<IDirect3DTexture9> texture;
++      if (FAILED(CreateTexture(capacity.width, capacity.height, 1, D3DUSAGE_DYNAMIC,
++                              D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &texture, nullptr)))
++        throw DxvkError("GK3HD: cannot allocate transparent interface texture");
++      // Private ownership must not retain our parent device through a public
++      // texture reference, otherwise device/session recreation leaks a cycle.
++      m_xrOverlayTexture = static_cast<D3D9Texture2D*>(texture.ptr());
++      m_xrOverlayExtent = capacity; m_xrOverlayCanvas = canvas;
++    }
++    auto* texture = m_xrOverlayTexture->GetCommonTexture();
++    D3DLOCKED_BOX locked;
++    if (FAILED(LockImage(texture, 0, 0, &locked, nullptr, D3DLOCK_DISCARD)))
++      throw DxvkError("GK3HD: cannot upload transparent interface texture");
++    for (uint32_t y = 0; y < crop.height(); ++y)
++      std::memcpy(static_cast<uint8_t*>(locked.pBits) + size_t(y)*locked.RowPitch,
++                  overlay.pixels.data() + size_t(y+crop.top)*overlay.width + crop.left, size_t(crop.width())*4);
++    // Lock the full private texture with DISCARD to rename its staging buffer
++    // without waiting for old GPU readers. Only initialized crop rows are dirty;
++    // unused capacity is neither uploaded nor sampled by the exact-size blit.
++    const D3DBOX uploaded{0, 0, crop.width(), crop.height(), 0, 1};
++    texture->ClearDirtyBoxes(); texture->AddDirtyBox(&uploaded, 0);
++    if (FAILED(UnlockImage(texture, 0, 0))) throw DxvkError("GK3HD: interface upload failed");
++    const auto image = texture->GetImage();
++    EmitCs([image](DxvkContext* ctx) {
++      ctx->transformImage(image, image->getAvailableSubresources(), image->info().layout, image->info().layout);
++    });
++    Flush();
++    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++    if (target == 4) m_dxvkDevice->configureXrSubtitle(overlay.width, overlay.height);
++    else if (target == 3) m_dxvkDevice->configureXrKeyboard(overlay.width, overlay.height);
++    else if (target == 2) m_dxvkDevice->configureXrPanel(overlay.width, overlay.height);
++    else throw DxvkError("GK3HD: invalid overlay target");
++    const VkRect2D destination{{int32_t(crop.left), int32_t(crop.top)}, {crop.width(), crop.height()}};
++    m_dxvkDevice->writeXrEye(target, image, m_implicitSwapchain->GetXrGammaBlitter(true), true, destination, 1.f, {}, pointer);
++  }
++
++  HRESULT D3D9XrText(void* device, void* request) {
++    auto* modern = static_cast<D3D9DeviceEx*>(device);
++    if (!modern || !request) return E_POINTER;
++    if (!modern->GetDXVKDevice()->instance()->xr()) return E_NOTIMPL;
++    try {
++      modern->XrText().configure(*static_cast<gk3hd::vr::TextFrame*>(request));
++      return S_OK;
++    } catch (const std::exception&) { return E_INVALIDARG; }
++  }
++
++  HRESULT D3D9XrPanel(void* device, uint32_t operation, void* request, const void* overlay,
++                     const void* displayOverlay, const void* subtitleOverlay) {
++    if (operation > uint32_t(gk3hd::vr::PanelOperation::Loading)) return E_INVALIDARG;
++    auto* modern = static_cast<D3D9DeviceEx*>(device);
++    if (!modern || !modern->GetDXVKDevice()->instance()->xr()) return E_NOTIMPL;
++    auto* frame = static_cast<gk3hd::vr::PanelFrame*>(request);
++    XrTransport transport{modern};
++    try {
++      if (modern->GetDXVKDevice()->loadingXrFrames() &&
++          (operation == uint32_t(gk3hd::vr::PanelOperation::Loading) ||
++           operation == uint32_t(gk3hd::vr::PanelOperation::Close))) {
++        // Nested native loading boundaries and empty UI finalizers do not
++        // take frame ownership away from the helper before a real draw.
++        return S_OK;
++      }
++      modern->GetDXVKDevice()->stopLoadingXrFrames();
++      if (operation == uint32_t(gk3hd::vr::PanelOperation::Loading)) {
++        modern->XrPanel().close(); modern->XrText().close();
++        const bool submitted = modern->XrFrames().blank(transport);
++        modern->GetDXVKDevice()->startLoadingXrFrames();
++        return submitted ? S_OK : S_FALSE;
++      }
++      if (operation == uint32_t(gk3hd::vr::PanelOperation::Blank)) {
++        modern->XrPanel().close();
++        modern->XrText().close();
++        return modern->XrFrames().blank(transport) ? S_OK : S_FALSE;
++      }
++      if (operation == uint32_t(gk3hd::vr::PanelOperation::Close)) {
++        modern->XrPanel().close();
++        modern->XrText().close();
++        // Finalize a deferred world even if there is no interface this frame.
++        modern->XrFrames().finish(transport);
++        return S_OK;
++      }
++      if (!frame) {
++        modern->XrText().close();
++        modern->XrFrames().cancel(transport);
++        return E_POINTER;
++      }
++      gk3hd::vr::PanelState::validate(*frame);
++      frame->geometry = {}; frame->input = {}; frame->pointer = {};
++      const bool isolated = operation == uint32_t(gk3hd::vr::PanelOperation::Caption) ||
++                            operation == uint32_t(gk3hd::vr::PanelOperation::Overlay);
++      const bool modalSubtitles = operation == uint32_t(gk3hd::vr::PanelOperation::ModalSubtitles);
++      if (isolated != bool(frame->flags & gk3hd::vr::PanelTransparent) || (isolated && !overlay))
++        throw DxvkError("GK3HD: inconsistent isolated interface request");
++      if (displayOverlay && (!isolated || !(frame->flags & gk3hd::vr::PanelReadableMenu)))
++        throw DxvkError("GK3HD: display-only companion outside readable menu frame");
++      if ((subtitleOverlay && !isolated && !modalSubtitles) || (modalSubtitles && !subtitleOverlay))
++        throw DxvkError("GK3HD: subtitle without a valid world or native screen");
++      if (isolated && !modern->XrFrames().worldReady()) {
++        modern->XrPanel().close(); modern->XrText().close(); modern->XrFrames().cancel(transport);
++        return S_FALSE;
++      }
++      if (operation == uint32_t(gk3hd::vr::PanelOperation::World)) {
++        modern->XrPanel().close();
++        modern->XrText().close();
++        if (!modern->XrFrames().worldReady()) {
++          modern->XrFrames().cancel(transport);
++          return S_FALSE;
++        }
++        const auto* sampled = modern->XrFrames().begin(transport);
++        if (!sampled) throw DxvkError("GK3HD: ready XR world has no input snapshot");
++        gk3hd::vr::PanelState::world(*frame, *sampled);
++        modern->XrFrames().finish(transport);
++        return S_OK;
++      }
++      const auto* views = modern->XrFrames().begin(transport);
++      if (!views) {
++        modern->XrText().close();
++        modern->XrFrames().finish(transport);
++        return S_FALSE;
++      }
++      modern->XrPanel().prepare(*frame, *views, isolated ? static_cast<const gk3hd::vr::OverlayImage*>(overlay) : nullptr);
++      if (isolated) modern->WriteXrOverlay(*static_cast<const gk3hd::vr::OverlayImage*>(overlay), 2, &frame->pointer);
++      else modern->WriteXrPanel(*frame, static_cast<const gk3hd::vr::OverlayImage*>(subtitleOverlay));
++      gk3hd::vr::KeyboardFrame keys{};
++      gk3hd::vr::PanelGeometry labels{};
++      gk3hd::vr::PanelGeometry captions{};
++      if (isolated) {
++        modern->XrText().close();
++        if (displayOverlay) {
++          modern->WriteXrOverlay(*static_cast<const gk3hd::vr::OverlayImage*>(displayOverlay), 3);
++          labels = modern->XrPanel().canvasGeometry();
++          transport.keyboard = &labels;
++          transport.auxiliaryTransparent = true;
++        }
++      }
++      else {
++        keys = modern->XrText().prepare(*frame);
++        if (keys.visible) {
++          modern->WriteXrOverlay(modern->XrText().image(keys), 3);
++          transport.keyboard = &keys.geometry;
++        }
++      }
++      if (subtitleOverlay) {
++        modern->WriteXrOverlay(*static_cast<const gk3hd::vr::OverlayImage*>(subtitleOverlay), 4);
++        captions = modern->XrPanel().subtitleGeometry(frame->canvasWidth, frame->canvasHeight);
++        transport.subtitle = &captions;
++      }
++      modern->XrFrames().finish(transport, &frame->geometry);
++      return S_OK;
++    } catch (const DxvkError& error) {
++      Logger::err(str::format("GK3HD: XR panel bridge: ", error.message()));
++    } catch (const std::exception& error) {
++      Logger::err(str::format("GK3HD: XR panel bridge: ", error.what()));
++    } catch (...) {
++      Logger::err("GK3HD: unknown XR panel bridge failure");
++    }
++    if (frame) { frame->geometry = {}; frame->input = {}; frame->pointer = {}; }
++    modern->XrText().close();
++    try { modern->XrFrames().cancel(transport); } catch (...) { }
++    return E_FAIL;
++  }
++
++  HRESULT D3D9XrScene(void* device, const void* request) {
++    if (!device || !request) return E_POINTER;
++    auto* modern = static_cast<D3D9DeviceEx*>(device);
++    if (!modern->GetDXVKDevice()->instance()->xr()) return E_NOTIMPL;
++    struct Transport final : gk3hd::vr::SceneTransport {
++      D3D9DeviceEx* device;
++      XrTransport backend;
++      bool deferred;
++      bool mirror;
++      uint32_t width, height;
++      Com<IDirect3DSurface9> color, depth;
++      D3DVIEWPORT9 viewport{};
++      RECT scissor{};
++      DWORD scissorEnabled = FALSE;
++      bool eyeOpen = false;
++      Transport(D3D9DeviceEx* value, const gk3hd::vr::SceneV1& scene)
++        : device(value), backend(value), deferred(bool(scene.flags & gk3hd::vr::SceneDeferred)),
++          mirror(bool(scene.flags & gk3hd::vr::SceneMirror)), width(scene.width), height(scene.height) { }
++      bool begin(gk3hd::vr::FrameViews& views) override {
++        const auto* sampled = device->XrFrames().beginWorld(backend);
++        if (!sampled) return false;
++        views = *sampled;
++        return true;
++      }
++      XrTime displayTime() const override {
++        return device->GetDXVKDevice()->instance()->xr()->runtime().predictedDisplayTime();
++      }
++      void beginEye(unsigned eye, const gk3hd::vr::EyeCamera& camera) override {
++        auto check = [](HRESULT result) {
++          if (FAILED(result)) throw DxvkError("GK3HD: XR eye state capture failed");
++        };
++        if (eyeOpen) throw DxvkError("GK3HD: nested XR eye target");
++        check(device->GetRenderTarget(0, &color));
++        const auto hasDepth = device->GetDepthStencilSurface(&depth);
++        if (FAILED(hasDepth) && hasDepth != D3DERR_NOTFOUND) check(hasDepth);
++        check(device->GetViewport(&viewport));
++        check(device->GetScissorRect(&scissor));
++        check(device->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissorEnabled));
++        eyeOpen = true;
++        try { device->BindXrEye(eye, camera.camera.width, camera.camera.height); }
++        catch (...) { try { endEye(); } catch (...) { } throw; }
++      }
++      void endEye() override {
++        if (!eyeOpen) throw DxvkError("GK3HD: XR eye state restored twice");
++        eyeOpen = false;
++        // Restore only bindings/clipping changed by BindXrEye. Native draws
++        // maintain their own write-eliding state cache; restoring an old ALL
++        // state block behind that cache turns translucent shadows opaque.
++        const auto detach = device->SetDepthStencilSurface(nullptr);
++        const auto target = device->SetRenderTarget(0, color.ptr());
++        const auto z = device->SetDepthStencilSurface(depth.ptr());
++        const auto view = device->SetViewport(&viewport);
++        const auto rect = device->SetScissorRect(&scissor);
++        const auto clipped = device->SetRenderState(D3DRS_SCISSORTESTENABLE, scissorEnabled);
++        color = nullptr; depth = nullptr;
++        if (FAILED(detach) || FAILED(target) || FAILED(z) || FAILED(view) ||
++            FAILED(rect) || FAILED(clipped))
++          throw DxvkError("GK3HD: XR eye state restoration failed");
++      }
++      void write(unsigned eye, float visibility) override { device->WriteXrEye(eye, visibility); }
++      void overlay(const gk3hd::vr::EyeCamera& camera, const gk3hd::vr::WorldTargetV1& target,
++                   const gk3hd::vr::EngineAimRay& ray, float scale) override {
++        auto vertices = gk3hd::vr::engineBeam(camera, ray, target.kind ? &target.point : nullptr, scale);
++        if (target.kind) {
++          const auto ring = gk3hd::vr::engineReticle(camera, ray, target.point, scale);
++          vertices.insert(vertices.end(), ring.begin(), ring.end());
++        }
++        if (vertices.empty()) return;
++        auto check = [](HRESULT value) {
++          if (FAILED(value)) throw DxvkError("GK3HD: XR reticle draw/state failure");
++        };
++        Com<IDirect3DStateBlock9> saved;
++        check(device->CreateStateBlock(D3DSBT_ALL, &saved));
++        check(saved->Capture());
++        bool open = false;
++        try {
++          check(device->SetVertexShader(nullptr));
++          check(device->SetPixelShader(nullptr));
++          check(device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE));
++          check(device->SetTexture(0, nullptr));
++          check(device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1));
++          check(device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE));
++          check(device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1));
++          check(device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE));
++          check(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE));
++          check(device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE));
++          check(device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE));
++          check(device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL));
++          check(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
++          check(device->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID));
++          check(device->SetRenderState(D3DRS_LIGHTING, FALSE));
++          check(device->SetRenderState(D3DRS_FOGENABLE, FALSE));
++          check(device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE));
++          check(device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
++          check(device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
++          check(device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
++          check(device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD));
++          check(device->SetRenderState(D3DRS_STENCILENABLE, FALSE));
++          check(device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE));
++          check(device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE));
++          check(device->SetRenderState(D3DRS_DEPTHBIAS, 0));
++          check(device->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, 0));
++          check(device->SetRenderState(D3DRS_COLORWRITEENABLE, 15));
++          check(device->SetRenderState(D3DRS_MULTISAMPLEMASK, 0xffffffffu));
++          D3DVIEWPORT9 viewport{0, 0, static_cast<DWORD>(camera.camera.width),
++            static_cast<DWORD>(camera.camera.height), 0.f, 1.f};
++          check(device->SetViewport(&viewport));
++          check(device->BeginScene()); open = true;
++          check(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(vertices.size()/3),
++                                       vertices.data(), sizeof(gk3hd::vr::ReticleVertex)));
++          const auto ended = device->EndScene(); open = false; check(ended);
++          check(saved->Apply());
++        } catch (...) {
++          if (open) device->EndScene();
++          saved->Apply();
++          throw;
++        }
++      }
++      void end(bool rendered) override {
++        if (!rendered) device->XrFrames().cancel(backend);
++        else {
++          if (mirror) device->MirrorXrEye(width, height);
++          device->XrFrames().completeWorld();
++          if (!deferred) device->XrFrames().finish(backend);
++        }
++      }
++    } transport{modern, *static_cast<const gk3hd::vr::SceneV1*>(request)};
++    try {
++      const bool rendered = modern->XrScene().render(*static_cast<const gk3hd::vr::SceneV1*>(request), transport);
++      if (!rendered && !transport.deferred) modern->XrFrames().finish(transport.backend);
++      return rendered ? S_OK : S_FALSE;
++    } catch (const DxvkError& error) {
++      Logger::err(str::format("GK3HD: XR scene bridge: ", error.message()));
++    } catch (const std::exception& error) {
++      Logger::err(str::format("GK3HD: XR scene bridge: ", error.what()));
++    } catch (...) {
++      Logger::err("GK3HD: unknown XR scene bridge failure");
++    }
++    try { modern->XrFrames().cancel(transport.backend); } catch (...) { }
++    return E_FAIL;
++  }
++#endif
++
+   void D3D9DeviceEx::Flush() {
+     D3D9DeviceLock lock = LockDevice();
+ 
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index 61ed734..af567dd 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -30,9 +30,19 @@
+ #include <vector>
+ #include <type_traits>
+ #include <unordered_map>
++#ifdef GK3HD_OPENXR
++#include "../gk3hd_xr/scene.h"
++#include "../gk3hd_xr/panel.h"
++#include "../gk3hd_xr/keyboard.h"
++#include "../gk3hd_xr/overlay.h"
++#include "../gk3hd_xr/frame_scheduler.h"
++#endif
+ 
+ namespace dxvk {
+ 
++#ifdef GK3HD_OPENXR
++  class D3D9Texture2D;
++#endif
+   class D3D9InterfaceEx;
+   class D3D9SwapChainEx;
+   class D3D9CommonTexture;
+@@ -662,6 +672,20 @@ namespace dxvk {
+       return m_dxvkDevice;
+     }
+ 
++#ifdef GK3HD_OPENXR
++    void WriteXrEye(unsigned eye, float visibility = 1.f);
++    void BindXrEye(unsigned eye, uint32_t width, uint32_t height);
++    void MirrorXrEye(uint32_t width, uint32_t height);
++    void WriteXrPanel(const gk3hd::vr::PanelFrame& frame,
++                      const gk3hd::vr::OverlayImage* subtitles = nullptr);
++    void WriteXrOverlay(const gk3hd::vr::OverlayImage& overlay, unsigned target = 2,
++                        const gk3hd::vr::PanelPointer* pointer = nullptr);
++    gk3hd::vr::PanelState& XrPanel() { return m_xrPanel; }
++    gk3hd::vr::TextKeyboard& XrText() { return m_xrText; }
++    gk3hd::vr::StereoScene& XrScene() { return m_xrScene; }
++    gk3hd::vr::FrameScheduler& XrFrames() { return m_xrFrames; }
++#endif
++
+     D3D9_VK_FORMAT_MAPPING LookupFormat(
+       D3D9Format            Format) const;
+ 
+@@ -1213,6 +1235,21 @@ namespace dxvk {
+ 
+     D3D9Adapter*                    m_adapter;
+     Rc<DxvkDevice>                  m_dxvkDevice;
++#ifdef GK3HD_OPENXR
++    gk3hd::vr::StereoScene          m_xrScene;
++    gk3hd::vr::PanelState           m_xrPanel;
++    gk3hd::vr::TextKeyboard         m_xrText;
++    gk3hd::vr::FrameScheduler       m_xrFrames;
++    Com<D3D9Texture2D, false>      m_xrOverlayTexture;
++    VkExtent2D                    m_xrOverlayExtent{};
++    VkExtent2D                    m_xrOverlayCanvas{};
++    struct XrEyeTarget {
++      Com<D3D9Surface, false> color, depth;
++      VkExtent2D extent{};
++      D3DFORMAT colorFormat = D3DFMT_UNKNOWN, depthFormat = D3DFMT_UNKNOWN;
++    };
++    std::array<XrEyeTarget, 2> m_xrEyeTargets;
++#endif
+ 
+     uint32_t                        m_frameLatency = DefaultFrameLatency;
+ 
+diff --git a/src/d3d9/d3d9_interface.cpp b/src/d3d9/d3d9_interface.cpp
+index d197f26..d149e91 100644
+--- a/src/d3d9/d3d9_interface.cpp
++++ b/src/d3d9/d3d9_interface.cpp
+@@ -10,7 +10,11 @@
+ namespace dxvk {
+ 
+   D3D9InterfaceEx::D3D9InterfaceEx(bool bExtended)
++#ifdef GK3HD_OPENXR
++    : m_instance        ( DxvkInstance::acquireD3D9Instance() )
++#else
+     : m_instance        ( new DxvkInstance() )
++#endif
+     , m_legacyD3DBridge ( this )
+     , m_d3d9Options     ( nullptr, m_instance->config() ) {
+     // D3D9 doesn't enumerate adapters like physical adapters...
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -7,3 +7,6 @@
+ #include "../dxvk/framepacer/dxvk_framepacer.h"
++#ifdef GK3HD_OPENXR
++#include "../gk3hd_xr/renderer_host.h"
++#endif
+ 
+ namespace dxvk {
+@@ -313,7 +316,16 @@
+       if (!m_presenter->hasSwapChain())
+         return D3D_OK;
+ 
++#ifdef GK3HD_OPENXR
++      // The preview must not compete with headset-rate WSI presentation.
++      // Keep the window visible/focused and all game/XR updates untouched.
++      // No prediction means ordinary presentation, including dormant VR.
++      if (auto* xr = m_device->instance()->xr()) {
++        if (!m_xrMirrorPacer.due(xr->runtime().predictedDisplayTime()))
++          return D3D_OK;
++      }
++#endif
+       PresentImage(presentInterval);
+       return D3D_OK;
+     } catch (const DxvkError& e) {
+       Logger::err(e.message());
+diff --git a/src/d3d9/d3d9_swapchain.h b/src/d3d9/d3d9_swapchain.h
+index e90a9db..dc7ee5f 100644
+--- a/src/d3d9/d3d9_swapchain.h
++++ b/src/d3d9/d3d9_swapchain.h
+@@ -1,2 +1,5 @@
+ #pragma once
++#ifdef GK3HD_OPENXR
++#include "../gk3hd_xr/mirror_pacer.h"
++#endif
+ 
+@@ -71,6 +71,15 @@ namespace dxvk {
+ 
+     void    GetGammaRamp(D3DGAMMARAMP* pRamp);
+ 
++#ifdef GK3HD_OPENXR
++    // Borrow the desktop presenter only while the D3D9 device lock is held.
++    // Cropped overlays also need exact destination placement and clearing
++    // when the accepted ramp is neutral; world eyes may use the transfer path.
++    Rc<DxvkSwapchainBlitter> GetXrGammaBlitter(bool requireCopy = false) const {
++      return requireCopy || m_blitter->hasGammaRamp() ? m_blitter : nullptr;
++    }
++#endif
++
+     void    Invalidate(HWND hWindow);
+ 
+     HRESULT SetDialogBoxMode(bool bEnableDialogs);
+@@ -144,4 +156,7 @@ namespace dxvk {
+     double                    m_displayRefreshRate = 0.0;
+     double                    m_targetFrameRate    = 0.0;
++#ifdef GK3HD_OPENXR
++    gk3hd::vr::MirrorPacer     m_xrMirrorPacer;
++#endif
+ 
+     void PresentImage(UINT PresentInterval);
+diff --git a/src/ddraw/d3d6/d3d6_device.h b/src/ddraw/d3d6/d3d6_device.h
+index fccfa6a..f13df10 100644
+--- a/src/ddraw/d3d6/d3d6_device.h
++++ b/src/ddraw/d3d6/d3d6_device.h
+@@ -19,6 +19,9 @@
+ 
+ #include <array>
+ #include <vector>
++#ifdef GK3HD_OPENXR
++#include "../../gk3hd_xr/overlay.h"
++#endif
+ 
+ namespace dxvk {
+ 
+@@ -144,6 +147,11 @@ namespace dxvk {
+       return m_multithread.AcquireLock();
+     }
+ 
++#ifdef GK3HD_OPENXR
++    // Bridge callers retain LockDevice across begin/compose/submit.
++    gk3hd::vr::OverlayLayers& XrOverlay() { return m_xrOverlay; }
++#endif
++
+     DDraw4Surface* GetRenderTarget() const {
+       return m_rt.ptr();
+     }
+@@ -197,6 +205,9 @@ namespace dxvk {
+ 
+     D3DMultithread                  m_multithread;
+ 
++#ifdef GK3HD_OPENXR
++    gk3hd::vr::OverlayLayers        m_xrOverlay;
++#endif
+     D3DDEVICEDESC                   m_desc;
+ 
+     Com<DDraw4Surface>              m_rt;
+diff --git a/src/ddraw/ddraw.def b/src/ddraw/ddraw.def
+index d8cbf71..339d460 100644
+--- a/src/ddraw/ddraw.def
++++ b/src/ddraw/ddraw.def
+@@ -24,3 +24,7 @@ EXPORTS
+   Gk3hdSurfaceHistoryDepth    @23
+   Gk3hdAreaBlend565           @24
+   Gk3hdAreaBlt565             @25
++  Gk3hdXrFrameV1              @26
++  Gk3hdXrSceneV1              @27
++  Gk3hdXrPanelV1              @28
++  Gk3hdXrTextV1               @29
+diff --git a/src/ddraw/ddraw_main.cpp b/src/ddraw/ddraw_main.cpp
+index 20a5e91..7ab547e 100644
+--- a/src/ddraw/ddraw_main.cpp
++++ b/src/ddraw/ddraw_main.cpp
+@@ -10,6 +10,12 @@
+ #include "ddraw7/ddraw7_interface.h"
+ 
+ #include <vector>
++#ifdef GK3HD_OPENXR
++#include "d3d6/d3d6_device.h"
++#include "../gk3hd_xr/panel.h"
++#include "../gk3hd_xr/scene.h"
++#include "../gk3hd_xr/overlay.h"
++#endif
+ 
+ namespace dxvk {
+ 
+@@ -586,6 +592,161 @@ extern "C" {
+     return ProxiedReleaseDDThreadLock();
+   }
+ 
++  // Private versioned prototype bridge. No initialization in DllMain. A caller
++  // must pass an IDirect3DDevice3 from this renderer, never a foreign COM object.
++  DLLEXPORT HRESULT __stdcall Gk3hdXrFrameV1(IDirect3DDevice3* device, uint32_t operation, void* output) {
++#ifdef GK3HD_OPENXR
++    if (!device) return E_POINTER;
++    auto* legacy = static_cast<dxvk::D3D6Device*>(device);
++    auto guard = legacy->LockDevice();
++    return dxvk::D3D9XrFrame(legacy->GetCommonD3DDevice()->GetD3D9Device(), operation, output);
++#else
++    return E_NOTIMPL;
++#endif
++  }
++
++  DLLEXPORT HRESULT __stdcall Gk3hdXrSceneV1(IDirect3DDevice3* device, const void* scene) {
++#ifdef GK3HD_OPENXR
++    if (!device || !scene) return E_POINTER;
++    auto* legacy = static_cast<dxvk::D3D6Device*>(device);
++    auto guard = legacy->LockDevice();
++    const auto result = dxvk::D3D9XrScene(legacy->GetCommonD3DDevice()->GetD3D9Device(), scene);
++    const auto& request = *static_cast<const gk3hd::vr::SceneV1*>(scene);
++    if (result == S_OK && (request.flags & gk3hd::vr::SceneMirror)) {
++      auto* target = legacy->GetRenderTarget()->GetCommonSurface();
++      // A full GPU replacement supersedes pending CPU bytes and invalidates
++      // every cached row. Native preview/2D locks must read the new mirror.
++      target->UnDirtyDDrawSurface();
++      target->DirtyD3D9Surface();
++    }
++    return result;
++#else
++    return E_NOTIMPL;
++#endif
++  }
++
++  DLLEXPORT HRESULT __stdcall Gk3hdXrTextV1(IDirect3DDevice3* device, void* request) {
++#ifdef GK3HD_OPENXR
++    if (!device || !request) return E_POINTER;
++    auto* legacy = static_cast<dxvk::D3D6Device*>(device);
++    auto guard = legacy->LockDevice();
++    return dxvk::D3D9XrText(legacy->GetCommonD3DDevice()->GetD3D9Device(), request);
++#else
++    return E_NOTIMPL;
++#endif
++  }
++
++  DLLEXPORT HRESULT __stdcall Gk3hdXrPanelV1(IDirect3DDevice3* device, uint32_t operation, void* request) {
++#ifdef GK3HD_OPENXR
++    if (!device) return E_POINTER;
++    if (operation > uint32_t(gk3hd::vr::PanelOperation::Loading)) return E_INVALIDARG;
++    const bool modalSubtitles = operation == uint32_t(gk3hd::vr::PanelOperation::ModalSubtitles);
++    if ((!operation || modalSubtitles) && !request) return E_POINTER;
++    auto* legacy = static_cast<dxvk::D3D6Device*>(device);
++    auto guard = legacy->LockDevice();
++    // GK3 finishes CPU-authored DirectDraw overlays immediately before Flip.
++    // Upload that producer's dirty regions before sampling its current target.
++    // This is the same upload Flip performs, not a CPU readback or a page flip.
++    if (!operation || modalSubtitles) {
++      auto& frame = *static_cast<gk3hd::vr::PanelFrame*>(request);
++      try { gk3hd::vr::PanelState::validate(frame); }
++      catch (const std::exception&) { return E_INVALIDARG; }
++      frame.geometry = {}; frame.input = {}; frame.pointer = {};
++      auto* target = legacy->GetRenderTarget();
++      if (!target) {
++        dxvk::Logger::err("GK3HD: XR native interface has no render target");
++        return E_FAIL;
++      }
++      const HRESULT uploaded = target->InitializeOrUploadD3D9();
++      if (FAILED(uploaded)) {
++        dxvk::Logger::err(dxvk::str::format("GK3HD: XR native interface upload failed: ", std::hex, uploaded));
++        return uploaded;
++      }
++    }
++    // Complete XR here; the subsequent native windowed primary Blt owns
++    // desktop presentation. Presenting here too duplicates the same frame.
++    if (operation == uint32_t(gk3hd::vr::PanelOperation::Caption) ||
++        operation == uint32_t(gk3hd::vr::PanelOperation::Overlay) || modalSubtitles) {
++      auto* modern = legacy->GetCommonD3DDevice()->GetD3D9Device();
++      if (!request) return dxvk::D3D9XrPanel(modern, operation, nullptr);
++      auto& frame = *static_cast<gk3hd::vr::PanelFrame*>(request);
++      frame.geometry = {}; frame.input = {}; frame.pointer = {};
++      HRESULT result = E_INVALIDARG;
++      try {
++        gk3hd::vr::PanelState::validate(frame);
++        const bool caption = operation == uint32_t(gk3hd::vr::PanelOperation::Caption);
++        gk3hd::vr::OverlayPart single{};
++        const gk3hd::vr::OverlayPart* parts;
++        uint32_t count;
++        if (caption) {
++          const auto& value = *static_cast<const gk3hd::vr::CaptionPanelFrame*>(request);
++          single = {value.surface, gk3hd::vr::OverlayKeyed, value.key, value.left, value.top,
++                    value.right, value.bottom, value.left, value.top};
++          parts = &single; count = 1;
++        } else {
++          const auto& value = *static_cast<const gk3hd::vr::OverlayPanelFrame*>(request);
++          if (!value.count || value.count > gk3hd::vr::MaxOverlayParts)
++            throw std::invalid_argument("invalid isolated overlay part count");
++          parts = value.parts; count = value.count;
++        }
++        auto& pixels = legacy->XrOverlay();
++        pixels.begin(frame.canvasWidth, frame.canvasHeight, bool(frame.flags & gk3hd::vr::PanelReadableMenu));
++        for (uint32_t i = 0; i < count; ++i) {
++          const auto& part = parts[i];
++          if (modalSubtitles && (!(part.flags & gk3hd::vr::OverlaySubtitle) ||
++              (part.flags & (gk3hd::vr::OverlayInteractive | gk3hd::vr::OverlayMenuCompanion)) ||
++              part.opacity != 1.f || part.x != part.left || part.y != part.top))
++            throw std::invalid_argument("modal source is not an unmoved opaque subtitle");
++          auto* source = reinterpret_cast<IDirectDrawSurface*>(uintptr_t(part.surface));
++          if (!source || !dxvk::DDrawCommonInterface::IsWrappedSurface(source))
++            throw std::invalid_argument("overlay source is not a wrapped surface");
++          auto* common = static_cast<dxvk::DDrawSurface*>(source)->GetCommonSurface();
++          // Never lock/read back an eye, desktop target or video-memory image.
++          if (!common->IsInSystemMemory() || common->IsRenderTarget())
++            throw std::invalid_argument("overlay source is not isolated system memory");
++          if (part.flags & gk3hd::vr::OverlayKeyed) {
++            DDCOLORKEY key{};
++            if (FAILED(source->GetColorKey(DDCKEY_SRCBLT, &key)) ||
++                key.dwColorSpaceLowValue != part.key || key.dwColorSpaceHighValue != part.key)
++              throw std::invalid_argument("overlay source key does not match its producer");
++          }
++          DDSURFACEDESC desc{}; desc.dwSize = sizeof(desc);
++          const HRESULT locked = source->Lock(nullptr, &desc, DDLOCK_READONLY | DDLOCK_WAIT, nullptr);
++          if (FAILED(locked)) { result = locked; throw std::runtime_error("cannot lock overlay source"); }
++          try {
++            const auto& format = desc.ddpfPixelFormat;
++            if (!(format.dwFlags & DDPF_RGB) || format.dwRGBBitCount != 16 ||
++                format.dwRBitMask != 0xf800 || format.dwGBitMask != 0x7e0 || format.dwBBitMask != 0x1f)
++              throw std::invalid_argument("overlay surface is not RGB565");
++            if (caption && (desc.dwWidth != frame.canvasWidth || desc.dwHeight != frame.canvasHeight))
++              throw std::invalid_argument("caption source must match the complete canvas");
++            pixels.composite(part, desc.lpSurface, desc.lPitch, desc.dwWidth, desc.dwHeight);
++          } catch (...) { source->Unlock(desc.lpSurface); throw; }
++          const HRESULT unlocked = source->Unlock(desc.lpSurface);
++          if (FAILED(unlocked)) { result = unlocked; throw std::runtime_error("cannot unlock overlay source"); }
++        }
++        // The original caption backing stays baked at native scale. Carry
++        // its black contrast rectangle with the independently enlarged text.
++        if (modalSubtitles) pixels.subtitleBackdrop();
++        return dxvk::D3D9XrPanel(modern, operation, request, modalSubtitles ? nullptr : &pixels.image(),
++                               pixels.displayImage(), pixels.subtitleImage());
++      } catch (const std::exception& error) {
++        dxvk::Logger::err(dxvk::str::format("GK3HD: isolated interface: ", error.what()));
++      }
++      // Cancel the deferred frame through the same failure path as a failed
++      // upload. An invalid later part must never submit a partial overlay or
++      // strand the runtime with an acquired eye/panel image.
++      dxvk::D3D9XrPanel(modern, operation, request, nullptr);
++      return result;
++    }
++    auto* common = legacy->GetCommonD3DDevice();
++    auto* modern = common->GetD3D9Device();
++    return dxvk::D3D9XrPanel(modern, operation, request);
++#else
++    return E_NOTIMPL;
++#endif
++  }
++
+   BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
+     switch (fdwReason) {
+       case DLL_THREAD_ATTACH:
+diff --git a/src/dxvk/dxvk_adapter.cpp b/src/dxvk/dxvk_adapter.cpp
+index 265a333..ebcc5f8 100644
+--- a/src/dxvk/dxvk_adapter.cpp
++++ b/src/dxvk/dxvk_adapter.cpp
+@@ -463,7 +463,19 @@ namespace dxvk {
+       overallocInfo.pNext = std::exchange(info.pNext, &overallocInfo);
+ 
+     VkDevice device = VK_NULL_HANDLE;
+-    VkResult vr = m_vki->vkCreateDevice(m_handle, &info, nullptr, &device);
++    VkResult vr;
++#ifdef GK3HD_OPENXR
++    if (instance->xr()) {
++      try {
++        auto resolver = reinterpret_cast<PFN_vkGetInstanceProcAddr>(m_vki->sym("vkGetInstanceProcAddr"));
++        device = instance->xr()->createDevice(resolver, m_handle, info);
++        vr = VK_SUCCESS;
++      } catch (const std::exception& error) {
++        throw DxvkError(str::format("GK3HD OpenXR Vulkan device: ", error.what()));
++      }
++    } else
++#endif
++      vr = m_vki->vkCreateDevice(m_handle, &info, nullptr, &device);
+ 
+     if (vr != VK_SUCCESS && enableCudaInterop) {
+       // Enabling certain Vulkan extensions can cause device creation to fail on
+@@ -494,6 +506,28 @@ namespace dxvk {
+       new vk::DeviceFn(m_vki, true, device),
+       devExtensions, enabledFeatures);
+     result->initResources();
++#ifdef GK3HD_OPENXR
++    if (instance->xr()) {
++      XrGraphicsBindingVulkanKHR graphics{XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR};
++      graphics.instance = m_vki->instance();
++      graphics.physicalDevice = m_handle;
++      graphics.device = device;
++      graphics.queueFamilyIndex = queueFamilies.graphics;
++      graphics.queueIndex = 0;
++      // Runtime construction may access the bound Vulkan queue. Serialize it
++      // with Sarek's submission thread, including the failure cleanup path.
++      result->lockSubmission();
++      try {
++        instance->xr()->start(graphics);
++        result->initializeXrImages();
++        Logger::info("GK3HD: OpenXR session and separate eye images created (prototype only)");
++      } catch (const std::exception& error) {
++        result->unlockSubmission();
++        throw DxvkError(str::format("GK3HD OpenXR renderer session: ", error.what()));
++      }
++      result->unlockSubmission();
++    }
++#endif
+     return result;
+   }
+ 
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index ccdc2f7..4e72932 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -1,5 +1,10 @@
+ #include "dxvk_device.h"
+ #include "dxvk_instance.h"
++#include <cmath>
++#ifdef GK3HD_OPENXR
++#include "dxvk_swapchain_blitter.h"
++#include "../gk3hd_xr/panel_cursor.h"
++#endif
+ 
+ namespace dxvk {
+ 
+@@ -37,6 +41,15 @@ namespace dxvk {
+     // executed before we destroy any resources.
++#ifdef GK3HD_OPENXR
++    m_xrLoading.stopNoThrow();
++#endif
+     this->waitForIdle();
+ 
++#ifdef GK3HD_OPENXR
++    for (auto& image : m_xrScratch) image = nullptr;
++    for (auto& images : m_xrImages) images.clear();
++    if (m_instance->xr()) m_instance->xr()->stopDevice();
++#endif
++
+     // Stop workers explicitly in order to prevent
+     // access to structures that are being destroyed.
+     m_objects.pipelineManager().stopWorkerThreads();
+@@ -47,6 +57,342 @@ namespace dxvk {
+     return m_adapter->isUnifiedMemoryArchitecture();
+   }
+ 
++#ifdef GK3HD_OPENXR
++  void DxvkDevice::initializeXrImages() {
++    auto* host = m_instance->xr();
++    if (!host) throw DxvkError("GK3HD: XR image wrapping without an XR host");
++    std::array<std::vector<Rc<DxvkImage>>, 5> wrapped;
++    for (unsigned eye = 0; eye < 2; ++eye) {
++      const auto& view = host->runtime().configuration()[eye];
++      DxvkImageCreateInfo info{};
++      info.type = VK_IMAGE_TYPE_2D;
++      info.format = host->format();
++      info.sampleCount = VK_SAMPLE_COUNT_1_BIT;
++      info.extent = {view.recommendedImageRectWidth, view.recommendedImageRectHeight, 1};
++      info.numLayers = info.mipLevels = 1;
++      info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++      info.stages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
++      info.access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
++                  | VK_ACCESS_TRANSFER_WRITE_BIT;
++      // The runtime guarantees this layout after a successful image wait and
++      // requires it again on release. Never initialize or write a borrowed
++      // image before acquiring/waiting it, and never free its Vulkan memory.
++      info.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++      info.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++      for (const auto& image : host->runtime().images(eye))
++        wrapped[eye].push_back(new DxvkImage(this, info, image.image));
++    }
++    m_xrImages = std::move(wrapped);
++  }
++
++  void DxvkDevice::configureXrPanel(uint32_t width, uint32_t height) {
++    auto* host = m_instance->xr();
++    if (!host || !width || !height || (m_xrFrame && m_xrWritten[2]))
++      throw DxvkError("GK3HD: invalid XR panel configuration");
++    if (m_xrPanelExtent.width == width && m_xrPanelExtent.height == height && !m_xrImages[2].empty()) return;
++    // Resize only on a canvas change, never on the ordinary frame path. Drain
++    // before discarding borrowed wrappers and destroying their runtime images.
++    if (!host->runtime().panelImages().empty()) waitForIdle();
++    m_xrScratch[2] = nullptr; m_xrImages[2].clear(); m_xrPanelExtent = {};
++    lockSubmission();
++    try {
++      host->runtime().destroyPanelSwapchain();
++      host->runtime().createPanelSwapchain(host->format(), width, height);
++    } catch (...) { unlockSubmission(); throw; }
++    unlockSubmission();
++    try {
++      auto info = m_xrImages[0].at(0)->info();
++      info.extent = {width, height, 1};
++      for (const auto& image : host->runtime().panelImages())
++        m_xrImages[2].push_back(new DxvkImage(this, info, image.image));
++      m_xrPanelExtent = {width, height};
++    } catch (...) {
++      m_xrImages[2].clear();
++      lockSubmission(); host->runtime().destroyPanelSwapchain(); unlockSubmission();
++      throw;
++    }
++  }
++
++  void DxvkDevice::configureXrKeyboard(uint32_t width, uint32_t height) {
++    auto* host = m_instance->xr();
++    if (!host || !width || !height || (m_xrFrame && m_xrWritten[3]))
++      throw DxvkError("GK3HD: invalid XR keyboard configuration");
++    if (m_xrKeyboardExtent.width == width && m_xrKeyboardExtent.height == height && !m_xrImages[3].empty()) return;
++    if (!host->runtime().keyboardImages().empty()) waitForIdle();
++    m_xrScratch[3] = nullptr; m_xrImages[3].clear(); m_xrKeyboardExtent = {};
++    lockSubmission();
++    try {
++      host->runtime().destroyKeyboardSwapchain();
++      host->runtime().createKeyboardSwapchain(host->format(), width, height);
++    } catch (...) { unlockSubmission(); throw; }
++    unlockSubmission();
++    try {
++      auto info = m_xrImages[0].at(0)->info();
++      info.extent = {width, height, 1};
++      for (const auto& image : host->runtime().keyboardImages())
++        m_xrImages[3].push_back(new DxvkImage(this, info, image.image));
++      m_xrKeyboardExtent = {width, height};
++    } catch (...) {
++      m_xrImages[3].clear();
++      lockSubmission(); host->runtime().destroyKeyboardSwapchain(); unlockSubmission();
++      throw;
++    }
++  }
++
++  void DxvkDevice::configureXrSubtitle(uint32_t width, uint32_t height) {
++    auto* host = m_instance->xr();
++    if (!host || !width || !height || (m_xrFrame && m_xrWritten[4]))
++      throw DxvkError("GK3HD: invalid XR subtitle configuration");
++    if (m_xrSubtitleExtent.width == width && m_xrSubtitleExtent.height == height && !m_xrImages[4].empty()) return;
++    if (!host->runtime().subtitleImages().empty()) waitForIdle();
++    m_xrScratch[4] = nullptr; m_xrImages[4].clear(); m_xrSubtitleExtent = {};
++    lockSubmission();
++    try {
++      host->runtime().destroySubtitleSwapchain();
++      host->runtime().createSubtitleSwapchain(host->format(), width, height);
++    } catch (...) { unlockSubmission(); throw; }
++    unlockSubmission();
++    try {
++      auto info = m_xrImages[0].at(0)->info();
++      info.extent = {width, height, 1};
++      for (const auto& image : host->runtime().subtitleImages())
++        m_xrImages[4].push_back(new DxvkImage(this, info, image.image));
++      m_xrSubtitleExtent = {width, height};
++    } catch (...) {
++      m_xrImages[4].clear();
++      lockSubmission(); host->runtime().destroySubtitleSwapchain(); unlockSubmission();
++      throw;
++    }
++  }
++
++  Rc<DxvkImage> DxvkDevice::xrImage(unsigned eye, unsigned index) const {
++    return m_xrImages.at(eye).at(index);
++  }
++
++  bool DxvkDevice::beginXrFrame() {
++    stopLoadingXrFrames();
++    auto* host = m_instance->xr();
++    if (!host || m_xrFrame) throw DxvkError("GK3HD: invalid XR frame begin");
++    auto& runtime = host->runtime();
++    lockSubmission();
++    try {
++      if (!runtime.readyForFrame()) {
++        unlockSubmission();
++        return false;
++      }
++    } catch (...) {
++      unlockSubmission();
++      throw;
++    }
++    unlockSubmission();
++    // Keep the submission thread free to feed the GPU during xrWaitFrame.
++    // Only queue-accessing begin/failure cleanup borrow its Vulkan queue.
++    if (!runtime.beginFrame([this] { lockSubmission(); }, [this] { unlockSubmission(); })) {
++      lockSubmission();
++      try { runtime.endFrame(false); }
++      catch (...) { unlockSubmission(); throw; }
++      unlockSubmission();
++      return false;
++    }
++    m_xrFrame = true;
++    m_xrWritten = {};
++    return true;
++  }
++
++  void DxvkDevice::writeXrEye(unsigned eye, const Rc<DxvkImage>& source,
++                             const Rc<DxvkSwapchainBlitter>& gamma, bool premultiplied, VkRect2D crop,
++                             float visibility, VkRect2D matte, const gk3hd::vr::PanelPointer* pointer) {
++    if (!std::isfinite(visibility) || visibility < 0.f || visibility > 1.f ||
++        (visibility != 1.f && (eye >= 2 || !gamma)))
++      throw DxvkError("GK3HD: invalid XR world visibility");
++    if (!m_xrFrame || eye >= 5 || m_xrWritten[eye] || m_xrImages[eye].empty() || !source ||
++        source->info().type != VK_IMAGE_TYPE_2D ||
++        source->info().sampleCount != VK_SAMPLE_COUNT_1_BIT ||
++        (source->info().format != VK_FORMAT_R5G6B5_UNORM_PACK16 &&
++         source->info().format != VK_FORMAT_B5G6R5_UNORM_PACK16 &&
++         source->info().format != VK_FORMAT_R8G8B8A8_UNORM &&
++         source->info().format != VK_FORMAT_B8G8R8A8_UNORM) ||
++        !(source->info().usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
++      throw DxvkError("GK3HD: invalid XR eye source or transaction");
++    auto* host = m_instance->xr();
++    if (!host) throw DxvkError("GK3HD: XR eye write without a host");
++    const bool cropped = crop.extent.width || crop.extent.height;
++    const auto canvas = eye == 4 ? m_xrSubtitleExtent : eye == 3 ? m_xrKeyboardExtent : m_xrPanelExtent;
++    if (cropped && (eye < 2 || !gamma || !premultiplied || !crop.extent.width || !crop.extent.height ||
++        crop.offset.x < 0 || crop.offset.y < 0 ||
++        uint64_t(crop.offset.x)+crop.extent.width > canvas.width ||
++        uint64_t(crop.offset.y)+crop.extent.height > canvas.height ||
++        crop.extent.width > source->info().extent.width || crop.extent.height > source->info().extent.height))
++      throw DxvkError("GK3HD: invalid XR overlay upload rectangle");
++    const bool matted = matte.extent.width || matte.extent.height;
++    if (matted && (eye != 2 || premultiplied || cropped || matte.offset.x < 0 || matte.offset.y < 0 ||
++        !matte.extent.width || !matte.extent.height ||
++        uint64_t(matte.offset.x)+matte.extent.width > canvas.width ||
++        uint64_t(matte.offset.y)+matte.extent.height > canvas.height))
++      throw DxvkError("GK3HD: invalid XR modal subtitle matte");
++
++    // The caller flushed and synchronized the D3D9 command stream, not the GPU.
++    // Submit the transfer on the same queue after those scene commands. No CPU
++    // readback, device-idle wait, desktop presentation, or game update here.
++    lockSubmission();
++    uint32_t index;
++    try { index = eye == 4 ? host->runtime().acquireSubtitle() : eye == 3 ? host->runtime().acquireKeyboard() :
++                  eye == 2 ? host->runtime().acquirePanel() : host->runtime().acquireEye(eye); }
++    catch (...) { unlockSubmission(); throw; }
++    unlockSubmission();
++    try {
++      const auto destination = xrImage(eye, index);
++      auto context = createContext();
++      context->beginRecording(createCommandList());
++      if (!m_xrScratch[eye]) {
++        auto info = destination->info();
++        info.format = host->format() == VK_FORMAT_R8G8B8A8_SRGB
++          ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
++        info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
++                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++        info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++        info.access = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
++                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++        info.layout = VK_IMAGE_LAYOUT_GENERAL;
++        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++        m_xrScratch[eye] = createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++        context->initImage(m_xrScratch[eye], {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}, VK_IMAGE_LAYOUT_UNDEFINED);
++      }
++      const VkImageSubresourceLayers layer{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++      VkImageBlit region{};
++      region.srcSubresource = region.dstSubresource = layer;
++      region.srcOffsets[1] = {int32_t(source->info().extent.width), int32_t(source->info().extent.height), 1};
++      region.dstOffsets[1] = {int32_t(destination->info().extent.width), int32_t(destination->info().extent.height), 1};
++      const VkComponentMapping identity{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
++        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
++      // Numeric conversion/scaling in UNORM preserves GK3's encoded RGB565
++      // values. Compatible UNORM -> sRGB copy preserves those bytes, avoiding
++      // an unwanted extra sRGB encode from a direct image blit.
++      if (gamma) {
++        DxvkImageViewCreateInfo view{};
++        view.type = VK_IMAGE_VIEW_TYPE_2D;
++        view.format = m_xrScratch[eye]->info().format;
++        view.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++        view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
++        view.numLevels = view.numLayers = 1;
++        const auto dst = createImageView(m_xrScratch[eye], view);
++        view.format = source->info().format;
++        view.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
++        const auto src = createImageView(source, view);
++        // Use the exact accepted desktop ramp and shader. UNORM output keeps
++        // encoded game colours; alpha-aware mode protects transparent captions.
++        // The copy shader samples the crop 1:1 at its original canvas origin.
++        // The existing blitter clears everything outside a partial destination
++        // to transparent zero, including pixels occupied by an earlier batch.
++        const VkRect2D uploaded{{0, 0}, crop.extent};
++        gamma->presentImage(context.ptr(), dst, cropped ? crop : VkRect2D{},
++                            src, cropped ? uploaded : VkRect2D{}, premultiplied, visibility, true);
++      } else {
++        context->blitImage(m_xrScratch[eye], identity, source, identity, region, VK_FILTER_LINEAR);
++      }
++      if (matted) {
++        DxvkImageViewCreateInfo view{};
++        view.type = VK_IMAGE_VIEW_TYPE_2D; view.format = m_xrScratch[eye]->info().format;
++        view.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
++        view.numLevels = view.numLayers = 1;
++        VkClearValue black{}; black.color.float32[3] = 1.f;
++        // Replace only baked glyphs in our private copy. The game page, native
++        // frame/camera state and all pixels outside the supplied region remain
++        // untouched. The readable subtitle is a separate noninteractive layer.
++        context->clearImageView(createImageView(m_xrScratch[eye], view),
++          {matte.offset.x, matte.offset.y, 0}, {matte.extent.width, matte.extent.height, 1},
++          VK_IMAGE_ASPECT_COLOR_BIT, black);
++      }
++      // Cursor is drawn after the private copy/matte, never into the native
++      // framebuffer. The input owner uses precisely this logical point.
++      for (const auto& rect : gk3hd::vr::panelCursor(pointer,
++             destination->info().extent.width, destination->info().extent.height)) {
++        DxvkImageViewCreateInfo view{};
++        view.type = VK_IMAGE_VIEW_TYPE_2D; view.format = m_xrScratch[eye]->info().format;
++        view.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
++        view.numLevels = view.numLayers = 1;
++        VkClearValue color{}; color.color.float32[3] = 1.f;
++        if (rect.white) color.color.float32[0] = color.color.float32[1] = color.color.float32[2] = 1.f;
++        context->clearImageView(createImageView(m_xrScratch[eye], view),
++          {rect.left,rect.top,0}, {uint32_t(rect.right-rect.left),uint32_t(rect.bottom-rect.top),1},
++          VK_IMAGE_ASPECT_COLOR_BIT,color);
++      }
++      context->copyImage(destination, layer, {}, m_xrScratch[eye], layer, {}, destination->info().extent);
++      submitCommandList(context->endRecording(), VK_NULL_HANDLE, VK_NULL_HANDLE);
++      // Drain queue *submissions*, not GPU execution. OpenXR consumes work in
++      // the bound queue's order. The context restores COLOR_ATTACHMENT_OPTIMAL.
++      lockSubmission();
++      try {
++        if (eye == 4) host->runtime().releaseSubtitle();
++        else if (eye == 3) host->runtime().releaseKeyboard();
++        else if (eye == 2) host->runtime().releasePanel(); else host->runtime().releaseEye(eye);
++      }
++      catch (...) { unlockSubmission(); throw; }
++      unlockSubmission();
++      m_xrWritten[eye] = true;
++    } catch (...) {
++      // A partially failed image write cannot be retried with unknown ownership.
++      // Drain only on this exceptional path, remove borrowed wrappers, then
++      // close the session. The caller must recreate its graphics device.
++      waitForIdle();
++      for (auto& image : m_xrScratch) image = nullptr;
++      for (auto& images : m_xrImages) images.clear();
++      lockSubmission();
++      host->stopDevice();
++      unlockSubmission();
++      m_xrFrame = false;
++      throw;
++    }
++  }
++
++  void DxvkDevice::endXrFrame(bool rendered, const gk3hd::vr::PanelLayer* panel, const gk3hd::vr::PanelLayer* keyboard,
++                            const gk3hd::vr::PanelLayer* subtitle) {
++    if (!m_xrFrame || (rendered && (!m_xrWritten[0] || !m_xrWritten[1])) ||
++        (panel && !m_xrWritten[2]) || (keyboard && (!panel || !m_xrWritten[3])) ||
++        (subtitle && ((!rendered && !panel) || !m_xrWritten[4])))
++      throw DxvkError("GK3HD: XR submission requires two complete eyes");
++    lockSubmission();
++    try { m_instance->xr()->runtime().endFrame(rendered, panel, keyboard, subtitle); }
++    catch (...) { m_xrFrame = false; unlockSubmission(); throw; }
++    m_xrFrame = false;
++    unlockSubmission();
++  }
++
++  void DxvkDevice::startLoadingXrFrames() {
++    if (m_xrFrame) throw DxvkError("GK3HD: loading overlaps an engine XR frame");
++    m_xrLoading.start([this] {
++      auto* host = m_instance->xr();
++      if (!host) throw DxvkError("GK3HD: loading has no XR host");
++      auto& runtime = host->runtime();
++      if (!runtime.readyForFrame()) return false;
++      // xrWaitFrame cannot touch VkQueue. Do not hold the uploader's queue
++      // while waiting; protect xrBeginFrame and failure cleanup explicitly.
++      runtime.beginFrame([this] { lockSubmission(); }, [this] { unlockSubmission(); });
++      lockSubmission();
++      try {
++        // Empty frames never acquire swapchain images, access game resources,
++        // call D3D rendering or deliver controller events to the native game.
++        runtime.endFrame(false);
++      } catch (...) { unlockSubmission(); throw; }
++      unlockSubmission();
++      return true;
++    }, [](const std::exception_ptr& failure) {
++      try { std::rethrow_exception(failure); }
++      catch (const std::exception& error) {
++        Logger::err(str::format("GK3HD OpenXR session ended: loading frame pump: ", error.what()));
++      } catch (...) { Logger::err("GK3HD OpenXR session ended: loading frame pump failed"); }
++    });
++  }
++
++  void DxvkDevice::stopLoadingXrFrames() {
++    const bool active = m_xrLoading.active();
++    const auto before = m_xrLoading.frames();
++    m_xrLoading.stop();
++    if (active) Logger::info(str::format("GK3HD loading XR handoff: frames=", m_xrLoading.frames(),
++                                       " joined-after=", m_xrLoading.frames()-before));
++  }
++#endif
++
+ 
+   DxvkFramebufferSize DxvkDevice::getDefaultFramebufferSize() const {
+     return DxvkFramebufferSize {
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+index 1e96316..d7e28bd 100644
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -29,6 +29,11 @@
++#ifdef GK3HD_OPENXR
++#include "../gk3hd_xr/loading_frames.h"
++#endif
++
+ namespace dxvk {
+ 
+   class DxvkInstance;
++  class DxvkSwapchainBlitter;
+ 
+   /**
+    * \brief Device options
+@@ -145,6 +146,25 @@ namespace dxvk {
+       return m_instance;
+     }
+ 
++#ifdef GK3HD_OPENXR
++    void initializeXrImages();
++    void configureXrPanel(uint32_t width, uint32_t height);
++    void configureXrKeyboard(uint32_t width, uint32_t height);
++    void configureXrSubtitle(uint32_t width, uint32_t height);
++    Rc<DxvkImage> xrImage(unsigned eye, unsigned index) const;
++    bool beginXrFrame();
++    void startLoadingXrFrames();
++    void stopLoadingXrFrames();
++    bool loadingXrFrames() const { return m_xrLoading.active(); }
++    void writeXrEye(unsigned eye, const Rc<DxvkImage>& source,
++                    const Rc<DxvkSwapchainBlitter>& gamma = nullptr, bool premultiplied = false,
++                    VkRect2D crop = {}, float visibility = 1.f, VkRect2D matte = {},
++                    const gk3hd::vr::PanelPointer* pointer = nullptr);
++    void endXrFrame(bool rendered, const gk3hd::vr::PanelLayer* panel = nullptr,
++                    const gk3hd::vr::PanelLayer* keyboard = nullptr,
++                    const gk3hd::vr::PanelLayer* subtitle = nullptr);
++#endif
++
+     /**
+      * \brief The adapter
+      *
+@@ -493,6 +509,16 @@ namespace dxvk {
+     DxvkOptions                 m_options;
+ 
+     Rc<DxvkInstance>            m_instance;
++#ifdef GK3HD_OPENXR
++    std::array<std::vector<Rc<DxvkImage>>, 5> m_xrImages;
++    std::array<Rc<DxvkImage>, 5> m_xrScratch;
++    std::array<bool, 5> m_xrWritten{};
++    VkExtent2D m_xrPanelExtent{};
++    VkExtent2D m_xrKeyboardExtent{};
++    VkExtent2D m_xrSubtitleExtent{};
++    bool m_xrFrame = false;
++    gk3hd::vr::LoadingFrames m_xrLoading;
++#endif
+     Rc<DxvkAdapter>             m_adapter;
+     Rc<vk::DeviceFn>            m_vkd;
+     DxvkDeviceExtensions        m_extensions;
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index dfd7d2f..0287069 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -78,6 +78,14 @@ namespace dxvk {
+     if (!this->validatePipelineState(state, true))
+       return VK_NULL_HANDLE;
+ 
++    // The presentation shader's gamma/alpha constants are part of correctness,
++    // not an optional refinement. Compile only a missing exact instance.
++    if (m_shaders.fs && m_shaders.fs->info().requiresExactPipeline) {
++      instance = this->createInstance(state, renderPass);
++      this->writePipelineStateToCache(state, renderPass->format());
++      return instance ? instance->pipeline() : VK_NULL_HANDLE;
++    }
++
+     // Async substitutes nothing, so the draw is skipped until the real
+     // pipeline exists. The queued set is what keeps a state vector from
+     // being handed to the compiler again on every subsequent draw while
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index 771e958..791bcfa 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -6,9 +6,42 @@
+ #include "dxvk_platform_exts.h"
+ 
+ #include <algorithm>
++#ifdef GK3HD_OPENXR
++#include <mutex>
++#include <fstream>
++#endif
+ 
+ namespace dxvk {
+ 
++#ifdef GK3HD_OPENXR
++  // Non-owning cache. The final ordinary Rc release closes XR before another
++  // factory call can create it. No GPU/runtime teardown is deferred to DllMain.
++  static std::mutex g_xrInstanceMutex;
++  static DxvkInstance* g_xrInstance = nullptr;
++
++  Rc<DxvkInstance> DxvkInstance::acquireD3D9Instance() {
++    if (env::getEnvVar("GK3HD_XR_PROTOTYPE") != "1")
++      return new DxvkInstance();
++    std::lock_guard<std::mutex> lock(g_xrInstanceMutex);
++    if (!g_xrInstance) {
++      g_xrInstance = new DxvkInstance();
++      g_xrInstance->m_sharedXrInstance = true;
++    }
++    return g_xrInstance;
++  }
++
++  uint32_t DxvkInstance::decRef() {
++    if (!m_sharedXrInstance) return RcObject::decRef();
++    std::lock_guard<std::mutex> lock(g_xrInstanceMutex);
++    const uint32_t remaining = RcObject::decRef();
++    if (!remaining) {
++      g_xrInstance = nullptr;
++      m_xr.reset();
++    }
++    return remaining;
++  }
++#endif
++
+   DxvkInstance::DxvkInstance() {
+     Logger::info(str::format("Game: ", env::getExeName()));
+     Logger::info(str::format("DXVK-Sarek: ", DXVK_VERSION));
+@@ -19,6 +52,26 @@ namespace dxvk {
+ 
+     m_options = DxvkOptions(m_config);
+ 
++#ifdef GK3HD_OPENXR
++    // Explicit developer opt-in, outside DllMain and before GPU selection.
++    // This bootstrap alone does not enable playable VR.
++    if (env::getEnvVar("GK3HD_XR_PROTOTYPE") == "1") {
++      try {
++        const auto statusPath = env::getEnvVar("GK3HD_XR_TRACKING_STATUS");
++        m_xr = std::make_unique<gk3hd::vr::RendererHost>(xrGetInstanceProcAddr,
++          [statusPath](std::optional<bool> tracked) {
++            if (statusPath.empty()) return;
++            // Close/flush each rare state change; ordinary renderer logs are buffered.
++            std::ofstream status(str::topath(statusPath.c_str()).c_str(), std::ios::app);
++            status << (tracked.has_value() ? (*tracked ? "tracked\n" : "untracked\n") : "unknown\n");
++          });
++        Logger::info("GK3HD: Native OpenXR renderer bootstrap enabled");
++      } catch (const std::exception& error) {
++        throw DxvkError(str::format("GK3HD OpenXR initialization: ", error.what()));
++      }
++    }
++#endif
++
+     m_extProviders.push_back(&DxvkPlatformExts::s_instance);
+     m_extProviders.push_back(&VrInstance::s_instance);
+     m_extProviders.push_back(&DxvkXrProvider::s_instance);
+@@ -50,7 +103,9 @@ namespace dxvk {
+ 
+ 
+   DxvkInstance::~DxvkInstance() {
+-
++#ifdef GK3HD_OPENXR
++    m_xr.reset();
++#endif
+   }
+ 
+ 
+@@ -144,6 +199,16 @@ namespace dxvk {
+     info.ppEnabledExtensionNames  = extensionNameList.names();
+ 
+     VkInstance result = VK_NULL_HANDLE;
++#ifdef GK3HD_OPENXR
++    if (m_xr) {
++      try {
++        auto resolver = reinterpret_cast<PFN_vkGetInstanceProcAddr>(m_vkl->sym("vkGetInstanceProcAddr"));
++        return m_xr->createInstance(resolver, info);
++      } catch (const std::exception& error) {
++        throw DxvkError(str::format("GK3HD OpenXR Vulkan instance: ", error.what()));
++      }
++    }
++#endif
+     VkResult status = m_vkl->vkCreateInstance(&info, nullptr, &result);
+ 
+     if (status != VK_SUCCESS)
+@@ -154,6 +219,15 @@ namespace dxvk {
+ 
+ 
+   std::vector<Rc<DxvkAdapter>> DxvkInstance::queryAdapters() {
++#ifdef GK3HD_OPENXR
++    if (m_xr) {
++      try {
++        return {new DxvkAdapter(m_vki, m_xr->selectDevice(m_vki->instance()))};
++      } catch (const std::exception& error) {
++        throw DxvkError(str::format("GK3HD OpenXR GPU selection: ", error.what()));
++      }
++    }
++#endif
+     uint32_t numAdapters = 0;
+     if (m_vki->vkEnumeratePhysicalDevices(m_vki->instance(), &numAdapters, nullptr) != VK_SUCCESS)
+       throw DxvkError("DxvkInstance::enumAdapters: Failed to enumerate adapters");
+diff --git a/src/dxvk/dxvk_instance.h b/src/dxvk/dxvk_instance.h
+index f945ed6..4ad6396 100644
+--- a/src/dxvk/dxvk_instance.h
++++ b/src/dxvk/dxvk_instance.h
+@@ -7,6 +7,11 @@
+ #include "dxvk_extension_provider.h"
+ #include "dxvk_options.h"
+ 
++#ifdef GK3HD_OPENXR
++#include "../gk3hd_xr/renderer_host.h"
++#include <memory>
++#endif
++
+ namespace dxvk {
+   
+   /**
+@@ -22,6 +27,14 @@ namespace dxvk {
+     
+     DxvkInstance();
+     ~DxvkInstance();
++
++#ifdef GK3HD_OPENXR
++    gk3hd::vr::RendererHost* xr() const { return m_xr.get(); }
++    // DDraw creates temporary D3D9 interfaces while reading configuration.
++    // Their overlapping lifetimes must share one XR/Vulkan instance.
++    static Rc<DxvkInstance> acquireD3D9Instance();
++    uint32_t decRef();
++#endif
+     
+     /**
+      * \brief Vulkan instance functions
+@@ -113,6 +126,10 @@ namespace dxvk {
+ 
+     Rc<vk::LibraryFn>       m_vkl;
+     Rc<vk::InstanceFn>      m_vki;
++#ifdef GK3HD_OPENXR
++    std::unique_ptr<gk3hd::vr::RendererHost> m_xr;
++    bool m_sharedXrInstance = false;
++#endif
+     DxvkInstanceExtensions  m_extensions;
+ 
+     std::vector<DxvkExtensionProvider*> m_extProviders;
+diff --git a/src/dxvk/dxvk_shader.h b/src/dxvk/dxvk_shader.h
+index 0be8b49..bc9d437 100644
+--- a/src/dxvk/dxvk_shader.h
++++ b/src/dxvk/dxvk_shader.h
+@@ -55,6 +55,9 @@ namespace dxvk {
+   struct DxvkShaderCreateInfo {
+     /// Shader stage
+     VkShaderStageFlagBits stage;
++    /// Critical copies must use the exact state, never an async fallback or
++    /// skipped draw. Ordinary game shaders keep the configured compile policy.
++    bool requiresExactPipeline = false;
+     /// Descriptor info
+     uint32_t resourceSlotCount = 0;
+     const DxvkResourceSlot* resourceSlots = nullptr;
+diff --git a/src/dxvk/dxvk_swapchain_blitter.cpp b/src/dxvk/dxvk_swapchain_blitter.cpp
+index 611ec11..2010ae6 100644
+--- a/src/dxvk/dxvk_swapchain_blitter.cpp
++++ b/src/dxvk/dxvk_swapchain_blitter.cpp
+@@ -25,7 +25,10 @@ namespace dxvk {
+     const Rc<DxvkImageView>&  dstView,
+           VkRect2D            dstRect,
+     const Rc<DxvkImageView>&  srcView,
+-          VkRect2D            srcRect) {
++          VkRect2D            srcRect,
++          bool                premultiplied,
++          float               visibility,
++          bool                clampSource) {
+     if (m_gammaDirty)
+       this->updateGammaTexture(ctx);
+ 
+@@ -49,7 +52,7 @@ namespace dxvk {
+ 
+     if (srcView->imageInfo().sampleCount == VK_SAMPLE_COUNT_1_BIT) {
+       this->draw(ctx, sameSize ? m_fsCopy : m_fsBlit,
+-        dstView, dstRect, srcView, srcRect);
++        dstView, dstRect, srcView, srcRect, premultiplied, visibility, clampSource);
+     } else if (sameSize) {
+       this->draw(ctx, m_fsResolve,
+         dstView, dstRect, srcView, srcRect);
+@@ -108,7 +111,10 @@ namespace dxvk {
+     const Rc<DxvkImageView>&  dstView,
+           VkRect2D            dstRect,
+     const Rc<DxvkImageView>&  srcView,
+-          VkRect2D            srcRect) {
++          VkRect2D            srcRect,
++          bool                premultiplied,
++          float               visibility,
++          bool                clampSource) {
+     DxvkInputAssemblyState iaState;
+     iaState.primitiveTopology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+     iaState.primitiveRestart  = VK_FALSE;
+@@ -191,7 +197,7 @@ namespace dxvk {
+     else
+       ctx->clearRenderTarget(dstView, VK_IMAGE_ASPECT_COLOR_BIT, VkClearValue());
+ 
+-    ctx->bindResourceSampler(BindingIds::Image, m_samplerPresent);
++    ctx->bindResourceSampler(BindingIds::Image, clampSource ? m_samplerPresentClamp : m_samplerPresent);
+     ctx->bindResourceSampler(BindingIds::Gamma, m_samplerGamma);
+ 
+     ctx->bindResourceView(BindingIds::Image, srcView, nullptr);
+@@ -201,6 +207,7 @@ namespace dxvk {
+     ctx->bindShader(VK_SHADER_STAGE_FRAGMENT_BIT, fs);
+ 
+     PresenterArgs args;
++    args.visibility = visibility;
+     args.srcOffset = srcRect.offset;
+ 
+     if (dstRect.extent == srcRect.extent)
+@@ -211,8 +218,10 @@ namespace dxvk {
+     ctx->pushConstants(0, sizeof(args), &args);
+ 
+     ctx->setSpecConstant(VK_PIPELINE_BIND_POINT_GRAPHICS, 0, srcView->imageInfo().sampleCount);
++    ctx->setSpecConstant(VK_PIPELINE_BIND_POINT_GRAPHICS, 2, uint32_t(premultiplied));
+     ctx->draw(3, 1, 0, 0);
+     ctx->setSpecConstant(VK_PIPELINE_BIND_POINT_GRAPHICS, 0, 0);
++    ctx->setSpecConstant(VK_PIPELINE_BIND_POINT_GRAPHICS, 2, 0);
+   }
+ 
+   void DxvkSwapchainBlitter::resolve(
+@@ -308,6 +317,9 @@ namespace dxvk {
+     samplerInfo.addressModeU    = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+     samplerInfo.addressModeV    = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+     samplerInfo.addressModeW    = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++    // OpenXR scales a complete image, not a desktop rectangle with borders.
++    // Keep bilinear taps at its edges inside that image, including at black.
++    m_samplerPresentClamp = m_device->createSampler(samplerInfo);
+     samplerInfo.usePixelCoord   = VK_FALSE;
+     m_samplerGamma = m_device->createSampler(samplerInfo);
+   }
+@@ -331,6 +343,9 @@ namespace dxvk {
+     
+     DxvkShaderCreateInfo fsInfo;
+     fsInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
++    // Presentation cannot reuse a variant with different gamma/alpha constants
++    // or skip the copy while compiling. Other game shaders retain async policy.
++    fsInfo.requiresExactPipeline = true;
+     fsInfo.resourceSlotCount = fsResourceSlots.size();
+     fsInfo.resourceSlots = fsResourceSlots.data();
+     fsInfo.pushConstSize = sizeof(PresenterArgs);
+diff --git a/src/dxvk/dxvk_swapchain_blitter.h b/src/dxvk/dxvk_swapchain_blitter.h
+index 915bb53..ced57e1 100644
+--- a/src/dxvk/dxvk_swapchain_blitter.h
++++ b/src/dxvk/dxvk_swapchain_blitter.h
+@@ -39,7 +39,12 @@ namespace dxvk {
+       const Rc<DxvkImageView>&  dstView,
+             VkRect2D            dstRect,
+       const Rc<DxvkImageView>&  srcView,
+-            VkRect2D            srcRect);
++            VkRect2D            srcRect,
++            bool                premultiplied = false,
++            float               visibility = 1.f,
++            bool                clampSource = false);
++
++    bool hasGammaRamp() const { return m_gammaCpCount != 0; }
+ 
+     /**
+      * \brief Sets gamma ramp
+@@ -67,6 +72,7 @@ namespace dxvk {
+         VkExtent2D srcExtent;
+         VkOffset2D dstOffset;
+       };
++      float visibility = 1.f;
+     };
+ 
+     Rc<DxvkDevice>      m_device;
+@@ -87,6 +93,7 @@ namespace dxvk {
+     Rc<DxvkImageView>   m_resolveView;
+ 
+     Rc<DxvkSampler>     m_samplerPresent;
++    Rc<DxvkSampler>     m_samplerPresentClamp;
+     Rc<DxvkSampler>     m_samplerGamma;
+ 
+     void draw(
+@@ -95,7 +102,10 @@ namespace dxvk {
+       const Rc<DxvkImageView>&  dstView,
+             VkRect2D            dstRect,
+       const Rc<DxvkImageView>&  srcView,
+-            VkRect2D            srcRect);
++            VkRect2D            srcRect,
++            bool                premultiplied = false,
++            float               visibility = 1.f,
++            bool                clampSource = false);
+ 
+     void resolve(
+             DxvkContext*        ctx,
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index 4b98c1d..0b4b794 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -123,13 +123,30 @@ dxvk_src = [
+ 
+ thread_dep = dependency('threads')
+ 
++xr_dependencies = []
++xr_includes = []
++if get_option('gk3hd_openxr')
++  xr_root = meson.project_source_root() / 'src' / 'gk3hd_xr'
++  xr_dependencies = [
++    cpp.find_library('gk3hd_xr', dirs : [xr_root / 'lib']),
++    cpp.find_library('openxr_loader', dirs : [xr_root / 'lib']),
++    cpp.find_library('advapi32'),
++    cpp.find_library('shell32'),
++    cpp.find_library('ole32'),
++    cpp.find_library('gdi32'),
++    cpp.find_library('user32'),
++  ]
++  xr_includes = [include_directories('../gk3hd_xr/include')]
++endif
++
+ dxvk_lib = static_library('dxvk', dxvk_src, glsl_generator.process(dxvk_shaders), dxvk_version,
+   link_with           : [ util_lib, spirv_lib ],
+-  dependencies        : [ thread_dep, vkcommon_dep ],
+-  include_directories : [ dxvk_include_path ],
++  dependencies        : [ thread_dep, vkcommon_dep, xr_dependencies ],
++  include_directories : [ dxvk_include_path, xr_includes ],
+ )
+ 
+ dxvk_dep = declare_dependency(
+   link_with           : [ dxvk_lib ],
+-  include_directories : [ dxvk_include_path ],
++  dependencies        : [ xr_dependencies ],
++  include_directories : [ dxvk_include_path, xr_includes ],
+ )
+diff --git a/src/dxvk/shaders/dxvk_present_frag.frag b/src/dxvk/shaders/dxvk_present_frag.frag
+index 7498a40..78997ec 100644
+--- a/src/dxvk/shaders/dxvk_present_frag.frag
++++ b/src/dxvk/shaders/dxvk_present_frag.frag
+@@ -1,6 +1,7 @@
+ #version 450
+ 
+ layout(constant_id = 1) const bool s_gamma_bound = true;
++layout(constant_id = 1227) const bool s_premultiplied = false; // getSpecId(2)
+ 
+ layout(binding = 0) uniform sampler2D s_image;
+ layout(binding = 1) uniform sampler1D s_gamma;
+@@ -11,6 +12,7 @@ layout(push_constant)
+ uniform present_info_t {
+   ivec2 src_offset;
+   ivec2 dst_offset;
++  float visibility;
+ };
+ 
+ void main() {
+@@ -18,10 +20,15 @@ void main() {
+   o_color = texelFetch(s_image, coord, 0);
+   
+   if (s_gamma_bound) {
++    // Gamma acts on straight colour. Reapply coverage afterwards, preserving
++    // black outlines while keeping alpha-zero pixels genuinely transparent.
++    float coverage = s_premultiplied ? o_color.a : 1.0;
++    vec3 rgb = coverage > 0.0 ? o_color.rgb / coverage : vec3(0.0);
+     o_color = vec4(
+-      texture(s_gamma, o_color.r).r,
+-      texture(s_gamma, o_color.g).g,
+-      texture(s_gamma, o_color.b).b,
++      texture(s_gamma, rgb.r).r * coverage,
++      texture(s_gamma, rgb.g).g * coverage,
++      texture(s_gamma, rgb.b).b * coverage,
+       o_color.a);
+   }
++  o_color.rgb *= visibility;
+ }
+\ No newline at end of file
+diff --git a/src/dxvk/shaders/dxvk_present_frag_blit.frag b/src/dxvk/shaders/dxvk_present_frag_blit.frag
+index c5b6606..64675f5 100644
+--- a/src/dxvk/shaders/dxvk_present_frag_blit.frag
++++ b/src/dxvk/shaders/dxvk_present_frag_blit.frag
+@@ -1,6 +1,7 @@
+ #version 450
+ 
+ layout(constant_id = 1) const bool s_gamma_bound = true;
++layout(constant_id = 1227) const bool s_premultiplied = false; // getSpecId(2)
+ 
+ layout(binding = 0) uniform sampler2D s_image;
+ layout(binding = 1) uniform sampler1D s_gamma;
+@@ -12,6 +13,7 @@ layout(push_constant)
+ uniform present_info_t {
+   ivec2 src_offset;
+   uvec2 src_extent;
++  float visibility;
+ };
+ 
+ void main() {
+@@ -19,10 +21,13 @@ void main() {
+   o_color = textureLod(s_image, coord, 0.0f);
+   
+   if (s_gamma_bound) {
++    float coverage = s_premultiplied ? o_color.a : 1.0;
++    vec3 rgb = coverage > 0.0 ? o_color.rgb / coverage : vec3(0.0);
+     o_color = vec4(
+-      texture(s_gamma, o_color.r).r,
+-      texture(s_gamma, o_color.g).g,
+-      texture(s_gamma, o_color.b).b,
++      texture(s_gamma, rgb.r).r * coverage,
++      texture(s_gamma, rgb.g).g * coverage,
++      texture(s_gamma, rgb.b).b * coverage,
+       o_color.a);
+   }
++  o_color.rgb *= visibility;
+ }
+\ No newline at end of file

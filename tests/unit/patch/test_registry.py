@@ -43,7 +43,10 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SIDNEY_PRESENTATION_SEGMENT,
     SYSTEM_CONTROL_FULL_DAMAGE_RECT_OFFSET,
     SYSTEM_CONTROL_MODAL_DAMAGE_RECT_OFFSET,
+    SYSTEM_CONTROL_SEGMENT,
     SYSTEM_CONTROL_TOOLBAR_SEED_BUDGET_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_ISOLATION_ENABLED_OFFSET,
     RuntimeSegmentAddress,
     RuntimeSymbols,
 )
@@ -825,7 +828,10 @@ def test_confirm_quit_retires_the_previous_toolbar_tooltip_generation() -> None:
     profile = next(iter(SUPPORTED_BUILDS.values()))
     compiler = TooltipFeatureCompiler(
         symbols=RuntimeSymbols(
-            segments=(RuntimeSegmentAddress(RESOURCE_SEGMENT, 0, 0, 0x00900000),)
+            segments=(
+                RuntimeSegmentAddress(RESOURCE_SEGMENT, 0, 0, 0x00900000),
+                RuntimeSegmentAddress(SYSTEM_CONTROL_SEGMENT, 0, 0, 0x00910000),
+            )
         ),
         profile=profile,
         room_rendering_abi=RoomRenderingABI(
@@ -934,7 +940,10 @@ def test_tooltip_draw_scope_brackets_only_the_concrete_native_producer() -> None
     profile = next(iter(SUPPORTED_BUILDS.values()))
     compiler = SystemScreenCompiler(
         symbols=RuntimeSymbols(
-            segments=(RuntimeSegmentAddress(RESOURCE_SEGMENT, 0, 0, 0x00900000),)
+            segments=(
+                RuntimeSegmentAddress(RESOURCE_SEGMENT, 0, 0, 0x00900000),
+                RuntimeSegmentAddress(SYSTEM_CONTROL_SEGMENT, 0, 0, 0x00910000),
+            )
         ),
         profile=profile,
         room_rendering_abi=RoomRenderingABI(
@@ -972,12 +981,6 @@ def test_tooltip_draw_scope_brackets_only_the_concrete_native_producer() -> None
     assert payload.startswith(b"\x55\x8b\xec\x83\xec\x04\x53\x8b\xd9")
     assert b"\x89\x1d" + struct.pack("<I", object_ptr_va) in payload
     assert b"\x8b\x45\x08\xa3" + struct.pack("<I", dest_handle_va) in payload
-    assert (
-        b"\x81\x3d"
-        + struct.pack("<I", profile.address("display.dimensions") + 4)
-        + struct.pack("<I", 768)
-        in payload
-    )
     assert b"\x80\x7b\x18\x00" in payload
     assert b"\xff\x05" + struct.pack("<I", depth_va) in payload
     assert b"\xff\x05" + struct.pack("<I", count_va) in payload
@@ -998,7 +1001,7 @@ def test_tooltip_draw_scope_brackets_only_the_concrete_native_producer() -> None
         )
         is not None
     ]
-    assert calls == [target_va]
+    assert calls == [0x00910000 + SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_OFFSET, target_va]
 
 
 def test_modal_tooltip_resolver_scopes_idle_toolbar_points_before_native_lookup() -> None:
@@ -1109,7 +1112,10 @@ def test_tooltip_visibility_edge_requests_one_native_damage_generation() -> None
     profile = next(iter(SUPPORTED_BUILDS.values()))
     compiler = SystemScreenCompiler(
         symbols=RuntimeSymbols(
-            segments=(RuntimeSegmentAddress(RESOURCE_SEGMENT, 0, 0, 0x00900000),)
+            segments=(
+                RuntimeSegmentAddress(RESOURCE_SEGMENT, 0, 0, 0x00900000),
+                RuntimeSegmentAddress(SYSTEM_CONTROL_SEGMENT, 0, 0, 0x00910000),
+            )
         ),
         profile=profile,
         room_rendering_abi=RoomRenderingABI(
@@ -1144,12 +1150,6 @@ def test_tooltip_visibility_edge_requests_one_native_damage_generation() -> None
 
     assert payload.startswith(b"\x53\x56\x57\x8b\xf1\x8a\x5e\x18")
     assert b"\x3a\x5e\x18" in payload
-    assert (
-        b"\x81\x3d"
-        + struct.pack("<I", profile.address("display.dimensions") + 4)
-        + struct.pack("<I", 768)
-        in payload
-    )
     assert b"\x83\x3d" + struct.pack("<I", room_presentation_active_va) + b"\x00" in payload
     assert b"\x83\x3d" + struct.pack("<I", fixed_modal_object_ptr_va) + b"\x00" in payload
     assert (
@@ -1167,6 +1167,7 @@ def test_tooltip_visibility_edge_requests_one_native_damage_generation() -> None
     ]
     assert call_targets == [
         profile.address("tooltip.set_visible"),
+        0x00910000 + SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_OFFSET,
         action_lifetime_helper_va,
     ]
     assert payload.endswith(b"\x8b\xc7\x5f\x5e\x5b\xc2\x04\x00")
@@ -1363,16 +1364,21 @@ def test_action_lifetime_retires_only_the_owned_system_scope() -> None:
 @pytest.mark.parametrize("argument_bytes", [8, 16])
 @pytest.mark.parametrize("height", [768, 800, 2160])
 @pytest.mark.parametrize("map_active", [False, True])
+@pytest.mark.parametrize("xr_active", [False, True])
 def test_tooltip_chrome_has_one_owner_during_full_frame_redraws(
     argument_bytes: int,
     height: int,
     map_active: bool,
+    xr_active: bool,
 ) -> None:
     """Full-map and HD compositors replace chrome; ordinary 1024 stays native."""
     profile = next(iter(SUPPORTED_BUILDS.values()))
     compiler = SystemScreenCompiler(
         symbols=RuntimeSymbols(
-            segments=(RuntimeSegmentAddress(RESOURCE_SEGMENT, 0, 0, 0x00900000),)
+            segments=(
+                RuntimeSegmentAddress(RESOURCE_SEGMENT, 0, 0, 0x00900000),
+                RuntimeSegmentAddress(SYSTEM_CONTROL_SEGMENT, 0, 0, 0x00910000),
+            )
         ),
         profile=profile,
         room_rendering_abi=RoomRenderingABI(
@@ -1401,6 +1407,14 @@ def test_tooltip_chrome_has_one_owner_during_full_frame_redraws(
     cpu = Uc(UC_ARCH_X86, UC_MODE_32)
     cpu.mem_map(0x400000, 0x600000)
     cpu.mem_write(wrapper_va, payload)
+    gate = 0x00910000 + SYSTEM_CONTROL_TOOLTIP_COMPOSITOR_GATE_OFFSET
+    cpu.mem_write(
+        gate,
+        compiler.menu_feature().tooltip_feature().build_tooltip_compositor_gate(wrapper_va=gate),
+    )
+    cpu.mem_write(
+        0x00910000 + SYSTEM_CONTROL_TOOLTIP_ISOLATION_ENABLED_OFFSET, struct.pack("<I", xr_active)
+    )
     # The native callee returns a sentinel; suppression returns zero.
     cpu.mem_write(target_va, b"\xb8\x7b\x00\x00\x00\xc2" + struct.pack("<H", argument_bytes))
     cpu.mem_write(profile.address("display.dimensions") + 4, struct.pack("<I", height))
@@ -1412,7 +1426,9 @@ def test_tooltip_chrome_has_one_owner_during_full_frame_redraws(
     cpu.mem_write(stack, struct.pack("<I", stop) + bytes(argument_bytes))
     cpu.reg_write(UC_X86_REG_ESP, stack)
     cpu.emu_start(wrapper_va, stop, count=100)
-    assert cpu.reg_read(UC_X86_REG_EAX) == (123 if height == 768 and not map_active else 0)
+    assert cpu.reg_read(UC_X86_REG_EAX) == (
+        123 if height == 768 and not map_active and not xr_active else 0
+    )
     assert cpu.reg_read(UC_X86_REG_ESP) == stack + 4 + argument_bytes
 
 
@@ -3604,8 +3620,8 @@ def _assert_death_motion_dispatch(wrapper: bytes, death_vtable: int, zodiac_vtab
     return death_at
 
 
-def test_pointer_motion_tail_adapts_only_current_point_transactionally() -> None:
-    """The trailing +0x78 traversal retains native delta and flag arguments."""
+def test_pointer_motion_tail_preserves_the_native_event_contract() -> None:
+    """The trailing traversal retains flags and adapts only the active owner."""
     profile = next(iter(SUPPORTED_BUILDS.values()))
     compiler = SidneyPresentationCompiler(
         symbols=RuntimeSymbols(segments=()),
@@ -3626,6 +3642,7 @@ def test_pointer_motion_tail_adapts_only_current_point_transactionally() -> None
     inventory_active_va = 0x00792110
     driving_map_active_va = 0x00792114
     tbt_layer_va = 0x00792118
+    sidney_root_va = 0x0079211C
     toolbar_vtable_va = profile.address("ingame_toolbar.vtable")
     wrapper = build_pointer_motion_dispatch_wrapper(
         wrapper_va=wrapper_va,
@@ -3633,6 +3650,7 @@ def test_pointer_motion_tail_adapts_only_current_point_transactionally() -> None
         thunk_va=thunk_va,
         native_dispatch_va=profile.address("mouse_move.motion_dispatch"),
         physical_width_va=compiler._physical_width_global_va,
+        sidney_root_va=sidney_root_va,
         tbt_layer_va=tbt_layer_va,
         current_layer_va=compiler._current_layer_va,
         driving_map_active_va=driving_map_active_va,
@@ -3648,7 +3666,9 @@ def test_pointer_motion_tail_adapts_only_current_point_transactionally() -> None
         zodiac_vtable_va=profile.address("zodiac.vtable"),
         is_bad_read_ptr_va=profile.address("win32.IsBadReadPtr"),
     )
-    thunk = build_pointer_motion_dispatch_thunk(compiler, wrapper_va=thunk_va)
+    thunk = build_pointer_motion_dispatch_thunk(
+        compiler, wrapper_va=thunk_va, sidney_root_va=sidney_root_va
+    )
 
     # Five original arguments are copied into a stack-local context. The
     # adapter receives only current POINT* and consumes it; this wrapper then
@@ -3656,8 +3676,8 @@ def test_pointer_motion_tail_adapts_only_current_point_transactionally() -> None
     width_check = b"\x81\x3d" + struct.pack("<I", compiler._physical_width_global_va)
     height_check = b"\x81\x3d" + struct.pack("<I", compiler._physical_width_global_va + 4)
     toolbar_check = b"\x83\x3d" + struct.pack("<I", toolbar_input_valid_va) + b"\x00"
-    assert wrapper.startswith(b"\x83\x3d" + struct.pack("<I", tbt_layer_va) + b"\x00")
-    timeblock_check = b"\x3b\x05" + struct.pack("<I", tbt_layer_va) + b"\x5a\x59\x58"
+    assert wrapper.startswith(b"\x50\x51\x52")
+    timeblock_check = b"\x3b\x05" + struct.pack("<I", tbt_layer_va)
     assert wrapper.index(timeblock_check) < wrapper.index(width_check)
     assert wrapper.index(height_check) < wrapper.index(toolbar_check)
     death_at = _assert_death_motion_dispatch(
@@ -3683,7 +3703,7 @@ def test_pointer_motion_tail_adapts_only_current_point_transactionally() -> None
     assert b"\x81\x3d" + struct.pack("<I", compiler._physical_width_global_va) in wrapper
     assert struct.pack("<I", 1024) in wrapper
     assert struct.pack("<I", 768) in wrapper
-    assert b"\x55\x8b\xec\x83\xec\x20\x89\x5d\xe8" in wrapper
+    assert b"\x55\x8b\xec\x83\xec\x28\x89\x5d\xe8" in wrapper
     assert b"\x8d\x4d\xec\xb8" + struct.pack("<I", thunk_va) + b"\xff\x75\x08" in wrapper
     call_offset = wrapper.index(b"\xff\x75\x08\xe8") + 3
     assert (
@@ -3699,14 +3719,9 @@ def test_pointer_motion_tail_adapts_only_current_point_transactionally() -> None
     # The thunk reconstructs offset/callback/flags/delta/current in native
     # right-to-left order, restores the original dispatcher as ECX, and calls
     # the untouched engine traversal.
-    assert thunk.startswith(b"\xff\x71\x10\xff\x71\x0c\xff\x71\x08\xff\x71\x04")
-    assert b"\xff\x74\x24\x14\x8b\x09" in thunk
-    thunk_call = thunk.index(b"\xe8")
-    assert decode_rel32_branch(
-        opcode=BranchOpcode.CALL,
-        site_va=thunk_va + thunk_call,
-        instruction=thunk[thunk_call : thunk_call + 5],
-    ) == profile.address("mouse_move.motion_dispatch")
+    # Executed POINT/delta/flags/callback/register transport is covered by
+    # test_sidney_motion. Here verify only the fixed binary slot and return ABI.
+    assert len(thunk) <= 0xC0
     assert thunk.endswith(b"\xc2\x04\x00")
 
 

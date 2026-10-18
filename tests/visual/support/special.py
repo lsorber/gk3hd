@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +110,7 @@ _BINOCULAR_VTABLE: Final = 0x00668428
 _FINGERPRINT_VTABLE: Final = 0x00678264
 _CONFIRM_QUIT_VTABLE: Final = 0x0067DC14
 _SAVE_LAYER_VTABLE: Final = 0x0067CE58
+_SAVE_NAME_EDITOR_VTABLE: Final = 0x0067CF80
 _MAP_SKY_FRACTION_MAX: Final = 0.01
 _MAP_MEAN_LUMA_MIN: Final = 40.0
 _MAP_WIDE_DARK_FRACTION_MIN: Final = 0.15
@@ -919,10 +921,71 @@ def _capture_save_editor(
     click_frame_point(window, *_authored_point(size, 768, 518), frame_size=size)
     click_frame_point(window, *_authored_point(size, 638, 554), frame_size=size)
     _wait_for_layer(process_id, _SAVE_LAYER_VTABLE, timeout=3.0)
-    click_frame_point(window, *_authored_point(size, 300, 256), frame_size=size)
-    type_text(window, "GK3HD visual comparison")
+    click_frame_point(window, *_save_name_entry(process_id, size), frame_size=size)
+    description = "GK3HD visual comparison"
+    type_text(window, description)
+    deadline = time.monotonic() + 3.0
+    while not _save_name_matches(process_id, description):
+        if time.monotonic() >= deadline:
+            message = "save-game editor did not accept the comparison name"
+            raise CaptureError(message)
+        time.sleep(0.01)
     record("save-editor")
     press_key(window, _VK_ESCAPE, hold_seconds=0.06)
+
+
+def _save_name_entry(process_id: int, size: tuple[int, int]) -> tuple[int, int]:
+    """Select the native empty row, not a resolution-dependent guessed point."""
+    root = current_ui_layer_pointer(process_id)
+    if root is None or read_process_words(process_id, root, count=1) != (_SAVE_LAYER_VTABLE,):
+        message = "save-game editor is not the current interface"
+        raise CaptureError(message)
+    rows = read_process_words(process_id, root + 0x2B4, count=2)
+    if rows is None:
+        message = "save-game editor row list is unreadable"
+        raise CaptureError(message)
+    begin, end = rows
+    # The retail SaveGame list appends its new-slot row after existing saves.
+    stride = 0x4C
+    if not begin or not 0 < end - begin <= 0x28E0 or (end - begin) % stride:
+        message = "save-game editor has an invalid native row list"
+        raise CaptureError(message)
+    field = read_process_words(process_id, end - stride + 0x20, count=1)
+    if field is None or not field[0]:
+        message = "save-game editor has no new-slot name field"
+        raise CaptureError(message)
+    bounds = read_process_words(process_id, field[0] + 0x1C, count=4)
+    if bounds is None:
+        message = "save-game new-slot row bounds are unreadable"
+        raise CaptureError(message)
+    left, top, right, bottom = bounds
+    width, height = size
+    if not 0 <= left < right <= width or not 0 <= top < bottom <= height:
+        message = "save-game new-slot row is not visible in the captured frame"
+        raise CaptureError(message)
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def _save_name_matches(process_id: int, description: str) -> bool:
+    """Require characters in the live native editor before accepting its image."""
+    root = current_ui_layer_pointer(process_id)
+    if root is None or read_process_words(process_id, root, count=1) != (_SAVE_LAYER_VTABLE,):
+        return False
+    if read_process_words(process_id, root + 0x340, count=1) != (_SAVE_NAME_EDITOR_VTABLE,):
+        return False
+    editor = read_process_words(process_id, root + 0x340 + 0x34, count=2)
+    if editor is None:
+        return False
+    pointer, length = editor
+    expected = description.encode("cp1252")
+    if length != len(expected) or not pointer or length > 256:
+        return False
+    count = (length + 3) // 4
+    words = read_process_words(process_id, pointer, count=count)
+    if words is None:
+        return False
+    text = struct.pack(f"<{count}I", *words)
+    return text[:length] == expected
 
 
 def _capture_restore_cycles(

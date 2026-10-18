@@ -165,6 +165,24 @@ class TransitionFrameCompiler:
         ("window.topmost_result", "topmost window continuation"),
     )
 
+    def room_draw_entry(self, pe: PEFile) -> int:
+        """Return the verified retained-page seed adapter for draw-hook composition."""
+        self.runtime_abi(pe)
+        section = pe.get_section(self._section_name)
+        if section is None:
+            msg = "transition room draw entry is unavailable"
+            raise PatchError(msg)
+        section_va = pe.rva_to_va(section.virtual_address)
+        wrapper = dict(self._build_wrappers(section_va))[self._off_scene_wrapper]
+        if (
+            section.characteristics != self._section_characteristics
+            or pe.read_bytes(section.pointer_to_raw_data + self._off_scene_wrapper, len(wrapper))
+            != wrapper
+        ):
+            msg = "transition room draw entry is modified or not executable"
+            raise PatchError(msg)
+        return section_va + self._off_scene_wrapper
+
     @classmethod
     def runtime_abi(cls, pe: PEFile) -> TransitionFrameABI:
         """Validate and return the transition patch's narrow public ABI."""
@@ -332,6 +350,8 @@ class TransitionFrameCompiler:
         last_seed_flip_generation_va: int,
         seed_count_va: int,
         last_seed_result_va: int,
+        prepare_only: bool = False,
+        seed_flip_pages: bool = True,
     ) -> bytes:
         """Repair the current page before GK3 prepares its 3D frame."""
         # Preserve every register across the preparatory page work;
@@ -354,6 +374,13 @@ class TransitionFrameCompiler:
         code.raw(b"\xc7\x05" + struct.pack("<I", room_presentation_active_va) + b"\x01\x00\x00\x00")
         code.raw(b"\x47")
         code.label("room_owner_ready")
+        if not seed_flip_pages:
+            # A windowed VR eye mirror replaces the complete retained back
+            # image, not a fullscreen physical flip page. Publish ownership
+            # without reading the desktop primary or inventing Flip success.
+            code.raw(b"\x61")
+            code.ret()
+            return code.build()
         # Initialize only the two physical pages owned by this handoff. The
         # earlier implementation invalidated the entire room on every later
         # frame; besides being unnecessary after both histories were rebuilt,
@@ -379,7 +406,7 @@ class TransitionFrameCompiler:
         code.raw(
             b"\x8b\x15" + struct.pack("<I", self.profile.address("transition.primary_surface_ptr"))
         )
-        # IDirectDrawSurface4::Blt(back, NULL, primary, NULL, DDBLT_WAIT, NULL)
+        # IDirectDrawSurface4::BltFast(back, 0, 0, primary, NULL, DDBLTFAST_WAIT)
         code.raw(b"\x6a\x10\x6a\x00\x52\x6a\x00\x6a\x00\x8b\x08\x50\xff\x51\x1c")
         code.raw(b"\xa3" + struct.pack("<I", last_seed_result_va))
         code.raw(b"\x85\xc0")
@@ -399,11 +426,45 @@ class TransitionFrameCompiler:
         code.call_absolute(self.profile.address("transition.invalidate_all_damage"))
         code.raw(b"\xff\x05" + struct.pack("<I", scene_invalidation_count_va))
         code.label("replay_scene_setup")
-        code.raw(b"\x61\x83\xc4\x04")
-        seed_site = self.profile.site("transition.seed_hook")
-        code.raw(seed_site.original)
-        code.jump_absolute(self.profile.address("transition.seed_continue"))
+        code.raw(b"\x61")
+        if prepare_only:
+            # VR still owns the same page preparation when a completed eye
+            # replaces center geometry. It must run before the mirror copy.
+            code.ret()
+        else:
+            code.raw(b"\x83\xc4\x04")
+            seed_site = self.profile.site("transition.seed_hook")
+            code.raw(seed_site.original)
+            code.jump_absolute(self.profile.address("transition.seed_continue"))
         return code.build()
+
+    def room_preparation_code(
+        self, *, wrapper_va: int, draw_entry: int, seed_flip_pages: bool = True
+    ) -> bytes:
+        """Reuse page preparation without entering the ordinary geometry draw.
+
+        The caller verifies this transition section with ``room_draw_entry``
+        before deriving its base. Preserve registers and return with no args.
+        The ordinary transition wrapper and this adapter share the same logic.
+        A complete windowed VR GPU mirror needs only room ownership, not the
+        fullscreen chain's physical-page seed; retain that pending repair for
+        a later genuine fullscreen presentation or ordinary fallback.
+        """
+        section_va = draw_entry - self._off_scene_wrapper
+        return self._build_scene_wrapper(
+            wrapper_va=wrapper_va,
+            repair_active_va=section_va + self._off_repair_active,
+            room_presentation_active_va=section_va + self._off_room_presentation_active,
+            handoff_pending_va=section_va + self._off_handoff_pending,
+            scene_invalidation_count_va=section_va + self._off_scene_invalidation_count,
+            seed_pages_remaining_va=section_va + self._off_seed_pages_remaining,
+            flip_count_va=section_va + self._off_flip_count,
+            last_seed_flip_generation_va=section_va + self._off_last_seed_flip_generation,
+            seed_count_va=section_va + self._off_seed_count,
+            last_seed_result_va=section_va + self._off_last_seed_result,
+            prepare_only=True,
+            seed_flip_pages=seed_flip_pages,
+        )
 
     def _build_begin_wrapper(
         self,

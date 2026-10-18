@@ -39,6 +39,7 @@ from gk3hd.system.files import sha256_file
 from gk3hd.system.proton import ProtonError, discover_proton
 from gk3hd.system.steam import game_launch_options
 from gk3hd.textures.install.service import STATE_FILENAME, TextureInstallRequest
+from gk3hd.vr.cli import app as vr_app
 
 app = typer.Typer(
     name="gk3hd",
@@ -50,6 +51,7 @@ app.add_typer(patch_app, name="patch")
 app.add_typer(textures_app, name="textures")
 app.add_typer(renderer_app, name="renderer")
 app.add_typer(package_app, name="package")
+app.add_typer(vr_app, name="vr")
 
 
 def _version_callback(value: bool) -> None:

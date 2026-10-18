@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Literal
 
 from gk3hd.renderer.artifact import RendererAsset, inspect_dll
 from gk3hd.system.discovery import discover_game
@@ -46,7 +47,7 @@ def recipe_digest() -> str:
         if path.is_file()
         and (
             path.suffix in {".ps1", ".patch", ".json", ".cpp", ".h", ".conf"}
-            or path.name == "LICENSE"
+            or path.name in {"LICENSE", "CMakeLists.txt"}
         )
     )
     digest = hashlib.sha256()
@@ -56,10 +57,8 @@ def recipe_digest() -> str:
     return digest.hexdigest()
 
 
-def build(
-    *, game_dir: Path | None = None, output: Path | None = None, jobs: int = 12
-) -> RendererAsset:
-    """Reuse verified matching output, or build and test a fresh recipe directory."""
+def compile_recipe(target: Path, *, jobs: int, variant: Literal["flat", "openxr"] = "flat") -> None:
+    """Run the fixed native recipe in a fresh output directory, without installing."""
     if sys.platform != "win32":
         msg = "renderer builds require Windows with Visual Studio C++ Build Tools installed"
         raise ValueError(msg)
@@ -67,28 +66,36 @@ def build(
     if shell is None:
         msg = "PowerShell 7 (pwsh) is required for renderer builds"
         raise ValueError(msg)
+    result = subprocess.run(  # noqa: S603 - fixed recipe and separate arguments.
+        [
+            shell,
+            "-NoProfile",
+            "-File",
+            str(RECIPE / "build.ps1"),
+            "-Jobs",
+            str(jobs),
+            "-OutputRoot",
+            str(target),
+            *(["-OpenXR"] if variant == "openxr" else []),
+        ],
+        check=False,
+    )
+    if result.returncode:
+        msg = f"renderer build failed (exit {result.returncode}); see build output"
+        raise RuntimeError(msg)
+
+
+def build(
+    *, game_dir: Path | None = None, output: Path | None = None, jobs: int = 12
+) -> RendererAsset:
+    """Reuse verified matching output, or build and test a fresh recipe directory."""
     digest = recipe_digest()
     root = workspace(game_dir)
     target = (output or root / digest[:16]).resolve()
     pin = json.loads((RECIPE / "upstream.json").read_text(encoding="utf-8"))
     dll = target / f"dxvk-sarek-{pin['version']}.dll"
     if not target.exists():
-        result = subprocess.run(  # noqa: S603 - fixed recipe and separate arguments.
-            [
-                shell,
-                "-NoProfile",
-                "-File",
-                str(RECIPE / "build.ps1"),
-                "-Jobs",
-                str(jobs),
-                "-OutputRoot",
-                str(target),
-            ],
-            check=False,
-        )
-        if result.returncode:
-            msg = f"renderer build failed (exit {result.returncode}); see build output"
-            raise RuntimeError(msg)
+        compile_recipe(target, jobs=jobs)
     asset = inspect_dll(dll)
     if digest != recipe_digest():
         msg = "renderer recipe changed during compilation; rebuild before installing or releasing"

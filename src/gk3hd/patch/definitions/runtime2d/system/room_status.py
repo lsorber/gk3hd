@@ -12,15 +12,32 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_CONTROL_ROOM_STATUS_AUTHORED_STATE_END_OFFSET,
     SYSTEM_CONTROL_ROOM_STATUS_DAMAGE_RECT_OFFSET,
     SYSTEM_CONTROL_ROOM_STATUS_DAMAGE_REGION_OFFSET,
+    SYSTEM_CONTROL_ROOM_STATUS_OBJECT_PTR_OFFSET,
     SYSTEM_CONTROL_ROOM_STATUS_PENDING_STATE_END_OFFSET,
     SYSTEM_CONTROL_ROOM_STATUS_PENDING_VALID_OFFSET,
     SYSTEM_CONTROL_ROOM_STATUS_STATE_SIZE,
+    SYSTEM_CONTROL_SEGMENT,
+    RuntimeImage,
 )
 from gk3hd.patch.definitions.runtime2d.system.shared import SystemCompilerContext
+from gk3hd.patch.model import PatchError
 
 if TYPE_CHECKING:
+    from gk3hd.patch.binary.image import PEFile
     from gk3hd.patch.binary.mutations import ExecutableMutationPlan
     from gk3hd.patch.binary.payload import SegmentPayloadBuilder
+    from gk3hd.patch.builds import BuildProfile
+
+
+@dataclass(frozen=True, slots=True)
+class NativeRoomStatusABI:
+    """Installed synchronous status Draw and shared native TextBox lifetime."""
+
+    vtable_va: int
+    draw_va: int
+    destructor_va: int
+    retained_owner_va: int
+    present_depth_va: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -43,6 +60,22 @@ class RoomStatusFeatureCompiler(SystemCompilerContext):
         The renderer owns page presentation. This feature does not defer,
         replay, cache, copy, filter damage, or repair frame history.
     """
+
+    @classmethod
+    def native_hooks_abi(cls, image: PEFile, profile: BuildProfile) -> NativeRoomStatusABI:
+        """Export bindings, leaving full payload verification to consumers."""
+        section = RuntimeImage(image).get_section(SYSTEM_CONTROL_SEGMENT.logical_name)
+        if section is None:
+            msg = "native room-status dependency is missing"
+            raise PatchError(msg)
+        base = image.rva_to_va(section.virtual_address)
+        return NativeRoomStatusABI(
+            profile.address("room_text.vtable"),
+            base + cls._off_room_text_draw_wrapper,
+            profile.address("room_text.destructor"),
+            base + SYSTEM_CONTROL_ROOM_STATUS_OBJECT_PTR_OFFSET,
+            base + cls._off_room_status_present_depth,
+        )
 
     def emit_state(self, payload: SegmentPayloadBuilder, *, control_va: int) -> None:
         """Own every zero/data region used by transient room-status drawing."""

@@ -6,6 +6,27 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
+class NativeMenuRootABI:
+    """Concrete native menu class and its existing runtime virtual entries."""
+
+    vtable_va: int
+    draw_va: int
+    destructor_va: int
+
+
+@dataclass(frozen=True, slots=True)
+class NativeMenuHooksABI:
+    """Menu dependencies exported without duplicating runtime offsets."""
+
+    action: NativeMenuRootABI
+    toolbar: NativeMenuRootABI
+    dropdown_pending_va: int
+    frame_presenter_va: int
+    dropdown_saved_bottom_va: int
+    dropdown_bottom_valid_va: int
+
+
+@dataclass(frozen=True, slots=True)
 class DropdownRuntimeExports:
     """Entry addresses exported by the graphics-options dropdown domain."""
 

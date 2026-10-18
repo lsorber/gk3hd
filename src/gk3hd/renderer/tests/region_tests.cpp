@@ -13,6 +13,27 @@ std::array<int,1024> raster(const std::vector<RECT>& regions) {
   return result;
 }
 int main() {
+  const RECT canvas{0,0,3840,2160}, sourceWhole{0,0,64,64}, crop{2,3,61,62};
+  const RECT expectedFast{1912,1736,1971,1795};
+  auto fast = dxvk::FastBltRegion(1912,1736,&crop,&sourceWhole,&canvas);
+  if (!fast || !EqualRect(&*fast,&expectedFast))
+    throw std::runtime_error("fast blit crop is not translated exactly");
+  const RECT lastPixel{63,63,64,64}, empty{3,3,3,4}, negative{-1,0,2,2}, large{0,0,65,64};
+  fast=dxvk::FastBltRegion(3839,2159,&lastPixel,&sourceWhole,&canvas);
+  const RECT expectedEdge{3839,2159,3840,2160};
+  if (!fast || !EqualRect(&*fast,&expectedEdge))
+    throw std::runtime_error("fast blit at last pixel lost its extent");
+  for (auto invalid : {&empty,&negative,&large})
+    if (dxvk::FastBltRegion(0,0,invalid,&sourceWhole,&canvas))
+      throw std::runtime_error("invalid source accepted as bounded fast blit");
+  for (DWORD x : {DWORD(3840),DWORD(0x7fffffff),DWORD(0xffffffff)})
+    if (dxvk::FastBltRegion(x,0,&lastPixel,&sourceWhole,&canvas))
+      throw std::runtime_error("out-of-bounds/overflowing fast blit accepted");
+  if (dxvk::FastBltRegion(0,2160,&lastPixel,&sourceWhole,&canvas) ||
+      dxvk::FastBltRegion(0,0,nullptr,&sourceWhole,&canvas) ||
+      dxvk::FastBltRegion(0,0,&crop,nullptr,&canvas) ||
+      dxvk::FastBltRegion(0,0,&crop,&sourceWhole,nullptr))
+    throw std::runtime_error("unknown fast blit extent accepted");
   std::mt19937 random(20260906);
   for (unsigned trial=0;trial<1000;++trial) {
     std::vector<RECT> unioned;

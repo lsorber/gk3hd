@@ -22,22 +22,54 @@ def build_pointer_motion_dispatch_thunk(
     owner: SidneyPresentationCompiler,
     *,
     wrapper_va: int,
+    sidney_root_va: int,
 ) -> bytes:
     """Call GK3's five-argument motion traversal from a one-POINT adapter.
 
     ECX points at the stack-local context assembled by
     :func:`build_pointer_motion_dispatch_wrapper`; ``[ESP+4]`` is the current
     POINT after the selected fixed-interface affine. The native dispatcher
-    receives that POINT plus the original physical delta, flags, callback, and
-    object offset. No context escapes this synchronous call.
+    receives that POINT, flags, callback and object offset. Current SIDNEY
+    also receives a logical delta between the inverses of both physical
+    endpoints. Other owners retain the native delta. No context escapes.
     """
     code = X86Emitter(base_va=wrapper_va)
-    # Context DWORDs are dispatcher, delta, flags, callback, and object offset.
-    code.raw(b"\xff\x71\x10\xff\x71\x0c\xff\x71\x08\xff\x71\x04")
-    # Four copied arguments put the adapter-owned POINT at [ESP+0x14].
-    code.raw(b"\xff\x74\x24\x14\x8b\x09")
+    # Context DWORDs are dispatcher, delta, flags, callback and object offset.
+    # The physical current X/Y snapshots precede it at -0x10/-0x14. Native
+    # rotation/resize reconstruct the previous point as current minus delta:
+    # passing a physical delta beside a logical point changes their geometry.
+    code.raw(bytes.fromhex("55 8b ec 83 ec 08 56 57 8b f1 8b 7e 04"))
+    code.call_absolute(owner._current_layer_va)
+    code.raw(bytes.fromhex("85 c0"))
+    code.jump_if(Condition.EQUAL, "native_arguments")
+    code.raw(b"\x3b\x05" + struct.pack("<I", sidney_root_va))
+    code.jump_if(Condition.NOT_EQUAL, "native_arguments")
+    code.raw(bytes.fromhex("85 ff"))
+    code.jump_if(Condition.EQUAL, "native_arguments")
+    code.raw(bytes.fromhex("83 7d 08 00"))
+    code.jump_if(Condition.EQUAL, "native_arguments")
+    height_va = owner._physical_width_global_va + 4
+    code.raw(b"\xa1" + struct.pack("<I", height_va))
+    code.raw(bytes.fromhex("c1 e0 02 99 b9 03 00 00 00 f7 f9"))
+    code.raw(b"\x8b\x0d" + struct.pack("<I", owner._physical_width_global_va))
+    code.raw(bytes.fromhex("2b c8 d1 f9"))  # Same centered integer pillar as the POINT inverse.
+    for horizontal, source, delta, current, local in (
+        (True, 0xF0, 0, 0, 0xF8),
+        (False, 0xEC, 4, 4, 0xFC),
+    ):
+        code.raw(b"\x8b\x46" + bytes([source]))
+        code.raw(b"\x2b\x47" + bytes([delta]))
+        if horizontal:
+            code.raw(bytes.fromhex("2b c1"))
+        code.raw(b"\x69\xc0" + struct.pack("<I", AUTHORED_FRAME_HEIGHT) + b"\x99")
+        code.raw(b"\xf7\x3d" + struct.pack("<I", height_va))
+        code.raw(bytes.fromhex("8b 55 08") + b"\x8b\x52" + bytes([current]))
+        code.raw(bytes.fromhex("2b d0") + b"\x89\x55" + bytes([local]))
+    code.raw(bytes.fromhex("8d 7d f8"))
+    code.label("native_arguments")
+    code.raw(bytes.fromhex("ff 76 10 ff 76 0c ff 76 08 57 ff 75 08 8b 0e"))
     code.call_absolute(owner.profile.address("mouse_move.motion_dispatch"))
-    code.raw(b"\xc2\x04\x00")
+    code.raw(bytes.fromhex("5f 5e c9 c2 04 00"))
     return code.build()
 
 
@@ -48,6 +80,7 @@ def build_pointer_motion_dispatch_wrapper(
     thunk_va: int,
     native_dispatch_va: int,
     physical_width_va: int,
+    sidney_root_va: int,
     tbt_layer_va: int,
     current_layer_va: int,
     driving_map_active_va: int,
@@ -63,7 +96,7 @@ def build_pointer_motion_dispatch_wrapper(
     zodiac_vtable_va: int,
     is_bad_read_ptr_va: int,
 ) -> bytes:
-    """Adapt only the current POINT in GK3's second motion traversal.
+    """Transport GK3's second motion traversal through the current affine.
 
     The hook replaces MouseManager's call to ``FUN_004BF0E8``. Its five native
     arguments are ``current POINT*``, ``delta POINT*``, flags, callback, and
@@ -72,15 +105,25 @@ def build_pointer_motion_dispatch_wrapper(
     reversible affine to the current point and software-cursor cache.
     """
     code = X86Emitter(base_va=wrapper_va)
+    # SIDNEY's shape picker consumes this second traversal too. It retains
+    # authored bounds even when the first traversal already found a control.
+    # Match the live top layer, not a retained laptop beneath another interface.
+    code.raw(b"\x50\x51\x52")
+    code.call_absolute(current_layer_va)
+    code.raw(b"\x85\xc0")
+    code.jump_short_if(Condition.EQUAL, "not_authored_owner")
+    code.raw(b"\x3b\x05" + struct.pack("<I", sidney_root_va))
+    code.jump_short_if(Condition.EQUAL, "authored_owner")
     # Dense TimeBlock roots retain physical bitmap-sized model bounds even
     # at 1024x768. Both motion traversals need the same persistent-root inverse
     # as button edges. Compare ownership without dereferencing a retained root.
-    code.raw(b"\x83\x3d" + struct.pack("<I", tbt_layer_va) + b"\x00")
-    code.jump_short_if(Condition.EQUAL, "reference_size")
-    code.raw(b"\x50\x51\x52")
-    code.call_absolute(current_layer_va)
-    code.raw(b"\x3b\x05" + struct.pack("<I", tbt_layer_va) + b"\x5a\x59\x58")
-    code.jump_if(Condition.EQUAL, "adapted")
+    code.raw(b"\x3b\x05" + struct.pack("<I", tbt_layer_va))
+    code.jump_short_if(Condition.NOT_EQUAL, "not_authored_owner")
+    code.label("authored_owner")
+    code.raw(b"\x5a\x59\x58")
+    code.jump("adapted")
+    code.label("not_authored_owner")
+    code.raw(b"\x5a\x59\x58")
     code.label("reference_size")
     # Map hit boxes are normalized even at 1024; retain the map's input
     # ownership scope so delayed tooltip resolution cannot inherit toolbar state.
@@ -172,7 +215,7 @@ def build_pointer_motion_dispatch_wrapper(
     code.jump_absolute(native_dispatch_va)
 
     code.label("adapted")
-    code.raw(b"\x55\x8b\xec\x83\xec\x20")
+    code.raw(b"\x55\x8b\xec\x83\xec\x28")
     # This hook replaces a native thiscall whose caller keeps EDI as its live
     # current-POINT pointer after return.  Most affine owners already preserve
     # the nonvolatile register set internally, but the identity classifier and
@@ -185,6 +228,13 @@ def build_pointer_motion_dispatch_wrapper(
     # nested target returning with precisely the same transient stack depth.
     code.raw(b"\x89\x5d\xe8\x89\x75\xe4\x89\x7d\xe0")
     code.raw(b"\x89\x4d\xec")  # context.dispatcher
+    # Preserve this event's physical endpoint independently of mutable trace
+    # cells. The thunk can reconstruct the previous logical endpoint without
+    # modifying MouseManager's physical delta or durable pointer bookkeeping.
+    code.raw(bytes.fromhex("8b 45 08 85 c0"))
+    code.jump_short_if(Condition.EQUAL, "endpoint_ready")
+    code.raw(bytes.fromhex("8b 10 89 55 dc 8b 50 04 89 55 d8"))
+    code.label("endpoint_ready")
     for source_offset, destination_offset in (
         (0x0C, 0xF0),
         (0x10, 0xF4),
