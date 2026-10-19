@@ -1,3 +1,9 @@
+## v1.1.2 (2026-10-19)
+
+### Fix
+
+- **patch**: support the standard GOG installer executable
+
 ## v1.1.1 (2026-09-29)
 
 ### Fix
