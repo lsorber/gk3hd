@@ -43,13 +43,18 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 Windows or on Linux with Steam and Proton:
 
 ```sh
-uvx gk3hd install  # Install renderer, patch `GK3.exe`, and download/install textures and videos
+uvx gk3hd install  # Install or update patches, renderer, textures and videos
 uvx gk3hd status
 uvx gk3hd uninstall
 ```
 
-Installation selects the current display resolution and finds Steam libraries
-automatically. Windows requires Vulkan-capable graphics drivers.
+To update to the newest release, run `uvx gk3hd@latest install`; no uninstall is
+needed. Unchanged assets are reused, and completed component updates are retained
+if a later step fails. Rerun the command to finish an interrupted update.
+
+New installations use the current display resolution; updates keep your resolution
+and patch selection. Steam libraries are found automatically.
+Windows requires Vulkan-capable graphics drivers.
 Nonstandard game locations can use `--game-dir PATH` (protected Windows folders
 may require an elevated terminal).
 
@@ -123,28 +128,25 @@ slower. Project checkouts select PyTorch's CUDA build on Windows automatically.
 
 ### Extract, upscale, and install videos
 
-The default `gk3hd install` includes videos. Manage them independently with:
+To extract and upscale the original videos locally, use a persistent tool
+installation:
 
 ```sh
-uvx gk3hd videos install    # Download videos and private codecs to `<GAME>/gk3hd/videos/installed/`
-uvx gk3hd videos verify     # Verify installed videos, codecs and original source identities
-uvx gk3hd videos uninstall  # Remove replacements and codecs, leaving originals untouched
-```
+uv tool install "gk3hd[upscale]" --torch-backend auto
 
-Apply the recommended game patches before playing replacement videos.
-No system codecs, compiler or additional Python dependencies are needed to
-install a published pack on Windows or Linux/Proton.
-
-To generate a pack yourself, use the same `gk3hd[upscale]` tool installation as
-for textures:
-
-```sh
 gk3hd videos extract          # Copy original videos to `<GAME>/gk3hd/videos/original/`
 gk3hd videos upscale          # Restore cinematics at 4× into `<GAME>/gk3hd/videos/upscaled/`
 gk3hd videos build            # Build the private player in `<GAME>/gk3hd/videos/player/` (Windows toolchain)
 gk3hd videos pack             # Bundle videos and our player adapter into a versioned ZIP (or ZIP parts)
-gk3hd videos install --local  # Install the local pack from `<GAME>/gk3hd/videos/`
+gk3hd videos install --local  # Install the local pack and private codecs to `<GAME>/gk3hd/videos/installed/`
+gk3hd videos verify           # Verify installed videos, codecs and original source identities
+gk3hd videos uninstall        # Remove replacements and codecs, leaving originals untouched
 ```
+
+These commands discover GK3 automatically and keep every video stage under
+`gk3hd/videos/` in the game directory: source files in `original/`, release-ready
+videos in `upscaled/`, player builds in `player/`, and game-ready files in `installed/`.
+Apply the recommended game patches before playing replacement videos.
 
 Extraction is optional: `upscale` uses the originals in `Data/` if no extracted
 folder exists. Use `--video intro.bik` to process one video, or repeat
@@ -225,34 +227,34 @@ to publish to PyPI. Keep older asset releases available for pinned packs and ren
 > Cinematic comparisons alternate between original frames and their 4× upscales.
 > Open an image to inspect it at full resolution.
 
-[![Gabriel's hotel room](gallery/r25-110a-fr_du1.webp)](gallery/r25-110a-fr_du1.webp?raw=true)
+[![Gabriel's hotel room](gallery/r25-110a-fr_du1.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/r25-110a-fr_du1.webp)
 
-[![Gabriel in his hotel room](gallery/r25-110a-gabriel_portrait.webp)](gallery/r25-110a-gabriel_portrait.webp?raw=true)
+[![Gabriel in his hotel room](gallery/r25-110a-gabriel_portrait.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/r25-110a-gabriel_portrait.webp)
 
-[![Jean, the guest book and the painting](gallery/lby-110a-jean_desk.webp)](gallery/lby-110a-jean_desk.webp?raw=true)
+[![Jean, the guest book and the painting](gallery/lby-110a-jean_desk.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/lby-110a-jean_desk.webp)
 
-[![Hotel room-number buzzers](gallery/lby-110a-all_buzzers.webp)](gallery/lby-110a-all_buzzers.webp?raw=true)
+[![Hotel room-number buzzers](gallery/lby-110a-all_buzzers.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/lby-110a-all_buzzers.webp)
 
-[![Mosely and Gabriel in the hotel dining room](gallery/din-110a-breakfast_near.webp)](gallery/din-110a-breakfast_near.webp?raw=true)
+[![Mosely and Gabriel in the hotel dining room](gallery/din-110a-breakfast_near.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/din-110a-breakfast_near.webp)
 
-[![Gabriel and the mopeds in the courtyard](gallery/mop-110a-fr_rc1.webp)](gallery/mop-110a-fr_rc1.webp?raw=true)
+[![Gabriel and the mopeds in the courtyard](gallery/mop-110a-fr_rc1.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/mop-110a-fr_rc1.webp)
 
-[![Postcard tower and museum hallway](gallery/ms2-110a-postcards_hall.webp)](gallery/ms2-110a-postcards_hall.webp?raw=true)
+[![Postcard tower and museum hallway](gallery/ms2-110a-postcards_hall.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/ms2-110a-postcards_hall.webp)
 
-[![Lady Howard, Estelle and the museum panels](gallery/ms3-110a-visitors_panels.webp)](gallery/ms3-110a-visitors_panels.webp?raw=true)
+[![Lady Howard, Estelle and the museum panels](gallery/ms3-110a-visitors_panels.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/ms3-110a-visitors_panels.webp)
 
-[![The fountain with the hotel behind it](gallery/rc1-110a-fountain_hotel.webp)](gallery/rc1-110a-fountain_hotel.webp?raw=true)
+[![The fountain with the hotel behind it](gallery/rc1-110a-fountain_hotel.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/rc1-110a-fountain_hotel.webp)
 
-[![The bookstore beside the hotel](gallery/rc1-110a-bookstore_front.webp)](gallery/rc1-110a-bookstore_front.webp?raw=true)
+[![The bookstore beside the hotel](gallery/rc1-110a-bookstore_front.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/rc1-110a-bookstore_front.webp)
 
-[![An email in SIDNEY](gallery/sidney-email.webp)](gallery/sidney-email.webp?raw=true)
+[![An email in SIDNEY](gallery/sidney-email.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/sidney-email.webp)
 
-[![Driving map with Rennes-le-Chateau highlighted](gallery/driving-map-rennes-le-chateau-hover.webp)](gallery/driving-map-rennes-le-chateau-hover.webp?raw=true)
+[![Driving map with Rennes-le-Chateau highlighted](gallery/driving-map-rennes-le-chateau-hover.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/driving-map-rennes-le-chateau-hover.webp)
 
-[![Stranger close-up in the intro cinematic](gallery/intro-stranger-close-up.webp)](gallery/intro-stranger-close-up.webp?raw=true)
+[![Stranger close-up in the intro cinematic](gallery/intro-stranger-close-up.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/intro-stranger-close-up.webp)
 
-[![Lantern in the alley in the intro cinematic](gallery/intro-lantern-in-the-alley.webp)](gallery/intro-lantern-in-the-alley.webp?raw=true)
+[![Lantern in the alley in the intro cinematic](gallery/intro-lantern-in-the-alley.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/intro-lantern-in-the-alley.webp)
 
-[![Garden in the intro cinematic](gallery/intro-garden.webp)](gallery/intro-garden.webp?raw=true)
+[![Garden in the intro cinematic](gallery/intro-garden.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/intro-garden.webp)
 
-[![Sierra logo blue wireframe](gallery/sierra-blue-wireframe.webp)](gallery/sierra-blue-wireframe.webp?raw=true)
+[![Sierra logo blue wireframe](gallery/sierra-blue-wireframe.webp)](https://raw.githubusercontent.com/lsorber/gk3hd/refs/heads/main/gallery/sierra-blue-wireframe.webp)
