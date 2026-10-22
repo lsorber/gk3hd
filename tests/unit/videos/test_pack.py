@@ -116,7 +116,7 @@ def test_default_install_downloads_pinned_pack_and_reuses_it_offline(
     assert not install_pack(game, PackRequest(cache=request.cache, offline=True)).changed
     assert len(requests) == len(archives)
     MovieInstaller().uninstall(game)
-    cached = next((tmp_path / "cache").rglob("*.zip"))
+    cached = next((tmp_path / "cache" / "videos").rglob(archives[0].name))
     cached.write_bytes(b"changed")
     with pytest.raises(ValueError, match="missing or changed"):
         install_pack(game, PackRequest(cache=request.cache, offline=True))
