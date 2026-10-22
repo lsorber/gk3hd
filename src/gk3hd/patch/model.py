@@ -67,6 +67,7 @@ class MutableExecutable(Protocol):
         """Overwrite an exact byte range in the image."""
 
 
+@dataclass(frozen=True, slots=True)
 class PatchOperation(ABC):
     """Self-validating executable mutation compiled by a patch definition."""
 

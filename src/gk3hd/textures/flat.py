@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
 
 class FlatNameError(RuntimeError):
@@ -39,7 +39,7 @@ def actual_files(directory: Path, *, suffix: str) -> dict[str, Path]:
 
 
 @contextmanager
-def protect_short_name_alias(destination: Path) -> Iterator[None]:
+def protect_short_name_alias(destination: Path) -> Generator[None]:
     """Temporarily move an alias owner while creating one literal GK3 name."""
     # An alias resolves to an existing file. Fresh names therefore cannot hide
     # an owner, and need no full directory scan (important for complete packs).

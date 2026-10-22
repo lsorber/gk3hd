@@ -45,11 +45,7 @@ def resampling_result(
     disappear from the review. Run the production upscaler first.
     """
     from gk3hd.textures.upscale.alpha_guard import alpha_result_method  # noqa: PLC0415
-    from gk3hd.textures.upscale.generation import (  # noqa: PLC0415
-        ALPHA_STAMP,
-        GENERATION_STAMP,
-        generation_stamp,
-    )
+    from gk3hd.textures.upscale.generation import ALPHA_STAMP, GENERATION_STAMP, generation_stamp  # noqa: PLC0415
     from gk3hd.textures.upscale.pipeline import is_current_alpha_output  # noqa: PLC0415
 
     plan = plan_texture(features)

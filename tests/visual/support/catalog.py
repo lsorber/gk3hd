@@ -22,7 +22,7 @@ class SuiteSize(StrEnum):
     LARGE = "large"
 
     @property
-    def count(self) -> int:
+    def scene_count(self) -> int:
         """Number of world views and UI states in this coverage tier."""
         return {self.SMALL: 12, self.MEDIUM: 25, self.LARGE: 100}[self]
 
@@ -59,7 +59,9 @@ def scenes(size: SuiteSize = SuiteSize.SMALL) -> tuple[Scene, ...]:
     result = tuple(
         Scene(*row[:7], pose=tuple(row[7]) if len(row) > 7 else None) for row in payload["scenes"]
     )
-    if len(result) != SuiteSize.LARGE.count or len({scene.name for scene in result}) != len(result):
+    if len(result) != SuiteSize.LARGE.scene_count or len({scene.name for scene in result}) != len(
+        result
+    ):
         msg = "visual catalog must have exactly 100 unique scene recipes"
         raise ValueError(msg)
     for scene in result:
@@ -76,7 +78,7 @@ def scenes(size: SuiteSize = SuiteSize.SMALL) -> tuple[Scene, ...]:
         ):
             msg = f"invalid scene recipe: {scene}"
             raise ValueError(msg)
-    return result[: size.count]
+    return result[: size.scene_count]
 
 
 def camera_coordinates(payload: str, scene: Scene) -> tuple[float, ...]:

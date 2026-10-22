@@ -343,10 +343,7 @@ def _upscale_guarded_alpha(
     image: Image.Image, upscaler: ColorUpscaler, *, periodic: bool, padding: int
 ) -> Image.Image:
     """Infer scalar coverage, then use Lanczos if the shape guard rejects it."""
-    from gk3hd.textures.upscale.alpha_guard import (  # noqa: PLC0415
-        ALPHA_GUARD_VERSION,
-        alpha_rejection_reasons,
-    )
+    from gk3hd.textures.upscale.alpha_guard import ALPHA_GUARD_VERSION, alpha_rejection_reasons  # noqa: PLC0415
     from gk3hd.textures.upscale.generation import ALPHA_STAMP  # noqa: PLC0415
 
     candidate = _upscale_color(
@@ -373,10 +370,7 @@ def is_current_alpha_output(
     original: Image.Image, candidate: Image.Image, *, periodic: bool
 ) -> bool:
     """Recheck guarded AI or exact fallback pixels without repeating inference."""
-    from gk3hd.textures.upscale.alpha_guard import (  # noqa: PLC0415
-        alpha_rejection_reasons,
-        alpha_result_method,
-    )
+    from gk3hd.textures.upscale.alpha_guard import alpha_rejection_reasons, alpha_result_method  # noqa: PLC0415
 
     rgb = np.asarray(candidate.convert("RGB"))
     if not np.array_equal(rgb[:, :, 0], rgb[:, :, 1]) or not np.array_equal(

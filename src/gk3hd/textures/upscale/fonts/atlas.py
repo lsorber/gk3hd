@@ -348,9 +348,7 @@ def regenerate_font_atlas(source: Path, *, scale: int = SCALE) -> Image.Image:
     primary, alpha = _load_font_sources(source, recipe)
     cells = parse_glyph_cells(primary, recipe)
     if recipe.coverage_baseline is not None:
-        from gk3hd.textures.upscale.fonts.reconstruction import (  # noqa: PLC0415
-            reconstruct_alpha_font,
-        )
+        from gk3hd.textures.upscale.fonts.reconstruction import reconstruct_alpha_font  # noqa: PLC0415
 
         if alpha is None:
             msg = f"{source.name}: paired reconstruction requires an opacity companion"
@@ -395,9 +393,7 @@ def regenerate_font_atlas(source: Path, *, scale: int = SCALE) -> Image.Image:
         "SID_PDN_16.BMP",
         "F_TEMPUS_A10.BMP",
     }:
-        from gk3hd.textures.upscale.fonts.reconstruction import (  # noqa: PLC0415
-            reconstruct_coverage_font,
-        )
+        from gk3hd.textures.upscale.fonts.reconstruction import reconstruct_coverage_font  # noqa: PLC0415
 
         return reconstruct_coverage_font(source, primary, reference, recipe)
     return reference
@@ -434,15 +430,11 @@ def _load_font_sources(
             raise ValueError(msg)
         return paired_repair(primary, alpha, recipe)
     if recipe.primary == "TIMES_R_U_14.BMP":
-        from gk3hd.textures.upscale.fonts.layout import (  # noqa: PLC0415
-            repair_times_replacement_anchor,
-        )
+        from gk3hd.textures.upscale.fonts.layout import repair_times_replacement_anchor  # noqa: PLC0415
 
         return repair_times_replacement_anchor(primary, recipe), alpha
     if recipe.primary in {"TIMES_B_U_12.BMP", "TIMES_B_U_14.BMP"}:
-        from gk3hd.textures.upscale.fonts.layout import (  # noqa: PLC0415
-            repair_times_underline_layout,
-        )
+        from gk3hd.textures.upscale.fonts.layout import repair_times_underline_layout  # noqa: PLC0415
 
         return repair_times_underline_layout(primary, recipe), alpha
     if recipe.primary == "SID_CAP_16.BMP":

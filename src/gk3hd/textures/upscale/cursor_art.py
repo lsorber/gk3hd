@@ -47,10 +47,7 @@ def regenerate_cursor_art(image: Image, name: str) -> Image:
     """
     from PIL import Image as PillowImage  # noqa: PLC0415
 
-    from gk3hd.textures.upscale.pipeline import (  # noqa: PLC0415
-        resample_keyed_art,
-        resample_monotone_art,
-    )
+    from gk3hd.textures.upscale.pipeline import resample_keyed_art, resample_monotone_art  # noqa: PLC0415
 
     normalized = name.upper()
     layouts = CURSOR_ART_FRAMES | CURSOR_OPACITY_FRAMES

@@ -20,7 +20,7 @@ from gk3hd.patch.install.windows import is_gk3_running
 from gk3hd.system.locking import ExclusiveFileLock, executable_lock_path
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
     from pathlib import Path
 
 _KEY_UP: Final = 0x0002
@@ -65,7 +65,7 @@ class CaptureError(RuntimeError):
 
 
 @contextmanager
-def capture_session(executable: Path) -> Iterator[None]:
+def capture_session(executable: Path) -> Generator[None]:
     """Exclude installers and other captures before touching game state.
 
     Fail immediately if a game is already running. Captures temporarily

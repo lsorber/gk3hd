@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 from tests.visual.support.runs import merge_captures
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator
     from concurrent.futures import Future
     from pathlib import Path
 
@@ -29,7 +29,7 @@ _WEBP_QUALITY: Final = 95
 
 
 @contextmanager
-def frame_writer() -> Iterator[Callable[[Image.Image, Path], None]]:
+def frame_writer() -> Generator[Callable[[Image.Image, Path], None]]:
     """Encode captures off the input path, with bounded memory and joined failures."""
     pending: deque[Future[None]] = deque()
     with ThreadPoolExecutor(max_workers=_MAX_PENDING_FRAMES) as executor:

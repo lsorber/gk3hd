@@ -533,10 +533,7 @@ def _compose_driving_map(
     overlays: Sequence[tuple[Path, Path]],
 ) -> None:
     """Write a coherent opaque location set from the one generated HD base."""
-    from gk3hd.textures.upscale.driving_map import (  # noqa: PLC0415
-        BASE_NAME,
-        compose_driving_map_overlay,
-    )
+    from gk3hd.textures.upscale.driving_map import BASE_NAME, compose_driving_map_overlay  # noqa: PLC0415
 
     base_source = source_directory / BASE_NAME
     base_output = output_directory / f"{Path(BASE_NAME).stem}.PNG"
@@ -594,10 +591,7 @@ def _is_current_driving_map_output(source: Path, destination: Path) -> bool:
     """Reject independently generated map patches left by an older pipeline."""
     import numpy as np  # noqa: PLC0415
 
-    from gk3hd.textures.upscale.driving_map import (  # noqa: PLC0415
-        BASE_NAME,
-        compose_driving_map_overlay,
-    )
+    from gk3hd.textures.upscale.driving_map import BASE_NAME, compose_driving_map_overlay  # noqa: PLC0415
 
     base_source = source.with_name(BASE_NAME)
     base_output = destination.with_name(f"{Path(BASE_NAME).stem}.PNG")
@@ -644,11 +638,7 @@ def _has_current_key_mask(source: Path, destination: Path, *, periodic: bool) ->
     """Reject resumable keyed PNGs produced by the former block mask."""
     import numpy as np  # noqa: PLC0415
 
-    from gk3hd.textures.upscale.pipeline import (  # noqa: PLC0415
-        KEY_COLOR,
-        alpha_test_mask,
-        upscale_key_mask,
-    )
+    from gk3hd.textures.upscale.pipeline import KEY_COLOR, alpha_test_mask, upscale_key_mask  # noqa: PLC0415
 
     with Image.open(source) as original, Image.open(destination) as candidate:
         source_rgb = np.asarray(original.convert("RGB"), dtype=np.uint8)

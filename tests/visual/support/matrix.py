@@ -46,7 +46,7 @@ from tests.visual.support.windows import (
 
 if TYPE_CHECKING:
     import subprocess
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator
     from pathlib import Path
 
     from PIL.Image import Image
@@ -160,7 +160,7 @@ class _SaveFrameRequest:
 
 
 @contextlib.contextmanager
-def _reference_capture_context(executable: Path) -> Iterator[Path]:
+def _reference_capture_context(executable: Path) -> Generator[Path]:
     """Keep the installed renderer; compare authored geometry and original assets."""
     with (
         _reference_executable(executable) as reference_executable,
@@ -677,7 +677,7 @@ def _raise_for_error_dialog(process_id: int) -> None:
 
 
 @contextlib.contextmanager
-def _reference_executable(installed: Path) -> Iterator[Path]:
+def _reference_executable(installed: Path) -> Generator[Path]:
     backup = installed.with_name(installed.name + ".bak")
     if not backup.is_file():
         message = (
@@ -729,7 +729,7 @@ def _reference_executable(installed: Path) -> Iterator[Path]:
 
 
 @contextlib.contextmanager
-def _temporary_reference_quality(*, original: bool = False) -> Iterator[None]:
+def _temporary_reference_quality(*, original: bool = False) -> Generator[None]:
     """Use maximum quality and default gamma during a comparison, then restore."""
     previous: list[_OptionalRegistryValue] = []
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _HARDWARE_KEY) as key:
@@ -758,7 +758,7 @@ def _temporary_reference_quality(*, original: bool = False) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _temporary_appcompat(executable: Path, *, graphics_backend: GraphicsBackend) -> Iterator[None]:
+def _temporary_appcompat(executable: Path, *, graphics_backend: GraphicsBackend) -> Generator[None]:
     name = str(executable.resolve())
     previous: tuple[str, int] | None = None
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _APP_COMPAT_KEY) as key:
@@ -790,7 +790,7 @@ def _temporary_appcompat(executable: Path, *, graphics_backend: GraphicsBackend)
 
 
 @contextlib.contextmanager
-def _isolated_save(game_dir: Path, source: Path) -> Iterator[None]:
+def _isolated_save(game_dir: Path, source: Path) -> Generator[None]:
     staged: list[tuple[Path, Path]] = []
     # The original executable only restores numbered native save slots even
     # though patched builds can enumerate arbitrary ``*.gk3`` names.

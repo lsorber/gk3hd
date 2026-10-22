@@ -30,10 +30,7 @@ def create_backend(
     """Import optional dependencies only when local movie inference is requested."""
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="CUDA is not available or torch_xla is imported")
-        from gk3hd.textures.upscale.seedvr2 import (  # noqa: PLC0415 - optional AI dependencies.
-            SeedVR2Config,
-            SeedVR2Upscaler,
-        )
+        from gk3hd.textures.upscale.seedvr2 import SeedVR2Config, SeedVR2Upscaler  # noqa: PLC0415 - optional AI dependencies.
     return SeedVR2Upscaler(
         SeedVR2Config(
             device=device,

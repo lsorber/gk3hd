@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import lzokay
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator
     from typing import BinaryIO
 
 _BARN_MAGIC = b"GK3!Barn"
@@ -144,7 +144,7 @@ class BarnArchive:
         return _decompress(packed, entry)
 
     @contextmanager
-    def reader(self) -> Iterator[Callable[[BarnEntry], bytes]]:
+    def reader(self) -> Generator[Callable[[BarnEntry], bytes]]:
         """Map every referenced Barn once and yield a thread-safe entry reader.
 
         Extraction touches thousands of small assets. Reopening a multi-gigabyte

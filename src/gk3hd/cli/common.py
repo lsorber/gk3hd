@@ -32,7 +32,7 @@ from gk3hd.system.discovery import discover_game
 from gk3hd.textures.workspace import texture_workspace_directory
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator
 
     from rich.progress import Task
 
@@ -132,7 +132,7 @@ def _texture_stage(
 
 
 @contextmanager
-def _texture_install_progress() -> Iterator[
+def _texture_install_progress() -> Generator[
     tuple[Progress, Callable[[TaskID, TextureInstallProgress], None]]
 ]:
     progress = Progress(

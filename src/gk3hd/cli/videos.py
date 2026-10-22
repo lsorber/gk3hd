@@ -96,10 +96,7 @@ def videos_upscale(
     """Restore selected videos with SeedVR2 and preserve original audio."""
     try:
         # Listing and installation do not need PyAV or Torch.
-        from gk3hd.videos.service import (  # noqa: PLC0415 - optional video codecs.
-            MovieUpscaleOptions,
-            upscale_movies,
-        )
+        from gk3hd.videos.service import MovieUpscaleOptions, upscale_movies  # noqa: PLC0415 - optional video codecs.
         from gk3hd.videos.video import restoration_pipeline  # noqa: PLC0415 - optional codecs.
 
         options = MovieUpscaleOptions(clip_frames=clip_frames, restoration_strength=strength)

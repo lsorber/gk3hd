@@ -33,7 +33,7 @@ from gk3hd.videos.pack import build_pack as build_video_pack
 from gk3hd.videos.pack import release_archives
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -223,7 +223,7 @@ def _pack(version: str) -> tuple[Path, ...]:
 
 
 @contextmanager
-def _restore_metadata_on_error(paths: tuple[Path, ...]) -> Iterator[None]:
+def _restore_metadata_on_error(paths: tuple[Path, ...]) -> Generator[None]:
     """Undo local preparation on failure, before any release commit or tag exists."""
     original = {path: path.read_bytes() if path.exists() else None for path in paths}
     try:

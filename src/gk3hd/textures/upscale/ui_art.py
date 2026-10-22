@@ -564,10 +564,7 @@ def regenerate_ui_art(source: Path) -> Image:
 def _resample_detailed_art(original: Image, name: str) -> Image:
     """Select the measured sampling contract for cursor, menu and lettered art."""
     from gk3hd.textures.upscale.menu_art import resample_menu_art  # noqa: PLC0415
-    from gk3hd.textures.upscale.pipeline import (  # noqa: PLC0415
-        resample_keyed_art,
-        resample_monotone_art,
-    )
+    from gk3hd.textures.upscale.pipeline import resample_keyed_art, resample_monotone_art  # noqa: PLC0415
 
     if name in CURSOR_ART_SIZES or name in CURSOR_OPACITY_SIZES:
         return regenerate_cursor_art(original, name)
