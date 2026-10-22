@@ -69,6 +69,7 @@ class MovieInstaller:
         *,
         player: Path | None = None,
         progress: MovieProgress | None = None,
+        pack_identity: str | None = None,
     ) -> MovieInstallReport:
         """Install or update a complete verified set through an atomic directory swap."""
         target = discover_game(game_dir=game_dir)
@@ -93,6 +94,7 @@ class MovieInstaller:
                 tuple(
                     item.identity for item in resources if isinstance(item.identity, PlayerResource)
                 ),
+                pack_identity,
             )
             if after == before:
                 return MovieInstallReport(len(after.files), directory, changed=False)

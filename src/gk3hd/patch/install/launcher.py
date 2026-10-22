@@ -89,7 +89,7 @@ def decode_launcher(value: str) -> bytes:
 def validate_launcher_change(exe: Path, change: ExternalChange) -> None:
     """Reject arbitrary executable bytes or paths supplied through a manifest."""
     launcher_path(exe, change.key)
-    if change.previous is None:
+    if change.previous is None or change.installed is None:
         message = "Steam launcher transaction has no original executable"
         raise ValueError(message)
     original = decode_launcher(change.previous)

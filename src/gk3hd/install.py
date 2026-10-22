@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Self
 
 import gk3hd.textures.install.service as texture_install
+from gk3hd.patch.manifest import PatchManifest, manifest_path_for_exe
 from gk3hd.patch.service import PatchRequest, PatchService
 from gk3hd.renderer.service import RendererService
 from gk3hd.renderer.state import STATE_FILENAME as RENDERER_STATE_FILENAME
@@ -17,6 +18,7 @@ from gk3hd.textures.progress import report_install_progress
 from gk3hd.videos.install import MovieInstaller
 from gk3hd.videos.manifest import STATE_FILENAME as VIDEO_STATE_FILENAME
 from gk3hd.videos.pack import PackRequest, install_pack
+from gk3hd.videos.pack import prefetch as prefetch_videos
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -67,6 +69,15 @@ class _CompositeJournal:
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             msg = f"cannot read composite recovery journal {path.name}: {exc}"
             raise CompositeInstallError(msg) from exc
+        # Published pre-video installers recorded three booleans. They never
+        # owned videos, so their recovery must leave any video installation alone.
+        if isinstance(payload, dict) and payload.get("schema_version") == 1:
+            names = ("renderer", "patch", "textures")
+            if all(isinstance(payload.get(f"{name}_existed"), bool) for name in names):
+                return cls(
+                    root,
+                    frozenset({"videos", *(name for name in names if payload[f"{name}_existed"])}),
+                )
         valid = (
             isinstance(payload, dict)
             and payload.get("schema_version") == _SCHEMA
@@ -91,6 +102,11 @@ def install(
     target = discover_game(game_dir=patch_request.game_dir, exe=patch_request.exe)
     recover(exe=target.exe)
     patch_service = PatchService()
+    patch_request = _select_patches(patch_request, target.exe)
+    texture_request = replace(texture_request, game_dir=None, exe=target.exe)
+    video_request = video_request or PackRequest(
+        cache=texture_request.cache_dir, offline=texture_request.offline
+    )
     existing = {
         name
         for name, filename in (
@@ -103,39 +119,36 @@ def install(
     if patch_service.status(exe=target.exe).installed:
         existing.add("patch")
     journal = _CompositeJournal(target.game_dir, frozenset(existing))
-    journal.write()
     changed = existing != _COMPONENTS
-
-    def renderer_progress(completed: int, total: int | None) -> None:
-        report_install_progress(progress, "Downloading renderer", completed, total, unit="bytes")
 
     def video_progress(name: str, completed: int, total: int) -> None:
         report_install_progress(progress, name, completed, total, unit="bytes")
 
+    # Resolve all required downloads and compile the patch plan before changing
+    # installed components. Each replacement has its own recovery boundary;
+    # already completed updates survive later failures and are reused on retry.
+    renderer = RendererService()
+    renderer_dll = _prefetch(patch_request, texture_request, video_request, progress=progress)
+    renderer_path = target.game_dir / RENDERER_STATE_FILENAME
+    renderer_before = renderer_path.read_bytes() if renderer_path.is_file() else None
+    journal.write()
+
     try:
-        if "renderer" not in existing:
-            report_install_progress(progress, "Installing renderer", 0, 1)
-            RendererService().install(exe=target.exe, progress=renderer_progress)
-            report_install_progress(progress, "Installing renderer", 1, 1)
+        report_install_progress(progress, "Installing renderer", 0, 1)
+        renderer.install(exe=target.exe, dll=renderer_dll)
+        changed |= renderer_before != renderer_path.read_bytes()
+        report_install_progress(progress, "Installing renderer", 1, 1)
         report_install_progress(progress, "Verifying renderer", 0, 1)
         RendererService().verify(exe=target.exe)
         report_install_progress(progress, "Verifying renderer", 1, 1)
-        if "patch" not in existing:
-            report_install_progress(progress, "Installing patches", 0, 1)
-            patch_service.install(replace(patch_request, game_dir=None, exe=target.exe))
-            report_install_progress(progress, "Installing patches", 1, 1)
-        if "textures" not in existing:
-            texture_install.install(
-                replace(texture_request, game_dir=None, exe=target.exe),
-                progress=progress,
-            )
-        if "videos" not in existing:
-            install_pack(
-                target.game_dir,
-                video_request
-                or PackRequest(cache=texture_request.cache_dir, offline=texture_request.offline),
-                progress=video_progress,
-            )
+        report_install_progress(progress, "Installing patches", 0, 1)
+        patch_update = patch_service.install(patch_request)
+        changed |= patch_update.changed
+        report_install_progress(progress, "Installing patches", 1, 1)
+        texture_update = texture_install.install(texture_request, progress=progress)
+        changed |= texture_update.changed
+        video_update = install_pack(target.game_dir, video_request, progress=video_progress)
+        changed |= video_update.changed
         report_install_progress(progress, "Verifying patches", 0, 1)
         patch_report = patch_service.verify(exe=target.exe)
         report_install_progress(progress, "Verifying patches", 1, 1)
@@ -153,6 +166,48 @@ def install(
     return CompositeReport(
         len(patch_report.patches), texture_report.textures, video_report.videos, changed
     )
+
+
+def _select_patches(request: PatchRequest, exe: Path) -> PatchRequest:
+    """Keep a custom selection unless the caller explicitly chooses a group."""
+    request = replace(request, game_dir=None, exe=exe)
+    if request.group is not None or request.patches:
+        return request
+    path = manifest_path_for_exe(exe)
+    previous = PatchManifest.from_path(path) if path.is_file() else None
+    return replace(
+        request,
+        group=previous.profile if previous else "recommended",
+        patches=previous.patches if previous and previous.profile is None else (),
+    )
+
+
+def _prefetch(
+    patch: PatchRequest,
+    textures: TextureInstallRequest,
+    videos: PackRequest,
+    *,
+    progress: TextureInstallProgressCallback | None,
+) -> Path:
+    """Fail on unavailable assets or an invalid plan before touching installed files."""
+    target = discover_game(game_dir=patch.game_dir, exe=patch.exe)
+    PatchService().prepare(patch)
+    renderer = RendererService().prefetch(
+        exe=target.exe,
+        offline=textures.offline,
+        progress=lambda completed, total: report_install_progress(
+            progress, "Downloading renderer", completed, total, unit="bytes"
+        ),
+    )
+    texture_install.prefetch(textures, progress=progress)
+    prefetch_videos(
+        target.game_dir,
+        videos,
+        progress=lambda name, completed, total: report_install_progress(
+            progress, name, completed, total, unit="bytes"
+        ),
+    )
+    return renderer
 
 
 def recover(*, game_dir: Path | None = None, exe: Path | None = None) -> bool:

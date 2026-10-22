@@ -121,6 +121,7 @@ class MovieState:
 
     files: tuple[MovieFile, ...]
     resources: tuple[PlayerResource, ...] = ()
+    pack_identity: str | None = None
 
     @property
     def inventory(self) -> tuple[MovieFile | PlayerResource, ...]:
@@ -134,6 +135,9 @@ class MovieState:
         ):
             msg = "empty or duplicate movie inventory"
             raise ValueError(msg)
+        if self.pack_identity is not None and not is_sha256(self.pack_identity):
+            msg = "invalid installed video-pack identity"
+            raise ValueError(msg)
 
     def to_dict(self) -> dict[str, object]:
         """Persist only relative names, never local source or cache paths."""
@@ -142,6 +146,7 @@ class MovieState:
             "directory": MOVIE_INSTALL_PATH,
             "files": [asdict(entry) for entry in self.files],
             "resources": [asdict(entry) for entry in self.resources],
+            "pack_identity": self.pack_identity,
         }
 
     @classmethod
@@ -159,6 +164,7 @@ class MovieState:
         return cls(
             tuple(MovieFile.from_dict(entry) for entry in value["files"]),
             tuple(PlayerResource.from_dict(entry) for entry in value.get("resources", [])),
+            value.get("pack_identity"),
         )
 
 

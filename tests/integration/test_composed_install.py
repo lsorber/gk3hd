@@ -22,6 +22,14 @@ def renderer_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Mock:
     state = tmp_path / installation.RENDERER_STATE_FILENAME
     renderer.install.side_effect = lambda **_kwargs: state.write_text("installed")
     renderer.uninstall.side_effect = lambda **_kwargs: state.unlink(missing_ok=True)
+
+    def prefetch(**options: object) -> Path:
+        callback = options.get("progress")
+        if callable(callback):
+            callback(5, 10)
+        return tmp_path / "renderer.dll"
+
+    renderer.prefetch.side_effect = prefetch
     monkeypatch.setattr(installation, "RendererService", lambda: renderer)
     return renderer
 
@@ -31,7 +39,13 @@ def video_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Mock:
     """Exercise composition ownership without downloading or decoding real videos."""
     videos = Mock()
     state = tmp_path / installation.VIDEO_STATE_FILENAME
-    videos.install.side_effect = lambda *_args, **_kwargs: state.write_text("installed")
+
+    def install_videos(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        changed = not state.is_file()
+        state.write_text("installed")
+        return SimpleNamespace(changed=changed)
+
+    videos.install.side_effect = install_videos
     videos.uninstall.side_effect = lambda *_args, **_kwargs: state.unlink(missing_ok=True)
 
     def verify(_game_dir: Path, **options: object) -> SimpleNamespace:
@@ -42,6 +56,8 @@ def video_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Mock:
 
     videos.verify.side_effect = verify
     monkeypatch.setattr(installation, "install_pack", videos.install)
+    monkeypatch.setattr(installation, "prefetch_videos", Mock())
+    videos.install.return_value = SimpleNamespace(changed=False)
     monkeypatch.setattr(
         installation, "MovieInstaller", Mock(return_value=videos, verify=videos.verify)
     )
@@ -70,16 +86,18 @@ def test_composed_failure_restores_only_new_components(
     patch = Mock()
     patch.status.return_value.installed = patch_existed
 
-    def install_patch(_request: PatchRequest) -> None:
+    def install_patch(_request: PatchRequest) -> SimpleNamespace:
         patch.status.return_value.installed = True
+        return SimpleNamespace(changed=True)
 
     patch.install.side_effect = install_patch
     patch.verify.side_effect = failure("verification interrupted")
     monkeypatch.setattr(installation, "PatchService", lambda: patch)
     textures = Mock()
 
-    def install_textures(_request: TextureInstallRequest, **_kwargs: object) -> None:
+    def install_textures(_request: TextureInstallRequest, **_kwargs: object) -> SimpleNamespace:
         texture_state.write_bytes(b"new")
+        return SimpleNamespace(changed=True)
 
     textures.install.side_effect = install_textures
     textures.uninstall.side_effect = lambda **_kwargs: texture_state.unlink()
@@ -88,18 +106,18 @@ def test_composed_failure_restores_only_new_components(
     with pytest.raises(failure, match="verification interrupted"):
         installation.install(PatchRequest(exe=exe), TextureInstallRequest(exe=exe))
 
-    assert patch.install.call_count == int(not patch_existed)
+    assert patch.install.call_count == 1
     assert patch.uninstall.call_count == int(not patch_existed)
-    assert textures.install.call_count == int(not textures_existed)
+    assert textures.install.call_count == 1
     assert textures.uninstall.call_count == int(not textures_existed)
-    assert video_adapter.install.call_count == int(not videos_existed)
+    assert video_adapter.install.call_count == 1
     assert video_adapter.uninstall.call_count == int(not videos_existed)
     assert video_state.exists() == videos_existed
     if videos_existed:
-        assert video_state.read_bytes() == b"existing"
+        assert video_state.read_bytes() == b"installed"
     assert texture_state.exists() == textures_existed
     if textures_existed:
-        assert texture_state.read_bytes() == b"existing"
+        assert texture_state.read_bytes() == b"new"
     assert not (tmp_path / installation.COMPOSITE_JOURNAL_FILENAME).exists()
 
 
@@ -161,22 +179,29 @@ def test_composed_install_reports_work_before_texture_conversion(
     texture_state = tmp_path / STATE_FILENAME
     updates: list[TextureInstallProgress] = []
 
-    def install_renderer(**kwargs: object) -> None:
+    def install_renderer(**_kwargs: object) -> None:
         renderer_state.write_text("installed")
-        callback = kwargs["progress"]
-        assert callable(callback)
-        callback(5, 10)
 
     renderer_adapter.install.side_effect = install_renderer
     patch = Mock()
     patch.status.return_value.installed = False
     patch.verify.return_value.patches = ("example",)
-    patch.install.side_effect = lambda _request: setattr(
-        patch.status.return_value, "installed", True
-    )
+
+    def install_patch(_request: PatchRequest) -> SimpleNamespace:
+        changed = not patch.status.return_value.installed
+        patch.status.return_value.installed = True
+        return SimpleNamespace(changed=changed)
+
+    patch.install.side_effect = install_patch
     monkeypatch.setattr(installation, "PatchService", lambda: patch)
     textures = Mock()
-    textures.install.side_effect = lambda *_args, **_kwargs: texture_state.write_text("installed")
+
+    def install_textures(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        changed = not texture_state.exists()
+        texture_state.write_text("installed")
+        return SimpleNamespace(changed=changed)
+
+    textures.install.side_effect = install_textures
     textures.verify.return_value.textures = 1
     monkeypatch.setattr(installation, "texture_install", textures)
 
@@ -197,10 +222,10 @@ def test_composed_install_reports_work_before_texture_conversion(
     assert TextureInstallProgress("Verifying videos", 10, 10, "bytes") == updates[-1]
     repeated = installation.install(PatchRequest(exe=exe), TextureInstallRequest(exe=exe))
     assert not repeated.changed
-    assert renderer_adapter.install.call_count == 1
-    assert patch.install.call_count == 1
-    assert textures.install.call_count == 1
-    assert video_adapter.install.call_count == 1
+    assert renderer_adapter.install.call_count == 2
+    assert patch.install.call_count == 2
+    assert textures.install.call_count == 2
+    assert video_adapter.install.call_count == 2
 
 
 def test_recovery_keeps_existing_components_and_removes_new_videos(
@@ -245,11 +270,19 @@ def test_video_failure_preserves_error_and_restores_new_components(
     exe.write_bytes(b"test")
     patch, textures = Mock(), Mock()
     patch.status.return_value.installed = False
-    patch.install.side_effect = lambda _request: setattr(
-        patch.status.return_value, "installed", True
-    )
+
+    def install_patch(_request: PatchRequest) -> SimpleNamespace:
+        patch.status.return_value.installed = True
+        return SimpleNamespace(changed=True)
+
+    patch.install.side_effect = install_patch
     state = tmp_path / STATE_FILENAME
-    textures.install.side_effect = lambda *_args, **_kwargs: state.write_bytes(b"new textures")
+
+    def install_textures(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        state.write_bytes(b"new textures")
+        return SimpleNamespace(changed=True)
+
+    textures.install.side_effect = install_textures
     textures.uninstall.side_effect = lambda **_kwargs: state.unlink()
     monkeypatch.setattr(installation, "PatchService", lambda: patch)
     monkeypatch.setattr(installation, "texture_install", textures)
@@ -267,3 +300,50 @@ def test_video_failure_preserves_error_and_restores_new_components(
     patch.uninstall.assert_called_once()
     renderer_adapter.uninstall.assert_called_once()
     assert not (tmp_path / installation.COMPOSITE_JOURNAL_FILENAME).exists()
+
+
+def test_missing_downloads_do_not_start_a_partial_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, renderer_adapter: Mock
+) -> None:
+    exe = tmp_path / "GK3.exe"
+    exe.write_bytes(b"test")
+    patch, textures = Mock(), Mock()
+    patch.status.return_value.installed = False
+    textures.prefetch.side_effect = ValueError("required texture pack is unavailable")
+    monkeypatch.setattr(installation, "PatchService", lambda: patch)
+    monkeypatch.setattr(installation, "texture_install", textures)
+    with pytest.raises(ValueError, match="unavailable"):
+        installation.install(PatchRequest(exe=exe), TextureInstallRequest(exe=exe))
+    patch.install.assert_not_called()
+    textures.install.assert_not_called()
+    renderer_adapter.install.assert_not_called()
+    assert exe.read_bytes() == b"test"
+    assert not (tmp_path / installation.COMPOSITE_JOURNAL_FILENAME).exists()
+
+
+@pytest.mark.parametrize("patch_existed", [False, True])
+def test_recovery_reads_pre_video_installer_journals_without_removing_videos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, video_adapter: Mock, patch_existed: bool
+) -> None:
+    exe = tmp_path / "GK3.exe"
+    exe.write_bytes(b"test")
+    (tmp_path / installation.VIDEO_STATE_FILENAME).write_bytes(b"unrelated video install")
+    journal = tmp_path / installation.COMPOSITE_JOURNAL_FILENAME
+    journal.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "renderer_existed": True,
+                "patch_existed": patch_existed,
+                "textures_existed": True,
+            }
+        )
+    )
+    patch = Mock()
+    patch.status.return_value.installed = patch_existed
+    monkeypatch.setattr(installation, "PatchService", lambda: patch)
+    monkeypatch.setattr(installation, "texture_install", Mock())
+    assert installation.recover(exe=exe)
+    video_adapter.uninstall.assert_not_called()
+    assert (tmp_path / installation.VIDEO_STATE_FILENAME).read_bytes() == b"unrelated video install"
+    assert not journal.exists()

@@ -31,7 +31,10 @@ from gk3hd.videos.runtime import (
     extract_codecs,
     inspect_player,
     local_player,
+    recipe_digest,
+    verify_codecs,
 )
+from gk3hd.videos.transaction import state_at
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -299,6 +302,44 @@ def obtain_pack(
     return tuple(results)
 
 
+def _identity(game_dir: Path, request: PackRequest) -> str:
+    """Identify the required pack and player without downloading video archives."""
+    lock = _local_lock(game_dir, request.selection) if request.local or request.selection else None
+    tag, archives = release_archives(
+        read_json(lock or Path(__file__).parents[1] / "assets" / LOCK_FILENAME)
+    )
+    return hashlib.sha256(
+        json_bytes(
+            {
+                "tag": tag,
+                "archives": [asdict(item) for item in archives],
+                "player": recipe_digest(),
+            }
+        )
+    ).hexdigest()
+
+
+def prefetch(
+    game_dir: Path, request: PackRequest, *, progress: MovieProgress | None = None
+) -> None:
+    """Validate downloads before a composed installation changes other components."""
+    before = state_at(game_dir)
+    if before is not None and before.pack_identity == _identity(game_dir, request):
+        return
+    obtain_pack(game_dir, request, progress=progress)
+    if request.offline:
+        verify_codecs(codec_cache(request.cache))
+    else:
+        download_codecs(
+            request.cache,
+            progress=(
+                lambda done, total: progress("Downloading playback codecs", done, total or done)
+            )
+            if progress
+            else None,
+        )
+
+
 def _member_name(name: str) -> str:
     path = PurePosixPath(name)
     if (
@@ -404,6 +445,10 @@ def install_pack(
     from gk3hd.videos.install import MovieInstaller  # noqa: PLC0415 - avoid installer cycle.
 
     request = request or PackRequest()
+    identity = _identity(game_dir, request)
+    before = state_at(game_dir)
+    if before is not None and before.pack_identity == identity:
+        return MovieInstaller.verify(game_dir, progress=progress)
     archives = obtain_pack(game_dir, request, progress=progress)
     root = movie_workspace(game_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -429,5 +474,9 @@ def install_pack(
         extract_codecs(codecs, directory / "player")
         inspect_player(directory / "player")
         return MovieInstaller().install(
-            game_dir, directory / "upscaled", player=directory / "player", progress=progress
+            game_dir,
+            directory / "upscaled",
+            player=directory / "player",
+            progress=progress,
+            pack_identity=identity,
         )

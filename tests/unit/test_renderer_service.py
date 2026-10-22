@@ -245,3 +245,46 @@ def test_corrupt_state_cannot_authorize_unrelated_changes(
     with pytest.raises(ValueError, match="unsupported"):
         renderer.uninstall(exe=exe)
     assert hashlib.sha256(exe.read_bytes()).digest() == hashlib.sha256(b"private fixture").digest()
+
+
+def test_unchanged_renderer_is_not_reinstalled_and_can_be_reused_offline(
+    environment: tuple[Path, RendererService, MemoryRegistry],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exe, renderer, _registry = environment
+    installed = renderer.install(exe=exe)
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in exe.parent.iterdir()}
+    assert renderer.install(exe=exe) == installed
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in exe.parent.iterdir()} == before
+    distribution.cached_path(installed.digest).unlink()
+    monkeypatch.setattr(service, "download", Mock(side_effect=AssertionError))
+    cached = renderer.prefetch(exe=exe, offline=True)
+    assert hashlib.sha256(cached.read_bytes()).hexdigest() == installed.digest
+
+
+def test_renderer_update_preserves_newer_registry_values_on_uninstall(
+    environment: tuple[Path, RendererService, MemoryRegistry], tmp_path: Path
+) -> None:
+    exe, renderer, registry = environment
+    renderer.install(exe=exe)
+    user_setting = json.dumps({"type": 1, "value": "~ HIGHDPIAWARE"})
+    registry.values[str(exe.resolve())] = user_setting
+    (tmp_path / "candidate.dll").write_bytes(_dll(b"updated renderer"))
+    renderer.install(exe=exe)
+    renderer.verify(exe=exe)
+    renderer.uninstall(exe=exe)
+    assert registry.values == {str(exe.resolve()): user_setting}
+
+
+def test_composite_rollback_can_remove_a_new_renderer_without_touching_existing_patches(
+    environment: tuple[Path, RendererService, MemoryRegistry],
+) -> None:
+    exe, renderer, _registry = environment
+    renderer.install(exe=exe)
+    manifest_path_for_exe(exe).write_bytes(b"preexisting patches")
+    exe.with_name(".gk3hd-install.json").write_text(
+        json.dumps({"schema_version": 2, "existing": ["patch", "textures", "videos"]})
+    )
+    renderer.uninstall(exe=exe, restoring_composite=True)
+    assert manifest_path_for_exe(exe).read_bytes() == b"preexisting patches"
+    assert not exe.with_name("ddraw.dll").exists()

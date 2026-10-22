@@ -55,6 +55,7 @@ def test_preparation_is_read_only_and_transaction_restores_exact_original(
     configuration = WindowsInstallConfiguration()
     configuration.apply(exe=exe, changes=(change,))
     configuration.verify(exe=exe, changes=(change,))
+    assert change.installed is not None
     assert path.read_bytes() == launcher.decode_launcher(change.installed)
     configuration.restore(exe=exe, changes=(change,), force=False)
     assert path.read_bytes() == _ORIGINAL

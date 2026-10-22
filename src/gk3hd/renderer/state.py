@@ -34,7 +34,11 @@ class RendererState:
     @property
     def digest(self) -> str:
         """Return the validated DLL identity."""
-        return next(change.installed[7:] for change in self.changes if change.key == "ddraw.dll")
+        return next(
+            change.installed[7:]
+            for change in self.changes
+            if change.key == "ddraw.dll" and change.installed is not None
+        )
 
     @classmethod
     def parse(cls, payload: object, *, exe: Path) -> RendererState:
@@ -70,6 +74,9 @@ class RendererState:
                 msg = "invalid renderer change"
                 raise ValueError(msg)
             change = ExternalChange(**row)
+            if change.installed is None:
+                msg_0 = "renderer installation values must not be null"
+                raise ValueError(msg_0)
             identity = (change.surface, change.key)
             if identity not in allowed or identity in seen:
                 msg = "unsupported or duplicate renderer target"

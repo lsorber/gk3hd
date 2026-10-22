@@ -42,6 +42,7 @@ class TexturePackSource:
 
     assets: tuple[TexturePackAsset, ...] = ()
     lock_path: Path | None = None
+    inventory_sha256: str | None = None
 
     @classmethod
     def local(cls, path: Path) -> TexturePackSource:
@@ -53,7 +54,11 @@ class TexturePackSource:
     @classmethod
     def from_lock(cls, payload: object) -> TexturePackSource:
         """Select all immutable remote assets declared by a release lock."""
-        return cls(assets=_assets_from_lock(payload, local_base=None))
+        inventory = payload.get("inventory_sha256") if isinstance(payload, dict) else None
+        return cls(
+            assets=_assets_from_lock(payload, local_base=None),
+            inventory_sha256=inventory if is_sha256(inventory) else None,
+        )
 
 
 def discover_local_texture_pack(

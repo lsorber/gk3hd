@@ -31,7 +31,7 @@ class ExternalChange:
     surface: str
     key: str
     previous: str | None
-    installed: str
+    installed: str | None
 
     def __post_init__(self) -> None:
         """Require one fully identified string-valued external mutation."""
@@ -41,7 +41,7 @@ class ExternalChange:
             or not isinstance(self.key, str)
             or not self.key
             or (self.previous is not None and not isinstance(self.previous, str))
-            or not isinstance(self.installed, str)
+            or (self.installed is not None and not isinstance(self.installed, str))
         ):
             detail = "external manifest change has invalid string fields"
             raise ManifestError(detail)

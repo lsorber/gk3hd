@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from gk3hd.system.discovery import find_ini
@@ -108,6 +108,41 @@ def apply_custom_path(game_dir: Path, change: IniChange, installed: bytes) -> No
         msg = "prepared GK3 INI bytes do not match their declared identity"
         raise IniError(msg)
     atomic_write(game_dir / change.filename, installed)
+
+
+def rebase_custom_path(
+    game_dir: Path, before: IniChange, after: IniChange, path_name: str
+) -> IniChange:
+    """Keep the original baseline, incorporating unrelated edits made since install."""
+    if installed_ini_matches(game_dir / before.filename, before):
+        return replace(after, previous_base64=before.previous_base64)
+    current = after.previous
+    if current is None:
+        return after
+    original_match = _CUSTOM_PATHS.search(before.previous or b"")
+    encoded = path_name.encode("ascii")
+    if original_match and encoded.lower() in {
+        value.strip().lower() for value in original_match.group(1).split(b";")
+    }:
+        return after
+    match = _CUSTOM_PATHS.search(current)
+    if match is None:
+        return after
+    values = [
+        value.strip()
+        for value in match.group(1).split(b";")
+        if value.strip() and value.strip().lower() != encoded.lower()
+    ]
+    if values or original_match is not None:
+        baseline = current[: match.start(1)] + b"; ".join(values) + current[match.end(1) :]
+    else:
+        end = match.end()
+        if current[end : end + 2] == b"\r\n":
+            end += 2
+        elif current[end : end + 1] == b"\n":
+            end += 1
+        baseline = current[: match.start()] + current[end:]
+    return replace(after, previous_base64=base64.b64encode(baseline).decode("ascii"))
 
 
 def restore_custom_path(game_dir: Path, change: IniChange, *, force: bool = False) -> None:
