@@ -27,6 +27,10 @@ from gk3hd.textures.workspace import (
     texture_pack_filename,
     texture_workspace_directory,
 )
+from gk3hd.videos.catalog import movie_workspace
+from gk3hd.videos.pack import LOCK_FILENAME as VIDEO_LOCK_FILENAME
+from gk3hd.videos.pack import build_pack as build_video_pack
+from gk3hd.videos.pack import release_archives
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -41,6 +45,7 @@ console = Console()
 _REPOSITORY = "lsorber/gk3hd"
 _LOCK = Path("src/gk3hd/assets/texture-pack-lock.json")
 _RENDERER_LOCK = Path("src/gk3hd/assets/d7vk-lock.json")
+_VIDEO_LOCK = Path("src/gk3hd/assets") / VIDEO_LOCK_FILENAME
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){1,2}")
 
 
@@ -144,16 +149,43 @@ def _verify_renderer_remote(lock: object, *, allow_draft: bool = False) -> None:
         raise ValueError(msg)
 
 
+def _verify_videos_remote(lock: object, *, allow_draft: bool = False) -> None:
+    """Require the default install's video assets to be published and intact."""
+    tag, archives = release_archives(lock)
+    release = _release_inventory(_REPOSITORY, tag)
+    if release.get("draft") and not allow_draft:
+        msg = "pinned videos are private draft assets; publish their release first"
+        raise ValueError(msg)
+    assets = release.get("assets")
+    if release.get("tag_name") != tag or not isinstance(assets, list):
+        msg = "invalid video release inventory"
+        raise ValueError(msg)
+    for archive in archives:
+        matches = [
+            item
+            for item in assets
+            if isinstance(item, dict) and item.get("name") == archive.filename
+        ]
+        if len(matches) != 1 or (
+            matches[0].get("state"),
+            matches[0].get("size"),
+            matches[0].get("digest"),
+        ) != ("uploaded", archive.size, "sha256:" + archive.sha256):
+            msg = f"video release asset is missing or changed: {archive.filename}"
+            raise ValueError(msg)
+
+
 @app.command("verify")
 def verify_assets() -> None:
-    """Refuse PyPI publication unless the pinned renderer and textures are available."""
+    """Require every asset used by the default install before publishing to PyPI."""
     try:
         _verify_remote(json.loads(_LOCK.read_text(encoding="utf-8")))
         _verify_renderer_remote(json.loads(_RENDERER_LOCK.read_text(encoding="utf-8")))
+        _verify_videos_remote(json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")))
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from exc
-    console.print("[green]All pinned renderer and texture assets match GitHub.[/]")
+    console.print("[green]All pinned release assets match GitHub.[/]")
 
 
 def _release_version(version: str | None) -> str:
@@ -218,7 +250,9 @@ def _release_notes(version: str) -> str:
     return entry[0].strip()
 
 
-def _prepare(version: str | None, *, textures: bool, renderer: Path | None = None) -> str:
+def _prepare(
+    version: str | None, *, textures: bool, renderer: Path | None = None, videos: bool = False
+) -> str:
     if _run("git", "status", "--porcelain", capture=True):
         msg = "commit your work first: release preparation requires a clean worktree"
         raise ValueError(msg)
@@ -230,10 +264,25 @@ def _prepare(version: str | None, *, textures: bool, renderer: Path | None = Non
     renderer_asset = inspect_dll(renderer) if renderer is not None else None
     if renderer_asset is None:
         _verify_renderer_remote(json.loads(_RENDERER_LOCK.read_text(encoding="utf-8")))
-    paths = (Path("pyproject.toml"), Path("uv.lock"), _LOCK, _RENDERER_LOCK, Path("CHANGELOG.md"))
+    if not videos:
+        _verify_videos_remote(json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")))
+    paths = (
+        Path("pyproject.toml"),
+        Path("uv.lock"),
+        _LOCK,
+        _RENDERER_LOCK,
+        _VIDEO_LOCK,
+        Path("CHANGELOG.md"),
+    )
     with _restore_metadata_on_error(paths):
         selected = _release_version(version)
         archives = _pack(selected) if textures else ()
+        if videos:
+            game_dir = discover_game().game_dir
+            archives += build_video_pack(game_dir, version=selected)
+            atomic_write(
+                _VIDEO_LOCK, (movie_workspace(game_dir) / VIDEO_LOCK_FILENAME).read_bytes()
+            )
         if renderer_asset is not None:
             atomic_write(
                 _RENDERER_LOCK,
@@ -277,6 +326,7 @@ def _prepare(version: str | None, *, textures: bool, renderer: Path | None = Non
     _verify_renderer_remote(
         json.loads(_RENDERER_LOCK.read_text(encoding="utf-8")), allow_draft=renderer is not None
     )
+    _verify_videos_remote(json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")), allow_draft=videos)
     return tag
 
 
@@ -299,6 +349,9 @@ def prepare(
     ] = None,
     *,
     textures: Annotated[bool, typer.Option(help="Build and attach a new texture pack.")] = False,
+    videos: Annotated[
+        bool, typer.Option(help="Pack and attach local upscaled videos and their verified player.")
+    ] = False,
     renderer: Annotated[
         bool, typer.Option(help="Attach the last verified local renderer build.")
     ] = False,
@@ -306,12 +359,12 @@ def prepare(
 ) -> None:
     """Check, commit, tag, push, and upload a gk3hd-version draft for review.
 
-    Reuse published assets unless --textures or --renderer is supplied.
+    Reuse published assets unless --textures, --renderer or --videos is supplied.
     Publishing the resulting GitHub draft triggers PyPI; this command does not.
     """
     try:
         candidate = _candidate(renderer=renderer, dll=dll)
-        tag = _prepare(version, textures=textures, renderer=candidate)
+        tag = _prepare(version, textures=textures, renderer=candidate, videos=videos)
     except (OSError, TypeError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from exc

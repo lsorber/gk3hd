@@ -211,8 +211,9 @@ def test_fixture_reuses_only_the_expected_native_recipe(
     fixture_path.parent.mkdir(parents=True)
     fixture_path.touch()
     fixture = SaveGame(fixture_path, special._FIXTURE_DESCRIPTION, "r25", "110a")
+    monkeypatch.setattr(special, "_interaction_fixture_path", lambda: fixture_path)
     monkeypatch.setattr(special, "read_save_game", Mock(return_value=fixture))
-    start = Mock()
+    start = Mock(side_effect=AssertionError("a cached fixture must not start the game"))
     monkeypatch.setattr(special, "launch", start)
     context = special._CaptureContext(
         executable=tmp_path / "GK3.exe",

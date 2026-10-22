@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from gk3hd.textures.upscale._offload import enable_block_offload
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
@@ -24,6 +26,108 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.filterwarnings("ignore:CUDA is not available or torch_xla is imported:UserWarning"),
 ]
+
+
+@pytest.mark.parametrize(("device", "expected_index"), [("cuda", None), ("cuda:2", 2)])
+def test_movie_memory_cap_accepts_default_and_explicit_gpu(
+    backend: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    expected_index: int | None,
+) -> None:
+    torch = backend.torch
+    limits: list[tuple[float, int | None]] = []
+    monkeypatch.setattr(backend, "_resolve_device", lambda _name: torch.device(device))
+    monkeypatch.setattr(backend, "_compute_dtype", lambda _device: torch.float16)
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_per_process_memory_fraction",
+        lambda fraction, index: limits.append((fraction, index)),
+    )
+    backend.SeedVR2Upscaler(backend.SeedVR2Config(gpu_memory_fraction=0.85))
+    assert limits == [(0.85, expected_index)]
+
+
+def test_stage_offloading_releases_inactive_weights_before_loading_active_weights(
+    backend: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch = backend.torch
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(backend, "_resolve_device", lambda _name: torch.device("cuda"))
+    monkeypatch.setattr(backend, "_compute_dtype", lambda _device: torch.float16)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append(("cache", "released")))
+
+    class Stage:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def to(self, *, device: object) -> None:
+            events.append((self.name, str(device)))
+
+    upscaler = backend.SeedVR2Upscaler(backend.SeedVR2Config(offload_inactive_models=True))
+    upscaler._dit, upscaler._vae = Stage("dit"), Stage("vae")
+    upscaler._activate_model("vae")
+    upscaler._activate_model("dit")
+    assert events == [
+        ("dit", "cpu"),
+        ("cache", "released"),
+        ("vae", "cuda"),
+        ("vae", "cpu"),
+        ("cache", "released"),
+        ("dit", "cuda"),
+    ]
+
+
+def test_block_offloading_does_not_change_forward_values_or_parameter_precision(
+    backend: ModuleType,
+) -> None:
+    torch = backend.torch
+
+    class Transformer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks = torch.nn.ModuleList([torch.nn.Linear(3, 3) for _ in range(2)])
+
+        def forward(self, value: Tensor) -> Tensor:
+            for block in self.blocks:
+                value = block(value)
+            return value
+
+    model = Transformer()
+    value = torch.tensor([[1.0, 2.0, 3.0]])
+    expected = model(value)
+    weights = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    enable_block_offload(model, torch.device("cpu"))
+    assert torch.equal(model(value), expected)
+    assert all(
+        torch.equal(parameter, weights[name]) for name, parameter in model.named_parameters()
+    )
+    assert all(parameter.dtype == torch.float32 for parameter in model.parameters())
+
+
+def test_block_offloading_preserves_gpu_inference_values(backend: ModuleType) -> None:
+    torch = backend.torch
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    class Transformer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks = torch.nn.ModuleList([torch.nn.Linear(8, 8) for _ in range(2)])
+
+        def forward(self, value: Tensor) -> Tensor:
+            for block in self.blocks:
+                value = block(value)
+            return value
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    with torch.inference_mode():
+        model = Transformer().to(device=device, dtype=torch.float16)
+        value = torch.ones((3, 8), device=device, dtype=torch.float16)
+        expected = model(value)
+        enable_block_offload(model, device)
+        assert torch.equal(model(value), expected)
+        assert all(parameter.device.type == "cpu" for parameter in model.parameters())
 
 
 def test_model_loading_pins_all_three_reviewed_assets(

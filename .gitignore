@@ -26,6 +26,13 @@ dist/
 *.pt
 *.pth
 *.safetensors
+*.avi
+*.bik
+*.mkv
+*.mp4
+*.ax
+*.obj
+*.lib
 *.ttf
 *.otf
 downloads/

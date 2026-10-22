@@ -1,0 +1,13 @@
+{
+  "version": "0.83",
+  "url": "https://github.com/Nevcairiel/LAVFilters/releases/download/0.83/LAVFilters-0.83-x86.zip",
+  "sha256": "8189505b593f25ff939f4a070135ec09f417d1d505012f79f43cbb247c7f21b2",
+  "size": 11312862,
+  "files": [
+    "LAVVideo.ax", "LAVAudio.ax", "LAVSplitter.ax",
+    "avcodec-lav-63.dll", "avformat-lav-63.dll", "avutil-lav-61.dll",
+    "avfilter-lav-12.dll", "swscale-lav-10.dll", "swresample-lav-7.dll",
+    "libbluray.dll", "IntelQuickSyncDecoder.dll",
+    "LAVFilters.Dependencies.manifest", "COPYING", "README.md", "CHANGELOG.txt"
+  ]
+}

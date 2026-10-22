@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import stat
+import tempfile
 from typing import TYPE_CHECKING
 
 import pytest
@@ -58,3 +59,51 @@ def test_atomic_write_never_truncates_target_when_replacement_is_denied(
 
     assert target.read_bytes() == b"original remains intact"
     assert list(tmp_path.glob(".GK3.exe.*.tmp")) == []
+
+
+def test_atomic_update_on_a_fixed_mode_mount_does_not_require_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unchanged mode must not prevent atomic replacement on shared mounts."""
+    target = tmp_path / "state.json"
+    target.write_bytes(b"old complete state")
+    desired = stat.S_IMODE(target.stat().st_mode)
+    create_temporary = tempfile.mkstemp
+    change_mode = type(target).chmod
+
+    def fixed_mode_temporary(*, prefix: str, suffix: str, **location: Path) -> tuple[int, str]:
+        descriptor, name = create_temporary(prefix=prefix, suffix=suffix, dir=location["dir"])
+        change_mode(type(target)(name), desired)
+        return descriptor, name
+
+    def unsupported_chmod(_path: Path, _mode: int) -> None:
+        message = "shared mount does not implement chmod"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(tempfile, "mkstemp", fixed_mode_temporary)
+    monkeypatch.setattr(type(target), "chmod", unsupported_chmod)
+    atomic_write(target, b"new complete state")
+    assert target.read_bytes() == b"new complete state"
+    assert stat.S_IMODE(target.stat().st_mode) == desired
+    assert list(tmp_path.glob(".state.json.*.tmp")) == []
+
+
+def test_denied_required_mode_change_preserves_the_previous_complete_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Do not mask a real permissions failure when a mode change is necessary."""
+    target = tmp_path / "state.json"
+    target.write_bytes(b"previous complete state")
+    target.chmod(0o640)
+    if stat.S_IMODE(target.stat().st_mode) != 0o640:
+        pytest.skip("filesystem does not expose POSIX group permissions")
+
+    def deny_chmod(_path: Path, _mode: int) -> None:
+        message = "required mode change denied"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(type(target), "chmod", deny_chmod)
+    with pytest.raises(PermissionError, match="required mode change denied"):
+        atomic_write(target, b"must not replace the old state")
+    assert target.read_bytes() == b"previous complete state"
+    assert list(tmp_path.glob(".state.json.*.tmp")) == []

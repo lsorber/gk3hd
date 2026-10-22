@@ -18,6 +18,7 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 - 🔍 Added support for and enabled anisotropic filtering by default
 - 🖼️ 99.63% of textures (>1024 pixels) upscaled at 4× resolution with [SeedVR2 3B](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
 - 🔤 90% of font atlases reconstructed at 4× resolution for sharper text
+- 🎬 Cinematics upscaled at 4× resolution, with a smoother 60 fps Sierra logo
 - 📍 Corrected location alignment with background on the driving map
 - 👁️ Corrected facial feature alignment for 4× textures
 - 🎨 Corrected gamma and colors to match the original game's native rendering
@@ -42,7 +43,7 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 Windows or on Linux with Steam and Proton:
 
 ```sh
-uvx gk3hd install  # Download & install renderer, patch `GK3.exe`, download & install textures
+uvx gk3hd install  # Install renderer, patch `GK3.exe`, and download/install textures and videos
 uvx gk3hd status
 uvx gk3hd uninstall
 ```
@@ -120,6 +121,44 @@ uv's automatic PyTorch backend selection uses a supported GPU when one is
 available and otherwise falls back to CPU. CPU upscaling works, but is much
 slower. Project checkouts select PyTorch's CUDA build on Windows automatically.
 
+### Extract, upscale, and install videos
+
+The default `gk3hd install` includes videos. Manage them independently with:
+
+```sh
+uvx gk3hd videos install    # Download videos and private codecs to `<GAME>/gk3hd/videos/installed/`
+uvx gk3hd videos verify     # Verify installed videos, codecs and original source identities
+uvx gk3hd videos uninstall  # Remove replacements and codecs, leaving originals untouched
+```
+
+Apply the recommended game patches before playing replacement videos.
+No system codecs, compiler or additional Python dependencies are needed to
+install a published pack on Windows or Linux/Proton.
+
+To generate a pack yourself, use the same `gk3hd[upscale]` tool installation as
+for textures:
+
+```sh
+gk3hd videos extract          # Copy original videos to `<GAME>/gk3hd/videos/original/`
+gk3hd videos upscale          # Restore cinematics at 4× into `<GAME>/gk3hd/videos/upscaled/`
+gk3hd videos build            # Build the private player in `<GAME>/gk3hd/videos/player/` (Windows toolchain)
+gk3hd videos pack             # Bundle videos and our player adapter into a versioned ZIP (or ZIP parts)
+gk3hd videos install --local  # Install the local pack from `<GAME>/gk3hd/videos/`
+```
+
+Extraction is optional: `upscale` uses the originals in `Data/` if no extracted
+folder exists. Use `--video intro.bik` to process one video, or repeat
+`--video` for a selection. Verified outputs are reused when resuming.
+
+> [!NOTE]
+> Cinematics use SeedVR2 3B, without original-image blending, and AV1 CRF 24
+> (10-bit 4:4:4) with lossless FLAC audio in MKV files. Scene cuts separate
+> temporal inference. Sources at 16 fps or less use independent-frame restoration
+> to avoid motion trails. Approximately 15 fps cinematics, including the Sierra
+> logo, additionally use RIFE to reach 60 fps. Other frame rates and audio timing
+> are preserved. SIDNEY's technical animations retain their original pixels and
+> transparency. Local generation needs a capable GPU, time and disk space.
+
 ## Development
 
 ### Test
@@ -160,47 +199,60 @@ Commit your changes on `main` using conventional commits. From a clean checkout,
 choose which assets to include:
 
 ```sh
-uv run gk3hd package draft                       # New package; reuse published assets
-uv run gk3hd package draft --textures            # Also pack/upload the local upscaled PNGs
-uv run gk3hd package draft --renderer            # Also upload the last verified local renderer build
-uv run gk3hd package draft --textures --renderer # Include both
+uv run gk3hd package draft             # New package; reuse published assets
+uv run gk3hd package draft --textures  # Also pack/upload the local upscaled PNGs
+uv run gk3hd package draft --renderer  # Also upload the last verified local renderer build
+uv run gk3hd package draft --videos    # Also pack/upload local videos and the verified player
+# Combine --textures, --renderer and --videos as needed
 ```
 
 Generate/review changed textures with `textures analyze` and `textures upscale`,
-or build a changed renderer with `renderer build`, before drafting the release.
+build a changed renderer with `renderer build`, or generate videos with
+`videos upscale` and build their player with `videos build`, before drafting.
+The video pack includes our player adapter. Installation fetches pinned LAV codecs
+and their notices directly from upstream. No DLLs belong in Git.
 
 The draft command uses Commitizen to bump the version, runs normal checks,
 commits release metadata, pushes the tag, and uploads a GitHub draft. Don't run
-`cz bump` or `textures pack` separately. Review and publish the draft on GitHub
-to publish to PyPI. Keep older asset releases available for pinned texture packs.
+`cz bump`, `textures pack` or `videos pack` separately. Review and publish the draft on GitHub
+to publish to PyPI. Keep older asset releases available for pinned packs and renderer builds.
 `package verify` checks that the published assets match their recorded identities.
 
 ## Gallery
 
 > [!NOTE]
-> This gallery showcases ten Day 1 scenes plus SIDNEY and the driving map, alternating between the original at 1024×768 and GK3HD at 4K.
+> Gameplay comparisons alternate between the original at 1024×768 and GK3HD at 4K.
+> Cinematic comparisons alternate between original frames and their 4× upscales.
 > Open an image to inspect it at full resolution.
 
-![Gabriel's hotel room](gallery/r25-110a-fr_du1.webp)
+[![Gabriel's hotel room](gallery/r25-110a-fr_du1.webp)](gallery/r25-110a-fr_du1.webp?raw=true)
 
-![Gabriel in his hotel room](gallery/r25-110a-gabriel_portrait.webp)
+[![Gabriel in his hotel room](gallery/r25-110a-gabriel_portrait.webp)](gallery/r25-110a-gabriel_portrait.webp?raw=true)
 
-![Jean, the guest book and the painting](gallery/lby-110a-jean_desk.webp)
+[![Jean, the guest book and the painting](gallery/lby-110a-jean_desk.webp)](gallery/lby-110a-jean_desk.webp?raw=true)
 
-![Hotel room-number buzzers](gallery/lby-110a-all_buzzers.webp)
+[![Hotel room-number buzzers](gallery/lby-110a-all_buzzers.webp)](gallery/lby-110a-all_buzzers.webp?raw=true)
 
-![Mosely and Gabriel in the hotel dining room](gallery/din-110a-breakfast_near.webp)
+[![Mosely and Gabriel in the hotel dining room](gallery/din-110a-breakfast_near.webp)](gallery/din-110a-breakfast_near.webp?raw=true)
 
-![Gabriel and the mopeds in the courtyard](gallery/mop-110a-fr_rc1.webp)
+[![Gabriel and the mopeds in the courtyard](gallery/mop-110a-fr_rc1.webp)](gallery/mop-110a-fr_rc1.webp?raw=true)
 
-![Postcard tower and museum hallway](gallery/ms2-110a-postcards_hall.webp)
+[![Postcard tower and museum hallway](gallery/ms2-110a-postcards_hall.webp)](gallery/ms2-110a-postcards_hall.webp?raw=true)
 
-![Lady Howard, Estelle and the museum panels](gallery/ms3-110a-visitors_panels.webp)
+[![Lady Howard, Estelle and the museum panels](gallery/ms3-110a-visitors_panels.webp)](gallery/ms3-110a-visitors_panels.webp?raw=true)
 
-![The fountain with the hotel behind it](gallery/rc1-110a-fountain_hotel.webp)
+[![The fountain with the hotel behind it](gallery/rc1-110a-fountain_hotel.webp)](gallery/rc1-110a-fountain_hotel.webp?raw=true)
 
-![The bookstore beside the hotel](gallery/rc1-110a-bookstore_front.webp)
+[![The bookstore beside the hotel](gallery/rc1-110a-bookstore_front.webp)](gallery/rc1-110a-bookstore_front.webp?raw=true)
 
-![An email in SIDNEY](gallery/sidney-email.webp)
+[![An email in SIDNEY](gallery/sidney-email.webp)](gallery/sidney-email.webp?raw=true)
 
-![Driving map with Rennes-le-Chateau highlighted](gallery/driving-map-rennes-le-chateau-hover.webp)
+[![Driving map with Rennes-le-Chateau highlighted](gallery/driving-map-rennes-le-chateau-hover.webp)](gallery/driving-map-rennes-le-chateau-hover.webp?raw=true)
+
+[![Stranger close-up in the intro cinematic](gallery/intro-stranger-close-up.webp)](gallery/intro-stranger-close-up.webp?raw=true)
+
+[![Lantern in the alley in the intro cinematic](gallery/intro-lantern-in-the-alley.webp)](gallery/intro-lantern-in-the-alley.webp?raw=true)
+
+[![Garden in the intro cinematic](gallery/intro-garden.webp)](gallery/intro-garden.webp?raw=true)
+
+[![Sierra logo blue wireframe](gallery/sierra-blue-wireframe.webp)](gallery/sierra-blue-wireframe.webp?raw=true)

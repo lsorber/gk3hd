@@ -26,6 +26,7 @@ from gk3hd.cli.common import (
 )
 from gk3hd.cli.patch import app as patch_app
 from gk3hd.cli.textures import app as textures_app
+from gk3hd.cli.videos import app as videos_app
 from gk3hd.package import app as package_app
 from gk3hd.patch.builds import ProfileError, profile_for_sha256
 from gk3hd.patch.install.windows import local_graphics_proxy_dlls
@@ -39,14 +40,18 @@ from gk3hd.system.files import sha256_file
 from gk3hd.system.proton import ProtonError, discover_proton
 from gk3hd.system.steam import game_launch_options
 from gk3hd.textures.install.service import STATE_FILENAME, TextureInstallRequest
+from gk3hd.videos.install import MovieInstaller
+from gk3hd.videos.manifest import STATE_FILENAME as MOVIE_STATE_FILENAME
+from gk3hd.videos.pack import PackRequest
 
 app = typer.Typer(
     name="gk3hd",
-    help="Modern widescreen patches and high-resolution textures for Gabriel Knight 3.",
+    help="Modern graphics, textures and videos for Gabriel Knight 3.",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
 app.add_typer(patch_app, name="patch")
+app.add_typer(videos_app, name="videos")
 app.add_typer(textures_app, name="textures")
 app.add_typer(renderer_app, name="renderer")
 app.add_typer(package_app, name="package")
@@ -111,6 +116,9 @@ def install(
             help="Use a local pack name, ZIP part, or generated lock instead of downloading."
         ),
     ] = None,
+    video_pack: Annotated[
+        Path | None, typer.Option(help="Use a local video-pack lock or directory.")
+    ] = None,
     resolution: Annotated[
         str | None,
         typer.Option(help="Display mode as WIDTHxHEIGHT; defaults to the active display."),
@@ -122,10 +130,12 @@ def install(
     force: ForceOption = False,
     offline: Annotated[
         bool,
-        typer.Option("--offline", help="Use only already verified texture assets from the cache."),
+        typer.Option(
+            "--offline", help="Use only already verified texture and video assets from the cache."
+        ),
     ] = False,
 ) -> None:
-    """Install recommended patches, the D7VK renderer and high-resolution textures."""
+    """Install the renderer, recommended patches, upscaled textures and videos."""
     if platform.system() == "Linux":
         try:
             target = discover_game(game_dir=game_dir, exe=exe)
@@ -136,7 +146,7 @@ def install(
     try:
         with _texture_install_progress() as (progress, callback):
             task = progress.add_task(
-                "Installing patches, renderer and textures",
+                "Installing renderer, patches, textures and videos",
                 total=None,
                 unit="items",
             )
@@ -155,13 +165,17 @@ def install(
                     force=force,
                     offline=offline,
                 ),
+                video_request=PackRequest(selection=video_pack, cache=cache_dir, offline=offline),
                 progress=lambda event: callback(task, event),
             )
     except CLI_ERRORS as exc:
         _print_error(exc)
         raise typer.Exit(1) from exc
     verb = "Installed gk3hd" if report.changed else "gk3hd was already installed"
-    console.print(f"[bold green]{verb}[/] - {report.patches} patches, {report.textures} textures")
+    console.print(
+        f"[bold green]{verb}[/] - {report.patches} patches, "
+        f"{report.textures} textures, {report.videos} videos"
+    )
 
 
 @app.command()
@@ -174,6 +188,8 @@ def uninstall(
     try:
         target = discover_game(game_dir=game_dir, exe=exe)
         installation.recover(exe=target.exe)
+        if (target.game_dir / MOVIE_STATE_FILENAME).is_file():
+            MovieInstaller().uninstall(target.game_dir)
         texture_state = target.game_dir / STATE_FILENAME
         if texture_state.is_file():
             texture_install.uninstall(exe=target.exe, force=force)
@@ -209,21 +225,26 @@ def status(game_dir: GameDirOption = None, exe: ExeOption = None) -> None:
         "Textures",
         "installed" if (target.game_dir / STATE_FILENAME).is_file() else "not installed",
     )
+    table.add_row(
+        "Videos",
+        "installed" if (target.game_dir / MOVIE_STATE_FILENAME).is_file() else "not installed",
+    )
     console.print(table)
 
 
 @app.command()
 def verify(game_dir: GameDirOption = None, exe: ExeOption = None) -> None:
-    """Verify all three installed components without upgrading them."""
+    """Verify all four installed components."""
     try:
         target = discover_game(game_dir=game_dir, exe=exe)
         PatchService().verify(exe=target.exe)
         RendererService().verify(exe=target.exe)
         texture_install.verify(exe=target.exe)
+        MovieInstaller.verify(target.game_dir)
     except CLI_ERRORS as exc:
         _print_error(exc)
         raise typer.Exit(1) from exc
-    console.print("[green]Patches, renderer and textures verified.[/]")
+    console.print("[green]Renderer, patches, textures and videos verified.[/]")
 
 
 @app.command()

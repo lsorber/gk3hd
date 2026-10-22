@@ -49,7 +49,9 @@ def atomic_write(path: Path, payload: bytes) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        if existing_mode is not None:
+        # Shared/non-POSIX mounts may expose a fixed mode and reject chmod,
+        # even when the temporary file already has exactly the desired mode.
+        if existing_mode is not None and stat.S_IMODE(temporary.stat().st_mode) != existing_mode:
             temporary.chmod(existing_mode)
         temporary.replace(path)
     except BaseException:

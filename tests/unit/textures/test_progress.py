@@ -20,3 +20,21 @@ def test_hugging_face_progress_is_forwarded_without_tqdm_output() -> None:
         ("weights.safetensors", 10, 10),
     ]
     assert progress.closed
+
+
+def test_xet_transfer_updates_do_not_double_count_file_progress() -> None:
+    updates: list[tuple[str, int, int | None]] = []
+    progress_class = hugging_face_progress_class(
+        lambda name, completed, total: updates.append((name, completed, total))
+    )
+    with progress_class(desc="movie model", total=100) as progress:
+        progress.update_transfer(40)
+        progress.set_transfer_postfix_str("network speed", refresh=False)
+        progress.update(60)
+        progress.set_postfix_str("disk speed", refresh=False)
+        progress.update_transfer(20)
+        progress.update(40)
+        progress.refresh()
+        assert progress.n == 100
+    assert updates[-1] == ("movie model", 100, 100)
+    assert all(completed <= 100 for _, completed, _ in updates)

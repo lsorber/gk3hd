@@ -1,8 +1,8 @@
-"""Minimal, lazy SeedVR2 3B image inference.
+"""Lazy SeedVR2 image and genuinely joint temporal inference.
 
 The public backend downloads three files through ``huggingface_hub`` on first
-use, builds the vendored 3B DiT and VAE on PyTorch's meta device, and assigns
-SafeTensors weights directly to the selected device.  It implements only the
+use, builds the selected vendored DiT and VAE on PyTorch's meta device, and moves
+CPU-mapped SafeTensors weights to the selected device. It implements only the
 quality path used for GK3: one distilled step, CFG 1, SDPA, seed 42, and numz's
 LAB correction with luminance weight 0.8.
 """
@@ -29,9 +29,10 @@ from gk3hd.textures._vendor.seedvr2.models.video_vae_v3.modules.attn_video_vae i
 )
 from gk3hd.textures.progress import hugging_face_progress_class
 from gk3hd.textures.upscale._lab import lab_color_transfer
+from gk3hd.textures.upscale._offload import activate_transformer, enable_block_offload
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from typing import Protocol
 
     from torch import Tensor, nn
@@ -57,11 +58,13 @@ POSITIVE_EMBEDDING_FILENAME = "pos_emb.pt"
 VAE_SCALING_FACTOR = 0.9152
 IMAGE_LATENT_DIMENSIONS = 4
 RGB_CHANNELS = 3
+TEMPORAL_STRIDE = 4
+MINIMUM_CLIP_FRAMES = 5
 
 
 @dataclass(frozen=True, slots=True)
 class SeedVR2Config:
-    """Quality and storage settings for the supported SeedVR2 3B path."""
+    """Quality and storage settings shared by SeedVR2 image and movie inference."""
 
     device: str = "auto"
     seed: int = 42
@@ -76,9 +79,15 @@ class SeedVR2Config:
     vae_spatial_tile_overlap: int = 128
     lab_luminance_weight: float = 0.8
     edge_antialias_strength: float = 0.2
+    release_phase_memory: bool = False
+    gpu_memory_fraction: float | None = None
+    offload_inactive_models: bool = False
 
     def __post_init__(self) -> None:
         """Reject settings outside the tested one-step 4x implementation."""
+        if self.gpu_memory_fraction is not None and not 0 < self.gpu_memory_fraction <= 1:
+            msg = "gpu_memory_fraction must be greater than zero and at most one"
+            raise ValueError(msg)
         if self.vae_spatial_tile_size <= 0:
             msg = "vae_spatial_tile_size must be positive"
             raise ValueError(msg)
@@ -97,7 +106,7 @@ class SeedVR2Config:
 
 
 class SeedVR2Upscaler:
-    """Reusable SeedVR2 3B backend with lazy model download and loading.
+    """Reusable SeedVR2 backend with lazy model download and loading.
 
     Constructing the object is cheap. The first call to :meth:`upscale` obtains
     model files and materializes weights; later calls reuse both models.
@@ -115,18 +124,29 @@ class SeedVR2Upscaler:
         self.config = config or SeedVR2Config()
         self.download_progress = download_progress
         self.device = _resolve_device(self.config.device)
+        if self.device.type == "cuda" and self.config.gpu_memory_fraction is not None:
+            # On WDDM an allocation can succeed by spilling into shared RAM,
+            # turning a bounded inference into minutes of paging. A per-process
+            # cap fails predictably instead; it does not alter model arithmetic.
+            torch.cuda.set_per_process_memory_fraction(
+                self.config.gpu_memory_fraction, self.device.index
+            )
         self.compute_dtype = _compute_dtype(self.device)
-        self._dit: NaDiT | None = None
+        self._dit: nn.Module | None = None
         self._vae: VideoAutoencoderKLWrapper | None = None
         self._positive_embedding: Tensor | None = None
+        self._offloaded_dit_blocks = False
 
     def upscale(self, image: Image.Image) -> Image.Image:
         """Upscale one RGB image exactly 4x and apply LAB color correction."""
         self._ensure_loaded()
+        self._activate_model("vae")
         source, reference, true_size = self._prepare_image(image)
         with torch.inference_mode():
             latent = self._encode(source)
+            self._activate_model("dit")
             restored = self._restore_latent(latent)
+            self._activate_model("vae")
             generated = self._decode(restored)
             true_width, true_height = true_size
             generated = generated[:, :, :true_height, :true_width]
@@ -151,6 +171,81 @@ class SeedVR2Upscaler:
         if self.config.edge_antialias_strength:
             array = _edge_antialias(array, self.config.edge_antialias_strength)
         return Image.fromarray(array, mode="RGB")
+
+    def upscale_clip(self, frames: Sequence[Image.Image]) -> list[Image.Image]:
+        """Restore a joint temporal clip, not independently upscaled images.
+
+        SeedVR2's causal video VAE requires 4n+1 input frames. Callers assemble
+        overlapping clips and repeat the last frame to pad an incomplete tail.
+        Spatial tiling only bounds VAE memory and does not split the timeline.
+        """
+        if len(frames) < MINIMUM_CLIP_FRAMES or (len(frames) - 1) % TEMPORAL_STRIDE:
+            msg = "a temporal clip must contain 4n+1 frames, with at least five frames"
+            raise ValueError(msg)
+        if any(frame.size != frames[0].size for frame in frames):
+            msg = "all frames in a temporal clip must have the same dimensions"
+            raise ValueError(msg)
+        self._ensure_loaded()
+        self._activate_model("vae")
+        with torch.inference_mode():
+            prepared = [self._prepare_image(frame)[0] for frame in frames]
+            # BCHW -> BCTHW. The VAE and DiT both attend across the temporal axis.
+            source = torch.stack(prepared, dim=2)
+            self._release_workspace()
+            latent = self._encode(source)
+            self._activate_model("dit")
+            self._release_workspace()
+            restored = self._restore_latent(latent)
+            self._activate_model("vae")
+            self._release_workspace()
+            generated = self._decode(restored)
+            width, height = frames[0].width * self.scale, frames[0].height * self.scale
+            result: list[Image.Image] = []
+            for index, reference in enumerate(prepared):
+                corrected = lab_color_transfer(
+                    generated[:, :, index, :height, :width],
+                    reference[:, :, :height, :width],
+                    luminance_weight=self.config.lab_luminance_weight,
+                )
+                array = (
+                    corrected[0]
+                    .permute(1, 2, 0)
+                    .float()
+                    .add_(1.0)
+                    .mul_(127.5)
+                    .add_(0.5)
+                    .clamp_(0, 255)
+                    .byte()
+                    .cpu()
+                    .numpy()
+                )
+                if self.config.edge_antialias_strength:
+                    array = _edge_antialias(array, self.config.edge_antialias_strength)
+                result.append(Image.fromarray(array, mode="RGB"))
+        return result
+
+    def _release_workspace(self) -> None:
+        """Release unused phase buffers before WDDM spills them into host memory."""
+        if self.config.release_phase_memory and self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    def _activate_model(self, active: str) -> None:
+        """Keep only the current inference stage's weights in constrained VRAM.
+
+        Moving the other stage to host memory preserves its dtype and exact
+        weights. Unlike spatially splitting the DiT, this leaves attention and
+        joint temporal processing unchanged. Texture defaults do not enable it.
+        """
+        if not self.config.offload_inactive_models or self.device.type != "cuda":
+            return
+        vae, dit = _require(self._vae, "VAE"), _require(self._dit, "DiT")
+        current, inactive = (vae, dit) if active == "vae" else (dit, vae)
+        inactive.to(device="cpu")
+        torch.cuda.empty_cache()
+        if active == "dit" and self._offloaded_dit_blocks:
+            activate_transformer(dit, self.device)
+        else:
+            current.to(device=self.device)
 
     @property
     def device_description(self) -> str:
@@ -183,7 +278,7 @@ class SeedVR2Upscaler:
         return normalized, normalized.clone(), (true_width, true_height)
 
     def _encode(self, source: Tensor) -> Tensor:
-        """Encode BCHW RGB to SeedVR2's channels-last single-frame latent."""
+        """Encode BCHW or BCTHW RGB to SeedVR2's channels-last video latent."""
         vae = _require(self._vae, "VAE")
         tile = (self.config.vae_spatial_tile_size, self.config.vae_spatial_tile_size)
         overlap = (self.config.vae_spatial_tile_overlap, self.config.vae_spatial_tile_overlap)
@@ -231,7 +326,7 @@ class SeedVR2Upscaler:
         return na.unflatten(restored, latent_shape)[0]
 
     def _decode(self, latent: Tensor) -> Tensor:
-        """Decode a channels-last latent to a normalized BCHW RGB image."""
+        """Decode a channels-last latent to normalized BCHW or BCTHW RGB."""
         vae = _require(self._vae, "VAE")
         value = latent.unsqueeze(0).div(VAE_SCALING_FACTOR).permute(0, 4, 1, 2, 3).squeeze(2)
         tile = (self.config.vae_spatial_tile_size, self.config.vae_spatial_tile_size)
@@ -286,6 +381,9 @@ class SeedVR2Upscaler:
                 attention = cast("_AttentionModule", module)
                 attention.attention_mode = "sdpa"
                 attention.compute_dtype = self.compute_dtype
+        if self.config.offload_inactive_models and self.device.type == "cuda":
+            enable_block_offload(self._dit, self.device)
+            self._offloaded_dit_blocks = True
 
 
 def _new_dit() -> NaDiT:
@@ -364,12 +462,13 @@ def _load_model[ModelT: torch.nn.Module](
     """Build on meta and assign SafeTensors without a duplicate initialized model."""
     with torch.device("meta"):
         model = factory()
-    state = load_file(str(path), device=str(device))
-    if state_dtype is not None:
-        state = {
-            name: value.to(state_dtype) if value.is_floating_point() else value
-            for name, value in state.items()
-        }
+    # Map checkpoint pages on CPU and transfer each tensor once. Direct large
+    # mmap-to-CUDA loading can fail with invalid-storage errors on Windows.
+    state = load_file(str(path), device="cpu")
+    state = {
+        name: value.to(device=device, dtype=state_dtype if value.is_floating_point() else None)
+        for name, value in state.items()
+    }
     incompatible = model.load_state_dict(state, strict=False, assign=True)
     if incompatible.missing_keys or incompatible.unexpected_keys:
         msg = (

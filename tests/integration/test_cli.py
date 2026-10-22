@@ -55,6 +55,15 @@ def test_every_command_group_renders_help() -> None:
         ["textures", "install", "--help"],
         ["textures", "verify", "--help"],
         ["textures", "uninstall", "--help"],
+        ["videos", "--help"],
+        ["videos", "list", "--help"],
+        ["videos", "extract", "--help"],
+        ["videos", "upscale", "--help"],
+        ["videos", "pack", "--help"],
+        ["videos", "build", "--help"],
+        ["videos", "install", "--help"],
+        ["videos", "verify", "--help"],
+        ["videos", "uninstall", "--help"],
     ):
         result = runner.invoke(app, arguments)
         assert result.exit_code == 0, result.output
@@ -247,21 +256,21 @@ def test_pinned_texture_install_uses_release_even_with_ambient_files(
 
 
 def test_root_install_renders_composed_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The shortcut calls the Python coordinator and reports both components."""
+    """The shortcut calls the Python coordinator and reports all four components."""
 
     def install_fixture(
         *args: object,
         **kwargs: object,
     ) -> CompositeReport:
         del args, kwargs
-        return CompositeReport(patches=8, textures=6658, changed=True)
+        return CompositeReport(patches=8, textures=6658, videos=21, changed=True)
 
     monkeypatch.setattr(installation, "install", install_fixture)
 
     result = CliRunner().invoke(app, ["install"])
 
     assert result.exit_code == 0, result.output
-    assert "8 patches, 6658 textures" in result.output
+    assert "8 patches, 6658 textures, 21 videos" in result.output
 
 
 def test_linux_install_flags_a_known_failing_proton_without_changing_it(
@@ -281,7 +290,9 @@ def test_linux_install_flags_a_known_failing_proton_without_changing_it(
     monkeypatch.setattr(
         installation,
         "install",
-        lambda *_args, **_kwargs: CompositeReport(patches=8, textures=6658, changed=True),
+        lambda *_args, **_kwargs: CompositeReport(
+            patches=8, textures=6658, videos=21, changed=True
+        ),
     )
 
     result = CliRunner().invoke(app, ["install"])
@@ -319,7 +330,9 @@ def test_linux_install_warns_only_for_conflicting_launch_options(
     monkeypatch.setattr(
         installation,
         "install",
-        lambda *_args, **_kwargs: CompositeReport(patches=8, textures=6658, changed=True),
+        lambda *_args, **_kwargs: CompositeReport(
+            patches=8, textures=6658, videos=21, changed=True
+        ),
     )
 
     result = CliRunner().invoke(app, ["install"])
@@ -347,7 +360,9 @@ def test_linux_install_does_not_depend_on_advisory_steam_metadata(
     monkeypatch.setattr(
         installation,
         "install",
-        lambda *_args, **_kwargs: CompositeReport(patches=8, textures=6658, changed=True),
+        lambda *_args, **_kwargs: CompositeReport(
+            patches=8, textures=6658, videos=21, changed=True
+        ),
     )
 
     result = CliRunner().invoke(app, ["install"])

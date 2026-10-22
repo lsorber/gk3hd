@@ -122,3 +122,34 @@ def test_original_small_mode_keeps_native_extent() -> None:
     machine = _machine((800, 600), (320, 240))
     left, top, right, bottom = _layout(machine)
     assert (right - left, bottom - top) == (640, 480)
+
+
+@pytest.mark.parametrize("screen", [(1024, 768), (1280, 800), (3840, 2160), (800, 1280)])
+@pytest.mark.parametrize("source", [(2560, 1920), (1280, 960), (1920, 1080), (640, 480)])
+def test_avi_fills_available_screen_without_stretching_or_cropping(
+    screen: tuple[int, int], source: tuple[int, int]
+) -> None:
+    machine = _machine(screen, source)
+    table = GOG_BUILD.address("movies.avi_vtable")
+    getter = _CODE + 0xE000
+    machine.mem_map(table & ~0xFFF, 0x1000)
+    machine.mem_write(_MOVIE, struct.pack("<I", table))
+    machine.mem_write(_MOVIE + 0x50, b"\x01")
+    machine.mem_write(table + 0x4C, struct.pack("<I", getter))
+    machine.mem_write(getter, b"\xc2\x04\x00")
+
+    def size(cpu: Uc, address: int, _size: int, _user: object) -> None:
+        if address == getter:
+            assert cpu.reg_read(UC_X86_REG_ECX) == _MOVIE
+            stack = cpu.reg_read(UC_X86_REG_ESP)
+            pointer = struct.unpack("<I", cpu.mem_read(stack + 4, 4))[0]
+            cpu.mem_write(pointer, struct.pack("<II", *source))
+
+    machine.hook_add(UC_HOOK_CODE, size)
+    extent = tuple(round(d * min(screen[0] / source[0], screen[1] / source[1])) for d in source)
+    first = _layout(machine)
+    assert (first[2] - first[0], first[3] - first[1]) == extent
+    assert 0 <= first[0] < first[2] <= screen[0]
+    assert 0 <= first[1] < first[3] <= screen[1]
+    assert _layout(machine) == first
+    assert machine.mem_read(_MOVIE + 0x50, 1) == b"\x00"

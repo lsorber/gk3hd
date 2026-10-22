@@ -6,10 +6,12 @@ import tomllib
 from pathlib import Path
 
 EXPECTED_UPSCALE_DEPENDENCIES = {
+    "av",
     "diffusers",
     "einops",
     "freetype-py",
     "huggingface-hub",
+    "imageio-ffmpeg",
     "numpy",
     "rotary-embedding-torch",
     "safetensors",
@@ -19,7 +21,7 @@ EXPECTED_UPSCALE_DEPENDENCIES = {
 
 
 def test_upscale_extra_declares_every_direct_backend_dependency() -> None:
-    """The extra covers AI inference and optional supplied-font reconstruction."""
+    """The extra covers AI inference, movie codecs and supplied-font reconstruction."""
     project = Path(__file__).parents[2] / "pyproject.toml"
     configuration = tomllib.loads(project.read_text(encoding="utf-8"))
     requirements = configuration["project"]["optional-dependencies"]["upscale"]

@@ -23,10 +23,12 @@ dependencies = [
 
 [project.optional-dependencies]
 upscale = [
+  "av>=19.0.1",
   "diffusers>=0.40.0",
   "einops>=0.8.2",
   "freetype-py==2.5.1",
   "huggingface-hub>=1.33.0",
+  "imageio-ffmpeg>=0.6.0",
   "numpy>=2.5.3",
   "rotary-embedding-torch>=0.9.1",
   "safetensors>=0.8.0",
@@ -48,10 +50,12 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+  "av>=19.0.1",
   "capstone>=5.0.9",
   "codespell>=2.4.3",
   "commitizen>=4.19.0",
   "coverage>=7.16.1",
+  "imageio-ffmpeg>=0.6.0",
   "numpy>=2.5.3",
   "poethepoet>=0.48.0",
   "pytest>=9.1.1",
@@ -73,7 +77,7 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.ruff]
-extend-exclude = ["src/gk3hd/textures/_vendor"]
+extend-exclude = ["src/gk3hd/textures/_vendor", "src/gk3hd/videos/_vendor"]
 line-length = 100
 
 [tool.ruff.format]
@@ -128,7 +132,7 @@ allowed-unresolved-imports = [
 ]
 
 [tool.ty.src]
-exclude = ["src/gk3hd/textures/_vendor"]
+exclude = ["src/gk3hd/textures/_vendor", "src/gk3hd/videos/_vendor"]
 
 [tool.ty.rules]
 unused-ignore-comment = "warn"
@@ -155,7 +159,7 @@ xfail_strict = true
 branch = true
 patch = ["subprocess"]
 source = ["gk3hd"]
-omit = ["src/gk3hd/textures/_vendor/*"]
+omit = ["src/gk3hd/textures/_vendor/*", "src/gk3hd/videos/_vendor/*"]
 
 [tool.coverage.report]
 fail_under = 90

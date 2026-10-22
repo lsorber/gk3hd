@@ -11,7 +11,7 @@ from gk3hd.cli import app
 from gk3hd.renderer import build, cli
 
 
-@pytest.mark.parametrize("command", ["renderer", "package", "patch", "textures"])
+@pytest.mark.parametrize("command", ["renderer", "package", "patch", "textures", "videos"])
 def test_component_help_is_portable(command: str) -> None:
     result = CliRunner().invoke(app, [command, "--help"])
     assert result.exit_code == 0, result.output

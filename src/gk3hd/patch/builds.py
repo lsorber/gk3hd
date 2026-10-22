@@ -321,10 +321,48 @@ _SHARED_SITES = MappingProxyType(
             va=0x004D827C,
             original=bytes.fromhex("e8 5a 05 00 00"),
         ),
+        "movies.factory": PatchSite(
+            symbol="movies.factory",
+            va=0x005780E0,
+            original=bytes.fromhex("55 8b ec 6a ff"),
+        ),
+        "movies.avi_resolve_path": PatchSite(
+            symbol="movies.avi_resolve_path",
+            va=0x0059CB7B,
+            original=bytes.fromhex("89 7d f0 ff 50 48"),
+        ),
+        "movies.avi_open_file": PatchSite(
+            symbol="movies.avi_open_file",
+            va=0x0059CC56,
+            original=bytes.fromhex("8b 08 50 ff 51 40"),
+        ),
+        "movies.avi_color_key": PatchSite(
+            symbol="movies.avi_color_key",
+            va=0x0059CE1B,
+            original=bytes.fromhex("52 e8 cf 2e fb ff"),
+        ),
+        "movies.avi_blt": PatchSite(
+            symbol="movies.avi_blt",
+            va=0x0059CF97,
+            original=bytes.fromhex("e8 a4 2b fb ff"),
+        ),
+        "movies.stretch_frame": PatchSite(
+            symbol="movies.stretch_frame",
+            va=0x0054FB40,
+            original=bytes.fromhex(
+                "55 8b ec 6a ff 68 e8 55 61 00 64 a1 00 00 00 00 50 64 89 25 00 00 00 00 "
+                "83 ec 2c 53 56 8b 75 10 57 89 4d f0"
+            ),
+        ),
         "movies.resize_layout": PatchSite(
             symbol="movies.resize_layout",
             va=0x004D85DB,
             original=bytes.fromhex("e8 fb 01 00 00"),
+        ),
+        "movies.embedded_size": PatchSite(
+            symbol="movies.embedded_size",
+            va=0x004D8900,
+            original=bytes.fromhex("ff 50 4c 8d 45 f4"),
         ),
         "movies.bink_open_call": PatchSite(
             symbol="movies.bink_open_call",
@@ -1292,6 +1330,10 @@ _SHARED_SYMBOLS = MappingProxyType(
         "movies.complete": 0x00591880,
         "movies.layout": 0x004D87DB,
         "movies.bink_vtable": 0x00698ED0,
+        "movies.avi_vtable": 0x00699564,
+        "movies.avi_size": 0x0059CE30,
+        "movies.surface_color_key": 0x0054FCF0,
+        "movies.stretch_body": 0x0054FBAC,
         "movies.set_rect": 0x00591790,
         "movies.update": 0x00591FE0,
         # Same variadic formatting ABI as the modal reporter used by

@@ -23,7 +23,7 @@ def _source(profile: BuildProfile) -> PEFile:
     for offset, value in ((28, 0x400000), (32, 0x1000), (36, 0x200), (56, 0x400000), (60, 0x1000)):
         struct.pack_into("<I", data, 0x98 + offset, value)
     struct.pack_into("<I", data, 0x98 + 92, 16)
-    struct.pack_into("<2I", data, 0x98 + 104, 0x380000, 40)
+    struct.pack_into("<2I", data, 0x98 + 104, 0x380000, 60)
     struct.pack_into(
         "<5I",
         data,
@@ -37,6 +37,16 @@ def _source(profile: BuildProfile) -> PEFile:
     data[0x380040:0x38004A] = b"GDI32.dll\0"
     struct.pack_into("<I", data, 0x380080, 0x3800A0)
     data[0x3800A0:0x3800AA] = b"\0\0Ellipse\0"
+    struct.pack_into("<5I", data, 0x380014, 0x3800C0, 0, 0, 0x380060, 0x3800E0)
+    data[0x380060:0x38006D] = b"KERNEL32.dll\0"
+    hint = 0x380100
+    for index, name in enumerate(
+        (b"GetModuleFileNameA", b"CreateFileA", b"CloseHandle", b"LoadLibraryA", b"GetProcAddress")
+    ):
+        struct.pack_into("<I", data, 0x3800C0 + index * 4, hint)
+        encoded = b"\0\0" + name + b"\0"
+        data[hint : hint + len(encoded)] = encoded
+        hint += len(encoded)
     struct.pack_into(
         "<8sIIIIIIHHI",
         data,

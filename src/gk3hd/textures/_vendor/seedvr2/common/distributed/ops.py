@@ -20,6 +20,18 @@ def gather_outputs(x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return x
 
 
+def gather_heads(x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    """All attention heads are already local during single-device inference."""
+    del kwargs
+    return x
+
+
+def scatter_heads(x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    """Keep all attention heads on the one inference device."""
+    del kwargs
+    return x
+
+
 def gather_heads_scatter_seq(
     x: torch.Tensor,
     head_dim: int,
