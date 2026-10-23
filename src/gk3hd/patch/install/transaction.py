@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from dataclasses import dataclass, replace
@@ -18,7 +19,12 @@ from gk3hd.patch.install.configuration import GraphicsBackend
 from gk3hd.patch.install.journal import ApplyJournal, install_journal_path
 from gk3hd.patch.install.platform import default_configuration
 from gk3hd.patch.install.windows import is_gk3_running, local_graphics_proxy_dlls
-from gk3hd.patch.manifest import ManifestIdentity, PatchManifest, manifest_path_for_exe
+from gk3hd.patch.manifest import (
+    ExternalChange,
+    ManifestIdentity,
+    PatchManifest,
+    manifest_path_for_exe,
+)
 from gk3hd.patch.model import BuildContext, DisplayMode, PatchId, PatchPlan, ProfileId
 from gk3hd.system.files import atomic_write
 from gk3hd.system.locking import ExclusiveFileLock, executable_lock_path
@@ -59,6 +65,8 @@ class PreparedInstall:
     installed_sha256: str
     backup: Path
     graphics_backend: GraphicsBackend
+    changed: bool = True
+    preserve_resolution: bool = True
 
 
 class Installer:
@@ -132,10 +140,15 @@ class Installer:
         self._validate_target(exe)
         self._refuse_running_game()
         manifest_path = manifest_path_for_exe(exe)
-        if manifest_path.exists():
-            detail = "a current installation already exists; restore before applying a new plan"
-            raise InstallError(detail)
-        self._validate_prepared_commit(exe, prepared)
+        previous = PatchManifest.from_path(manifest_path) if manifest_path.exists() else None
+        self._validate_prepared_commit(exe, prepared, previous=previous)
+        restorable = ()
+        if previous:
+            _validate_backup(prepared.backup, previous.original_sha256)
+            # User-edited registry values are legitimate; changed files are not.
+            restorable = self._configuration_for(exe).prepare_restore(
+                exe=exe, changes=previous.external_changes
+            )
 
         original_exe = exe.read_bytes()
         backup_existed = prepared.backup.exists()
@@ -146,6 +159,25 @@ class Installer:
             patches=prepared.plan.patch_ids,
             graphics_backend=prepared.graphics_backend,
         )
+        if previous:
+            external_changes = _preserve_settings(
+                external_changes,
+                previous.external_changes,
+                explicit_resolution=not prepared.preserve_resolution,
+            )
+            desired = {(c.surface, c.key) for c in external_changes}
+            external_changes += tuple(
+                replace(c, previous=c.installed, installed=c.previous)
+                for c in restorable
+                if (c.surface, c.key) not in desired
+            )
+            if (
+                previous.installed_sha256 == prepared.installed_sha256
+                and previous.patches == prepared.plan.patch_ids
+                and previous.external_changes == _original_baseline(external_changes, previous)
+                and all(change.previous == change.installed for change in external_changes)
+            ):
+                return previous
         manifest = PatchManifest.create(
             identity=ManifestIdentity(
                 package_version=__version__,
@@ -160,14 +192,15 @@ class Installer:
                 backup_path=prepared.backup.name,
             ),
             installed_sha256=prepared.installed_sha256,
-            backup_created=not backup_existed,
-            external_changes=external_changes,
+            backup_created=previous.backup_created if previous else not backup_existed,
+            external_changes=_original_baseline(external_changes, previous),
         )
         journal = ApplyJournal.create(
             exe=exe,
             backup=prepared.backup,
             backup_existed=backup_existed,
             manifest=manifest,
+            transition=replace(manifest, external_changes=external_changes),
         )
         try:
             # Publish rollback intent before the first owned mutation. The
@@ -220,10 +253,22 @@ class Installer:
             self._verify_unlocked(exe=exe)
             journal_path.unlink()
             return True
+        self._rollback_apply(exe=exe, journal=journal)
+        return True
 
+    def _rollback_apply(self, *, exe: Path, journal: ApplyJournal) -> None:
+        """Restore the exact prior version, not necessarily the pristine executable."""
+        manifest_path = manifest_path_for_exe(exe)
+        intended_manifest = journal.manifest_json.encode("utf-8")
         self._require_target(exe)
         current_sha256 = _sha256(exe)
-        if current_sha256 not in {journal.original_sha256, journal.installed_sha256}:
+        previous = (
+            PatchManifest.from_json(journal.previous_manifest)
+            if journal.previous_manifest
+            else None
+        )
+        prior_sha256 = previous.installed_sha256 if previous else journal.original_sha256
+        if current_sha256 not in {prior_sha256, journal.installed_sha256}:
             detail = (
                 "executable changed outside the interrupted installation; "
                 f"refusing to replace unrecognized hash {current_sha256}"
@@ -237,7 +282,10 @@ class Installer:
             detail = f"interrupted installation backup is missing: {journal.backup}"
             raise InstallError(detail)
 
-        if manifest_path.is_file() and manifest_path.read_bytes() != intended_manifest:
+        allowed_manifests = {intended_manifest}
+        if journal.previous_manifest:
+            allowed_manifests.add(journal.previous_manifest.encode("utf-8"))
+        if manifest_path.is_file() and manifest_path.read_bytes() not in allowed_manifests:
             detail = "manifest changed outside the interrupted installation; refusing recovery"
             raise InstallError(detail)
 
@@ -245,26 +293,35 @@ class Installer:
         # adapter accepts only captured-prior or intended-installed states.
         self._configuration_for(exe).recover_interrupted_apply(
             exe=exe,
-            changes=journal.manifest.external_changes,
+            changes=PatchManifest.from_json(
+                journal.transition_json or journal.manifest_json
+            ).external_changes,
         )
-        if current_sha256 != journal.original_sha256:
-            atomic_write(exe, journal.backup.read_bytes())
-        _validate_restored_executable(exe, journal.original_sha256)
-        manifest_path.unlink(missing_ok=True)
+        if current_sha256 != prior_sha256:
+            payload = (
+                base64.b64decode(journal.previous_executable, validate=True)
+                if journal.previous_executable
+                else journal.backup.read_bytes()
+            )
+            atomic_write(exe, payload)
+        _validate_restored_executable(exe, prior_sha256)
+        if journal.previous_manifest:
+            atomic_write(manifest_path, journal.previous_manifest.encode("utf-8"))
+        else:
+            manifest_path.unlink(missing_ok=True)
         if not journal.backup_existed:
             journal.backup.unlink(missing_ok=True)
-        journal_path.unlink()
-        return True
+        journal.path.unlink()
 
     def verify(self, *, exe: Path) -> VerificationReport:
-        """Rebuild the declared plan from backup and compare all installed bytes."""
+        """Verify recorded installed bytes, the original backup and managed settings."""
         exe = exe.resolve()
         with ExclusiveFileLock(executable_lock_path(exe)):
             self._recover_unlocked(exe=exe)
             return self._verify_unlocked(exe=exe)
 
     def _verify_unlocked(self, *, exe: Path) -> VerificationReport:
-        """Verify one installation while owning the executable lock."""
+        """Verify recorded bytes, independently of the current compiler revision."""
         manifest_path = manifest_path_for_exe(exe)
         manifest = PatchManifest.from_path(manifest_path)
         self._validate_target(exe)
@@ -277,35 +334,19 @@ class Installer:
             detail = f"backup hash mismatch: expected {manifest.backup_sha256}, got {backup_sha256}"
             raise InstallError(detail)
         build_profile = profile_for_sha256(backup_sha256)
-        context = BuildContext(build_id=build_profile.id)
-        # Profiles are installation-time shortcuts and can grow in later
-        # releases. Rebuild the recorded selection, retaining its original
-        # profile label for identity checks, rather than silently adding patches.
-        plan = replace(PLANNER.plan_explicit(manifest.patches, context), profile=manifest.profile)
-        if plan.patch_ids != manifest.patches:
-            detail = "manifest patch order does not match the current canonical plan"
-            raise InstallError(detail)
-        digest = _plan_digest(plan)
-        if digest != manifest.plan_digest:
-            detail = f"plan digest mismatch: expected {manifest.plan_digest}, got {digest}"
-            raise InstallError(detail)
-        rebuilt = OperationExecutor().execute(
-            PEFile(normalize_source(backup.read_bytes())), plan.compile_operations()
-        )
-        expected = rebuilt.to_bytes()
         installed = exe.read_bytes()
         installed_sha256 = _sha256_bytes(installed)
-        if expected != installed or installed_sha256 != manifest.installed_sha256:
-            detail = "installed executable does not match the fully rebuilt verified plan"
+        if installed_sha256 != manifest.installed_sha256:
+            detail = "installed executable changed after installation"
             raise InstallError(detail)
         self._configuration_for(exe).verify(exe=exe, changes=manifest.external_changes)
         return VerificationReport(
             build_id=str(build_profile.id),
             profile=None if manifest.profile is None else str(manifest.profile),
-            patches=tuple(str(value) for value in plan.patch_ids),
+            patches=tuple(str(value) for value in manifest.patches),
             original_sha256=backup_sha256,
             installed_sha256=installed_sha256,
-            plan_digest=digest,
+            plan_digest=manifest.plan_digest,
         )
 
     def restore(self, *, exe: Path, force: bool = False) -> Path:
@@ -380,7 +421,9 @@ class Installer:
             raise InstallError(detail)
 
     @staticmethod
-    def _validate_prepared_commit(exe: Path, prepared: PreparedInstall) -> None:
+    def _validate_prepared_commit(
+        exe: Path, prepared: PreparedInstall, *, previous: PatchManifest | None = None
+    ) -> None:
         """Bind one mutation to the exact pristine target observed by prepare."""
         if prepared.target != exe:
             detail = f"prepared plan belongs to {prepared.target}, not {exe}"
@@ -403,7 +446,13 @@ class Installer:
                 f"expected {prepared.target_sha256}, got {current_sha256}"
             )
             raise InstallError(detail)
-        if current_sha256 != prepared.profile.original_sha256:
+        if previous and (
+            previous.original_sha256 != prepared.profile.original_sha256
+            or current_sha256 != previous.installed_sha256
+        ):
+            msg = "installed executable changed; refusing to overwrite unrecognized bytes"
+            raise InstallError(msg)
+        if previous is None and current_sha256 != prepared.profile.original_sha256:
             detail = (
                 "target is not the supported pristine executable; restore the verified "
                 "backup before applying"
@@ -419,6 +468,55 @@ class Installer:
 def _resolve_backup(exe: Path, stored: str) -> Path:
     backup = Path(stored)
     return backup if backup.is_absolute() else exe.with_name(backup.name)
+
+
+def _preserve_settings(
+    changes: tuple[ExternalChange, ...],
+    previous: tuple[ExternalChange, ...],
+    *,
+    explicit_resolution: bool = False,
+) -> tuple[ExternalChange, ...]:
+    """Keep later registry edits, including removed values, during an update."""
+    owned = {(c.surface, c.key): c for c in previous}
+    result = []
+    for change in changes:
+        before = owned.get((change.surface, change.key))
+        if (
+            before is not None
+            and change.surface.startswith("registry:")
+            and not (
+                explicit_resolution
+                and change.key in {"Game Width", "Game Height", "Screen Width", "Screen Height"}
+            )
+            and (change.previous != before.installed or before.previous == before.installed)
+        ):
+            result.append(replace(change, installed=change.previous))
+        else:
+            result.append(change)
+    return tuple(result)
+
+
+def _original_baseline(
+    changes: tuple[ExternalChange, ...], previous: PatchManifest | None
+) -> tuple[ExternalChange, ...]:
+    """Never replace the pre-mod uninstall baseline with the previous mod version."""
+    if previous is None:
+        return changes
+    originals = {(c.surface, c.key): c for c in previous.external_changes}
+    result = []
+    for change in changes:
+        before = originals.get((change.surface, change.key))
+        user_edit = (
+            before is not None
+            and change.surface.startswith("registry:")
+            and change.previous != before.installed
+        )
+        result.append(
+            replace(change, previous=before.previous)
+            if before is not None and not user_edit
+            else change
+        )
+    return tuple(result)
 
 
 def _validate_backup(backup: Path, expected_sha256: str) -> None:

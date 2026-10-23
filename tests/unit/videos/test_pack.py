@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from gk3hd.cli import app
 from gk3hd.system.files import sha256_file
 from gk3hd.videos import pack
+from gk3hd.videos import runtime as video_runtime
 from gk3hd.videos.catalog import extract, movie_workspace
 from gk3hd.videos.install import MovieInstaller
 from gk3hd.videos.manifest import STATE_FILENAME
@@ -172,3 +173,31 @@ def test_extraction_resumes_identical_originals_and_preserves_differing_files(
     with pytest.raises(ValueError, match="overwrite"):
         extract(game / "Data", output)
     assert (output / "intro.avi").read_bytes() == b"user file"
+
+
+def test_installed_pack_is_reused_when_the_download_cache_is_gone(
+    game: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    build_pack(game, version="2.0.0")
+    request = PackRequest(local=True)
+    install_pack(game, request)
+    before = {p: p.read_bytes() for p in game.rglob("*") if p.is_file()}
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("an unchanged installed pack must not need archives or codecs")
+
+    monkeypatch.setattr(pack, "obtain_pack", forbidden)
+    monkeypatch.setattr(pack, "download_codecs", forbidden)
+    monkeypatch.setattr(pack, "verify_codecs", forbidden)
+    pack.prefetch(game, request)
+    assert not install_pack(game, request).changed
+    assert {p: p.read_bytes() for p in game.rglob("*") if p.is_file()} == before
+
+
+def test_offline_codec_failure_is_detected_before_install_changes(game: Path) -> None:
+    build_pack(game, version="2.0.0")
+    video_runtime.codec_cache().write_bytes(b"corrupt offline codecs")
+    before = {p: p.read_bytes() for p in game.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="codec"):
+        pack.prefetch(game, PackRequest(local=True, offline=True))
+    assert {p: p.read_bytes() for p in game.rglob("*") if p.is_file()} == before

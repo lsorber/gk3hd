@@ -331,7 +331,6 @@ def textures_install(
     cache_dir: Annotated[
         Path | None, typer.Option(help="Downloaded-asset cache directory.")
     ] = None,
-    force: ForceOption = False,
     offline: Annotated[
         bool,
         typer.Option("--offline", help="Use only already verified release assets from the cache."),
@@ -348,7 +347,6 @@ def textures_install(
                     pack=pack,
                     local=local,
                     cache_dir=cache_dir,
-                    force=force,
                     offline=offline,
                 ),
                 progress=lambda event: callback(task, event),

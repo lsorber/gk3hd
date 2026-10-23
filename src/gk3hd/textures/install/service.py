@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +20,7 @@ from gk3hd.system.ini import (
     apply_custom_path,
     installed_ini_matches,
     prepare_custom_path,
+    rebase_custom_path,
     restore_custom_path,
 )
 from gk3hd.system.locking import ExclusiveFileLock, executable_lock_path
@@ -65,6 +66,7 @@ class _InstalledState:
     texture_count: int
     files: tuple[JournalFile, ...]
     ini: IniChange
+    manifest_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +76,7 @@ class TextureInstallReport:
     pack_version: str
     textures: int
     directory: Path
+    changed: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +84,6 @@ class PackInstallOptions:
     """Cache, network, guard, and progress policy for pack installation."""
 
     cache_dir: Path | None = None
-    force: bool = False
     offline: bool = False
     progress: TextureInstallProgressCallback | None = None
 
@@ -97,48 +99,64 @@ def install_texture_pack(
     recover_texture_install(game_dir)
     target = _texture_directory(game_dir)
     state_path = game_dir / STATE_FILENAME
+    before = None
     if state_path.exists():
-        if not options.force:
-            msg = "a gk3hd texture installation already exists"
-            raise TexturePackError(msg)
-        uninstall_texture_pack(game_dir, force=True)
-    _require_install_target_available(target)
+        before = _load_state(state_path)
+        _verify_texture_pack(
+            game_dir,
+            progress=options.progress,
+            hash_files=True,
+            description="Verifying installed textures",
+            check_ini=False,
+        )
+        if _matches_current(before, source.inventory_sha256) and installed_ini_matches(
+            game_dir / before.ini.filename, before.ini
+        ):
+            return TextureInstallReport(
+                before.pack_version, before.texture_count, target, changed=False
+            )
+    else:
+        _require_install_target_available(target)
 
-    archives = _obtain_archives(
-        source, cache_dir=options.cache_dir, offline=options.offline, progress=options.progress
-    )
-    manifest, part_manifests, manifest_identity = _load_pack_set(
-        archives,
-        progress=options.progress,
-    )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".install-", dir=target.parent))
+    prepared = _stage_pack(game_dir, source, options, before)
+    if prepared is None and before is not None:
+        return TextureInstallReport(
+            before.pack_version, before.texture_count, target, changed=False
+        )
+    if prepared is None:
+        msg = "texture preparation produced no installation"
+        raise TexturePackError(msg)
+    staging, installed, pack_version, texture_count, manifest_identity = prepared
     ini_change: IniChange | None = None
     journal: TextureJournal | None = None
     try:
-        textures = _convert_archives(
-            archives,
-            part_manifests,
-            manifest,
-            staging,
-            progress=options.progress,
-        )
-        installed = [*textures, _install_faces_file(staging)]
         report_install_progress(options.progress, "Installing textures", 0, 1)
         ini_change, ini_payload = prepare_custom_path(game_dir, TEXTURE_DIRECTORY)
         journal = TextureJournal.create(game_dir, staging, ini_change, installed)
-        journal.write()
-        _commit_staged_bmps(staging, target)
-        apply_custom_path(game_dir, ini_change, ini_payload)
         state = {
             "directory": TEXTURE_DIRECTORY,
             "files": sorted(installed, key=lambda item: item["filename"].casefold()),
-            "ini": ini_change.to_dict(),
+            "ini": (
+                rebase_custom_path(game_dir, before.ini, ini_change, TEXTURE_DIRECTORY)
+                if before
+                else ini_change
+            ).to_dict(),
             "manifest_sha256": manifest_identity,
-            "pack_version": manifest["pack_version"],
+            "pack_version": pack_version,
             "schema_version": STATE_SCHEMA,
-            "texture_count": manifest["texture_count"],
+            "texture_count": texture_count,
         }
+        if before:
+            journal = replace(
+                journal,
+                before_state=state_path.read_text(encoding="utf-8"),
+                after_state=json_bytes(state).decode("utf-8"),
+            )
+        journal.write()
+        if before:
+            target.replace(journal.backup)
+        _commit_staged_bmps(staging, target)
+        apply_custom_path(game_dir, ini_change, ini_payload)
         atomic_write(state_path, json_bytes(state))
         report_install_progress(options.progress, "Installing textures", 1, 1)
         _verify_texture_pack(
@@ -147,19 +165,91 @@ def install_texture_pack(
             hash_files=False,
             description="Finalizing installation",
         )
+        if before:
+            _remove_owned_tree(journal.backup, before.files)
         journal.path.unlink()
-    except BaseException:
-        if journal is not None and journal.path.is_file():
-            _rollback_texture_journal(journal, remove_state=True)
-        else:
-            if ini_change is not None:
-                restore_custom_path(game_dir, ini_change, force=True)
-            if staging.is_dir():
-                shutil.rmtree(staging)
-            _prune_empty_install_directories(target, game_dir)
-            state_path.unlink(missing_ok=True)
+    except BaseException as error:
+        try:
+            _recover_failed_install(game_dir, journal, staging, ini_change, before)
+        except Exception as recovery_error:  # noqa: BLE001 - retain both failures and recovery intent.
+            error.add_note(f"texture recovery also failed: {recovery_error}")
         raise
-    return TextureInstallReport(manifest["pack_version"], manifest["texture_count"], target)
+    return TextureInstallReport(pack_version, texture_count, target)
+
+
+def _stage_pack(
+    game_dir: Path,
+    source: TexturePackSource,
+    options: PackInstallOptions,
+    before: _InstalledState | None,
+) -> tuple[Path, list[dict[str, str]], str, int, str] | None:
+    """Prepare a complete replacement without changing the active installation."""
+    archives = ()
+    reuse = before is not None and before.manifest_sha256 == source.inventory_sha256
+    if not reuse:
+        archives = _obtain_archives(
+            source, cache_dir=options.cache_dir, offline=options.offline, progress=options.progress
+        )
+        manifest, parts, identity = _load_pack_set(archives, progress=options.progress)
+        if (
+            before is not None
+            and _matches_current(before, identity)
+            and installed_ini_matches(game_dir / before.ini.filename, before.ini)
+        ):
+            return None
+        reuse = before is not None and before.manifest_sha256 == identity
+    parent = _texture_directory(game_dir).parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".install-", dir=parent))
+    try:
+        if reuse and before is not None:
+            textures = []
+            for entry in before.files:
+                if entry.filename == FACES_FILENAME:
+                    continue
+                original = _texture_directory(game_dir) / entry.filename
+                try:
+                    (staging / entry.filename).hardlink_to(original)
+                except OSError:
+                    shutil.copyfile(original, staging / entry.filename)
+                textures.append(entry.to_dict())
+            version, count, identity = (
+                before.pack_version,
+                before.texture_count,
+                before.manifest_sha256,
+            )
+        else:
+            textures = _convert_archives(
+                archives, parts, manifest, staging, progress=options.progress
+            )
+            version, count = manifest["pack_version"], manifest["texture_count"]
+        return staging, [*textures, _install_faces_file(staging)], version, count, identity
+    except BaseException:
+        shutil.rmtree(staging)
+        raise
+
+
+def _recover_failed_install(
+    game_dir: Path,
+    journal: TextureJournal | None,
+    staging: Path,
+    ini_change: IniChange | None,
+    before: _InstalledState | None,
+) -> None:
+    """Use durable intent when present; otherwise discard only our unpublished stage."""
+    if journal is not None and journal.path.is_file():
+        if journal.before_state:
+            _recover_texture_update(journal)
+        else:
+            _rollback_texture_journal(journal, remove_state=True)
+        return
+    if ini_change is not None:
+        restore_custom_path(game_dir, ini_change, force=True)
+    if staging.is_dir():
+        shutil.rmtree(staging)
+    _prune_empty_install_directories(_texture_directory(game_dir), game_dir)
+    if before is None:
+        (game_dir / STATE_FILENAME).unlink(missing_ok=True)
 
 
 def verify_texture_pack(
@@ -182,11 +272,15 @@ def _verify_texture_pack(
     progress: TextureInstallProgressCallback | None,
     hash_files: bool,
     description: str,
+    check_ini: bool = True,
 ) -> TextureInstallReport:
     """Verify installation structure and optionally rehash every installed BMP."""
     game_dir = game_dir.resolve()
     state = _load_state(game_dir / STATE_FILENAME)
-    directory = game_dir / state.directory
+    directory = _texture_directory(game_dir)
+    if directory.is_symlink() or directory.is_junction():
+        msg = f"unsafe texture directory: {directory}"
+        raise TexturePackError(msg)
     expected_names = {entry.filename.casefold() for entry in state.files}
     if not directory.is_dir():
         actual_names: set[str] = set()
@@ -196,6 +290,11 @@ def _verify_texture_pack(
         msg = "installed texture file inventory does not match its state"
         raise TexturePackError(msg)
     entries = state.files
+    for entry in entries:
+        path = directory / entry.filename
+        if path.is_symlink() or not path.is_file():
+            msg = f"unsafe installed texture: {entry.filename}"
+            raise TexturePackError(msg)
     report_install_progress(progress, description, 0, len(entries))
     if hash_files:
         workers = _worker_count(len(entries))
@@ -216,7 +315,7 @@ def _verify_texture_pack(
         report_install_progress(progress, description, len(entries), len(entries))
     ini = state.ini
     ini_path = game_dir / ini.filename
-    if not installed_ini_matches(ini_path, ini):
+    if check_ini and not installed_ini_matches(ini_path, ini):
         msg = f"managed GK3 INI state does not verify: {ini.filename}"
         raise TexturePackError(msg)
     texture_count = state.texture_count
@@ -249,6 +348,9 @@ def recover_texture_install(game_dir: Path) -> None:
     if not journal_path.is_file():
         return
     journal = TextureJournal.load(root)
+    if journal.before_state:
+        _recover_texture_update(journal)
+        return
     state_path = root / STATE_FILENAME
     if state_path.is_file():
         verify_texture_pack(root)
@@ -294,7 +396,11 @@ def _rollback_texture_journal(journal: TextureJournal, *, remove_state: bool) ->
 
 def _texture_directory(game_dir: Path) -> Path:
     """Return the dedicated installed-BMP directory."""
-    return game_dir / WORK_DIRECTORY / TEXTURES_DIRECTORY / INSTALL_DIRECTORY
+    target = game_dir / WORK_DIRECTORY / TEXTURES_DIRECTORY / INSTALL_DIRECTORY
+    if target.resolve() != target:
+        msg = f"texture installation path was redirected: {target}"
+        raise TexturePackError(msg)
+    return target
 
 
 def _require_install_target_available(target: Path) -> None:
@@ -342,6 +448,11 @@ def _load_state(path: Path) -> _InstalledState:
     except (OSError, json.JSONDecodeError) as exc:
         msg = f"cannot read texture installation state {path}: {exc}"
         raise TexturePackError(msg) from exc
+    return _state_from_payload(payload, path)
+
+
+def _state_from_payload(payload: object, path: Path) -> _InstalledState:
+    """Validate persisted and journaled inventories by the same ownership rules."""
     if not isinstance(payload, dict):
         msg = f"{path}: expected a texture state object"
         raise TexturePackError(msg)
@@ -383,7 +494,72 @@ def _load_state(path: Path) -> _InstalledState:
         texture_count,
         identities,
         IniChange.from_dict(payload.get("ini")),
+        payload["manifest_sha256"],
     )
+
+
+def _check_owned_tree(
+    directory: Path, entries: tuple[JournalFile, ...], *, allow_missing: bool = False
+) -> None:
+    """Prove the complete flat inventory before any rename or removal."""
+    if directory.is_symlink() or directory.is_junction() or not directory.is_dir():
+        msg = f"unsafe texture directory: {directory}"
+        raise TexturePackError(msg)
+    actual = {p.name for p in directory.iterdir()}
+    expected = {entry.filename for entry in entries}
+    if actual - expected or (not allow_missing and actual != expected):
+        msg = f"texture directory contains missing or unowned files: {directory}"
+        raise TexturePackError(msg)
+    for entry in entries:
+        path = directory / entry.filename
+        if allow_missing and not path.exists():
+            continue
+        if path.is_symlink() or not path.is_file() or sha256_file(path) != entry.sha256:
+            msg = f"texture changed during installation: {entry.filename}"
+            raise TexturePackError(msg)
+
+
+def _remove_owned_tree(directory: Path, entries: tuple[JournalFile, ...]) -> None:
+    """Delete only a complete verified prior or staged installation."""
+    if not directory.exists():
+        return
+    _check_owned_tree(directory, entries, allow_missing=True)
+    for entry in entries:
+        (directory / entry.filename).unlink(missing_ok=True)
+    directory.rmdir()
+
+
+def _recover_texture_update(journal: TextureJournal) -> None:
+    """Complete a committed swap or restore the prior tree and exact INI."""
+    root = journal.game_dir
+    before = _state_from_payload(json.loads(journal.before_state or "null"), journal.path)
+    after = _state_from_payload(json.loads(journal.after_state or "null"), journal.path)
+    if set(after.files) != set(journal.files):
+        msg = "texture update journal contradicts its intended inventory"
+        raise TexturePackError(msg)
+    state_path = root / STATE_FILENAME
+    current = state_path.read_text(encoding="utf-8")
+    if current not in {journal.before_state, journal.after_state}:
+        msg = "texture state changed outside the interrupted update"
+        raise TexturePackError(msg)
+    if current == journal.after_state:
+        verify_texture_pack(root)
+        _remove_owned_tree(journal.backup, before.files)
+    else:
+        ini_path = root / journal.ini.filename
+        if installed_ini_matches(ini_path, journal.ini):
+            restore_custom_path(root, journal.ini)
+        elif (ini_path.read_bytes() if ini_path.exists() else None) != journal.ini.previous:
+            msg = "GK3 INI changed outside the interrupted texture update"
+            raise TexturePackError(msg)
+        if journal.backup.exists():
+            _check_owned_tree(journal.backup, before.files)
+            _remove_owned_tree(journal.target, after.files)
+            journal.backup.replace(journal.target)
+        else:
+            _check_owned_tree(journal.target, before.files)
+    _remove_owned_tree(journal.staging, after.files)
+    journal.path.unlink()
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,7 +571,6 @@ class TextureInstallRequest:
     pack: Path | None = None
     local: bool = False
     cache_dir: Path | None = None
-    force: bool = False
     offline: bool = False
 
 
@@ -410,33 +585,58 @@ def install(
         msg = "--local and --pack are mutually exclusive"
         raise ValueError(msg)
     with ExclusiveFileLock(executable_lock_path(target.exe)):
-        if request.local or request.pack is not None:
-            source = discover_local_texture_pack(
-                request.pack,
-                search_directories=(texture_workspace_directory(target.game_dir),),
-            )
-        else:
-            lock = json.loads(
-                files("gk3hd").joinpath("assets/texture-pack-lock.json").read_text(encoding="utf-8")
-            )
-            source = TexturePackSource.from_lock(lock)
-            if not source.assets:
-                # Only unpinned development checkouts consult ambient packs.
-                with suppress(TexturePackError):
-                    source = discover_local_texture_pack(
-                        None,
-                        search_directories=(texture_workspace_directory(target.game_dir),),
-                    )
+        source = _request_source(request, target.game_dir)
         return install_texture_pack(
             target.game_dir,
             source,
             PackInstallOptions(
                 cache_dir=request.cache_dir,
-                force=request.force,
                 offline=request.offline,
                 progress=progress,
             ),
         )
+
+
+def _matches_current(state: _InstalledState, inventory_sha256: str | None) -> bool:
+    """Reuse a pack only if its logical inventory and bundled face correction match."""
+    faces = files("gk3hd").joinpath(f"assets/{FACES_FILENAME}").read_bytes()
+    return inventory_sha256 == state.manifest_sha256 and any(
+        entry.filename == FACES_FILENAME and entry.sha256 == hashlib.sha256(faces).hexdigest()
+        for entry in state.files
+    )
+
+
+def _request_source(request: TextureInstallRequest, game_dir: Path) -> TexturePackSource:
+    """Resolve the same explicit, local or pinned source for preparation and install."""
+    if request.local or request.pack is not None:
+        return discover_local_texture_pack(
+            request.pack, search_directories=(texture_workspace_directory(game_dir),)
+        )
+    lock = json.loads(
+        files("gk3hd").joinpath("assets/texture-pack-lock.json").read_text(encoding="utf-8")
+    )
+    source = TexturePackSource.from_lock(lock)
+    if not source.assets:
+        with suppress(TexturePackError):
+            return discover_local_texture_pack(
+                None, search_directories=(texture_workspace_directory(game_dir),)
+            )
+    return source
+
+
+def prefetch(
+    request: TextureInstallRequest, *, progress: TextureInstallProgressCallback | None = None
+) -> None:
+    """Cache and validate required archives before a composed update mutates the game."""
+    target = discover_game(game_dir=request.game_dir, exe=request.exe)
+    source = _request_source(request, target.game_dir)
+    state = target.game_dir / STATE_FILENAME
+    if state.is_file() and _matches_current(_load_state(state), source.inventory_sha256):
+        return
+    archives = _obtain_archives(
+        source, cache_dir=request.cache_dir, offline=request.offline, progress=progress
+    )
+    _load_pack_set(archives, progress=progress)
 
 
 def verify(*, game_dir: Path | None = None, exe: Path | None = None) -> TextureInstallReport:

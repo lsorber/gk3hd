@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from gk3hd.patch.catalog import PATCHES, PLANNER, PROFILES
 from gk3hd.patch.install.configuration import GraphicsBackend
 from gk3hd.patch.install.transaction import Installer
-from gk3hd.patch.manifest import manifest_path_for_exe
+from gk3hd.patch.manifest import PatchManifest, manifest_path_for_exe
 from gk3hd.patch.model import PatchDefinition, PatchId, PatchProfile, ProfileId
 from gk3hd.system.discovery import GameTarget, discover_game
 from gk3hd.system.display import current_display_mode
@@ -78,9 +78,16 @@ class PatchService:
         if unknown:
             msg = f"unknown patch: {unknown[0]}"
             raise ValueError(msg)
-        display = current_display_mode()
-        width, height = request.resolution or (display.width, display.height)
-        return self._installer.prepare(
+        previous_path = manifest_path_for_exe(target.exe)
+        previous = PatchManifest.from_path(previous_path) if previous_path.is_file() else None
+        if request.resolution is not None:
+            width, height = request.resolution
+        elif previous is not None:
+            width, height = previous.width, previous.height
+        else:
+            display = current_display_mode()
+            width, height = display.width, display.height
+        prepared = self._installer.prepare(
             exe=target.exe,
             profile=None if request.group is None else ProfileId(request.group),
             patches=selected,
@@ -92,18 +99,21 @@ class PatchService:
                 else GraphicsBackend(request.backend)
             ),
         )
+        return replace(prepared, preserve_resolution=request.resolution is None)
 
     def install(self, request: PatchRequest) -> PreparedInstall:
         """Prepare then commit one patch installation."""
         prepared = self.prepare(request)
         self._installer.recover(exe=prepared.target)
-        self._installer.apply(exe=prepared.target, prepared=prepared)
-        return prepared
+        path = manifest_path_for_exe(prepared.target)
+        before = path.read_bytes() if path.is_file() else None
+        manifest = self._installer.apply(exe=prepared.target, prepared=prepared)
+        return replace(prepared, changed=before != manifest.to_json().encode("utf-8"))
 
     def verify(
         self, *, game_dir: Path | None = None, exe: Path | None = None
     ) -> VerificationReport:
-        """Rebuild and verify the complete installed plan."""
+        """Verify the installed version without requiring the same compiler revision."""
         target = discover_game(game_dir=game_dir, exe=exe)
         return self._installer.verify(exe=target.exe)
 

@@ -94,12 +94,22 @@ def download_codecs(cache: Path | None = None, *, progress: ProgressCallback | N
     )
 
 
+def verify_codecs(archive: Path) -> None:
+    """Reject a missing or altered offline codec before any game changes."""
+    pin = _pin()
+    if (
+        not archive.is_file()
+        or archive.stat().st_size != pin["size"]
+        or sha256_file(archive) != pin["sha256"]
+    ):
+        msg = "cached video codecs failed verification"
+        raise ValueError(msg)
+
+
 def extract_codecs(archive: Path, output: Path) -> None:
     """Install only pinned codec and notice names, never register system filters."""
     pin = _pin()
-    if archive.stat().st_size != pin["size"] or sha256_file(archive) != pin["sha256"]:
-        msg = "cached video codecs failed verification"
-        raise ValueError(msg)
+    verify_codecs(archive)
     with zipfile.ZipFile(archive) as package:
         for name in pin["files"]:
             atomic_write(output / name, package.read(name))

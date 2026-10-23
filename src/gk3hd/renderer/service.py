@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from gk3hd.patch.install.platform import default_configuration
 from gk3hd.patch.install.windows import is_gk3_running, local_graphics_proxy_dlls
-from gk3hd.patch.manifest import manifest_path_for_exe
+from gk3hd.patch.manifest import ExternalChange, manifest_path_for_exe
 from gk3hd.renderer import distribution
 from gk3hd.renderer.build import local_build
 from gk3hd.renderer.state import JOURNAL_FILENAME, STATE_FILENAME, RendererState
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
     from gk3hd.patch.install.windows import WindowsInstallConfiguration
     from gk3hd.system.download import ProgressCallback
+
+_COMPOSITE_SCHEMA = 2
 
 
 def download(*, progress: ProgressCallback | None = None) -> Path:
@@ -51,6 +53,27 @@ class RendererService:
         if self._process_probe():
             msg = "close GK3 before changing the renderer"
             raise RuntimeError(msg)
+
+    def prefetch(
+        self,
+        *,
+        exe: Path | None = None,
+        offline: bool = False,
+        progress: ProgressCallback | None = None,
+    ) -> Path:
+        """Resolve verified renderer bytes before other components are changed."""
+        if not offline:
+            return download(progress=progress)
+        before = RendererState.load(exe) if exe else None
+        if before is not None and exe is not None:
+            self._adapter(exe).prepare_restore(exe=exe, changes=before.changes)
+            distribution.retain_dll(exe.with_name(distribution.DLL_NAME))
+            return distribution.cached_path(before.digest)
+        path = distribution.cached_path(distribution.DLL_SHA256)
+        if not distribution.cached_dll_matches(distribution.DLL_SHA256):
+            msg = "the required renderer is not available in the verified offline cache"
+            raise ValueError(msg)
+        return path
 
     def install(
         self,
@@ -90,7 +113,7 @@ class RendererService:
             adapter = self._adapter(target)
             before = RendererState.load(target)
             if before:
-                adapter.verify(exe=target, changes=before.changes)
+                adapter.prepare_restore(exe=target, changes=before.changes)
             conflicts = local_graphics_proxy_dlls(target.parent, allow_owned_d7vk=True)
             if conflicts:
                 msg = f"unmanaged graphics DLLs conflict with D7VK: {', '.join(conflicts)}"
@@ -98,14 +121,16 @@ class RendererService:
             transition = RendererState(
                 adapter.prepare_renderer(exe=target, digest=digest), target.name
             )
-            originals = {(c.surface, c.key): c.previous for c in before.changes} if before else {}
+            originals = {(c.surface, c.key): c for c in before.changes} if before else {}
             after = RendererState(
                 tuple(
-                    replace(c, previous=originals.get((c.surface, c.key), c.previous))
+                    replace(c, previous=_baseline(c, originals.get((c.surface, c.key))))
                     for c in transition.changes
                 ),
                 target.name,
             )
+            if after == before:
+                return after
             self._journal(target, "install", before, transition)
             try:
                 adapter.apply(exe=target, changes=transition.changes)
@@ -159,10 +184,10 @@ class RendererService:
             else None
         )
         current = RendererState.load(exe)
-        original_values = {(c.surface, c.key): c.previous for c in before.changes} if before else {}
+        original_values = {(c.surface, c.key): c for c in before.changes} if before else {}
         intended = RendererState(
             tuple(
-                replace(c, previous=original_values.get((c.surface, c.key), c.previous))
+                replace(c, previous=_baseline(c, original_values.get((c.surface, c.key))))
                 for c in transition.changes
             ),
             exe.name,
@@ -206,6 +231,15 @@ class RendererService:
     def _require_composite_rollback(exe: Path) -> None:
         """Only a recorded pre-install absence can bypass the dependency guard."""
         journal = json.loads(exe.with_name(".gk3hd-install.json").read_bytes())
+        if isinstance(journal, dict) and journal.get("schema_version") == _COMPOSITE_SCHEMA:
+            existing = journal.get("existing")
+            if (
+                isinstance(existing, list)
+                and all(isinstance(name, str) for name in existing)
+                and set(existing) <= {"renderer", "patch", "textures", "videos"}
+                and "renderer" not in existing
+            ):
+                return
         if (
             not isinstance(journal, dict)
             or journal.get("schema_version") != 1
@@ -238,3 +272,12 @@ class RendererService:
                 }
             ).encode(),
         )
+
+
+def _baseline(change: ExternalChange, before: ExternalChange | None) -> str | None:
+    """Retain newer registry preferences as well as the initial file baseline."""
+    if before is None or (
+        change.surface.startswith("registry:") and change.previous != before.installed
+    ):
+        return change.previous
+    return before.previous

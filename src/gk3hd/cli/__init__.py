@@ -121,13 +121,15 @@ def install(
     ] = None,
     resolution: Annotated[
         str | None,
-        typer.Option(help="Display mode as WIDTHxHEIGHT; defaults to the active display."),
+        typer.Option(help="WIDTHxHEIGHT; keeps the current setting or uses the active display."),
     ] = None,
-    group: Annotated[str, typer.Option(help="Patch group to install.")] = "recommended",
+    group: Annotated[
+        str | None,
+        typer.Option(help="Patch group; defaults to the current selection or recommended."),
+    ] = None,
     cache_dir: Annotated[
         Path | None, typer.Option(help="Downloaded-asset cache directory.")
     ] = None,
-    force: ForceOption = False,
     offline: Annotated[
         bool,
         typer.Option(
@@ -135,7 +137,7 @@ def install(
         ),
     ] = False,
 ) -> None:
-    """Install the renderer, recommended patches, upscaled textures and videos."""
+    """Install or update the renderer, patches, upscaled textures and videos."""
     if platform.system() == "Linux":
         try:
             target = discover_game(game_dir=game_dir, exe=exe)
@@ -162,7 +164,6 @@ def install(
                     exe=exe,
                     pack=texture_pack,
                     cache_dir=cache_dir,
-                    force=force,
                     offline=offline,
                 ),
                 video_request=PackRequest(selection=video_pack, cache=cache_dir, offline=offline),
@@ -171,7 +172,7 @@ def install(
     except CLI_ERRORS as exc:
         _print_error(exc)
         raise typer.Exit(1) from exc
-    verb = "Installed gk3hd" if report.changed else "gk3hd was already installed"
+    verb = "Installed gk3hd updates" if report.changed else "gk3hd is already up to date"
     console.print(
         f"[bold green]{verb}[/] - {report.patches} patches, "
         f"{report.textures} textures, {report.videos} videos"

@@ -70,6 +70,8 @@ class TextureJournal:
     target_directory: str
     ini: IniChange
     files: tuple[JournalFile, ...]
+    before_state: str | None = None
+    after_state: str | None = None
 
     @classmethod
     def create(
@@ -109,6 +111,11 @@ class TextureJournal:
         """Return the schema-validated installed-BMP directory."""
         return self.game_dir / self.target_directory
 
+    @property
+    def backup(self) -> Path:
+        """Keep the prior complete tree beside the staged replacement."""
+        return self.staging.with_name(self.staging.name.replace(".install-", ".previous-", 1))
+
     def write(self) -> None:
         """Publish rollback intent before committing either owned surface."""
         payload = {
@@ -117,6 +124,8 @@ class TextureJournal:
             "ini": self.ini.to_dict(),
             "schema_version": _SCHEMA,
             "staging_directory": self.staging_directory,
+            "before_state": self.before_state,
+            "after_state": self.after_state,
         }
         atomic_write(
             self.path,
@@ -150,12 +159,20 @@ class TextureJournal:
         if not identities or len(names) != len(identities):
             msg = f"texture recovery journal {path.name} has an empty or duplicate file inventory"
             raise TextureJournalError(msg)
+        before, after = payload.get("before_state"), payload.get("after_state")
+        if (before is None) != (after is None) or any(
+            value is not None and not isinstance(value, str) for value in (before, after)
+        ):
+            msg = "texture update journal has incomplete prior or intended state"
+            raise TextureJournalError(msg)
         return cls(
             root,
             staging_directory,
             target_directory,
             IniChange.from_dict(payload.get("ini")),
             identities,
+            before,
+            after,
         )
 
 
@@ -175,6 +192,7 @@ def _staging_directory(
             relative.parent == _STAGING_PARENT
             and relative.name.startswith(_STAGING_PREFIX)
             and candidate.parent == expected_parent
+            and candidate == root.joinpath(*relative.parts)
         ):
             return relative.as_posix()
     msg = f"texture recovery journal {source.name} has an unsafe staging directory"

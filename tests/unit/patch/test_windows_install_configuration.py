@@ -453,6 +453,8 @@ def test_interrupted_apply_recovery_accepts_only_known_states(tmp_path: Path) ->
     registry = MemoryRegistry()
     configuration = WindowsInstallConfiguration(registry)
     changes = configuration.prepare(exe=exe, width=1920, height=1080)
+    assert changes[0].installed is not None
+    assert changes[1].installed is not None
     registry.values["Game Width"] = changes[0].installed
     registry.values["Game Height"] = changes[1].installed
 
