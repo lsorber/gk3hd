@@ -1,5 +1,16 @@
 {
+  "archives": [
+    {
+      "filename": "gk3hd-video-pack-v1.2.0-part01-of-02.zip",
+      "sha256": "68111775718f9f1e55d51bd091295eb399998ed7e7dfe404f5c57d64563fa867",
+      "size": 1921896075
+    },
+    {
+      "filename": "gk3hd-video-pack-v1.2.0-part02-of-02.zip",
+      "sha256": "6f6e366413655e27b114feaf97fc29f235643409425c73a1c817332d71662855",
+      "size": 238058247
+    }
+  ],
   "schema_version": 1,
-  "tag": "v1.1.1",
-  "archives": []
+  "tag": "v1.2.0"
 }

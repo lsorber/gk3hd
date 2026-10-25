@@ -1,3 +1,10 @@
+## v1.2.0 (2026-10-25)
+
+### Feat
+
+- **install**: update existing installations in place
+- **videos**: add 4x cinematic upscaling and in-game playback
+
 ## v1.1.2 (2026-10-19)
 
 ### Fix
