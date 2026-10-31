@@ -10,6 +10,7 @@ from PIL import Image
 import gk3hd.textures.analyze.manifest as texture_analyze
 import gk3hd.textures.upscale.service as texture_upscale
 from gk3hd.textures.analyze.manifest import analyze_directory
+from gk3hd.textures.analyze.policy import POLICY_SCHEMA_VERSION
 from gk3hd.textures.analyze.usage import (
     TextureUsage,
     action_button_textures,
@@ -232,7 +233,9 @@ def test_explicit_policy_overrides_archive_facts(tmp_path: Path) -> None:
     Image.new("RGB", (2, 2)).save(tmp_path / "STONE.BMP")
     policy = tmp_path / "policy.json"
     policy.write_text(
-        '{"schema_version":9,"feature_overrides":[{"textures":["STONE.BMP"],'
+        '{"schema_version":'
+        + str(POLICY_SCHEMA_VERSION)
+        + ',"feature_overrides":[{"textures":["STONE.BMP"],'
         '"set":{"tiled":false},"reason":"Test correction."}]}',
         encoding="utf-8",
     )

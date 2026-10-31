@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("names", "sizes", "old_schema"),
     [
-        (("BLAZER_3.BMP", "GABEROOMKEY3.BMP", "BLUEAPPLE3.BMP"), ((32, 30), (30, 32), (32, 31)), 6),
+        (("BLAZER_3.BMP", "SMALL_ART.BMP", "BLUEAPPLE3.BMP"), ((32, 30), (30, 32), (32, 31)), 6),
         (("GAB_MUGSHOT.BMP", "GRA_MUGSHOT.BMP"), ((67, 78), (67, 78)), 8),
     ],
 )

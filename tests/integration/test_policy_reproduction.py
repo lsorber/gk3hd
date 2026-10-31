@@ -8,13 +8,14 @@ from PIL import Image
 import gk3hd.textures.analyze.manifest as texture_analyze
 import gk3hd.textures.upscale.service as texture_upscale
 from gk3hd.textures.analyze.manifest import load_feature_manifest
+from gk3hd.textures.analyze.policy import POLICY_SCHEMA_VERSION
 from gk3hd.textures.pack.build import build_texture_pack
 from gk3hd.textures.upscale.service import UpscaleOptions
 
 
 def test_independent_policy_rebuilds_have_identical_analysis_pngs_and_pack(tmp_path: Path) -> None:
     policy = {
-        "schema_version": 9,
+        "schema_version": POLICY_SCHEMA_VERSION,
         "feature_overrides": [
             {"textures": ["ART.BMP"], "set": {"tiled": True}, "reason": "Repeating surface."}
         ],

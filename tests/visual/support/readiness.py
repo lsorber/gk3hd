@@ -18,7 +18,9 @@ _BUTTON_Y_MIN: Final = 0.86
 _BUTTON_Y_SPAN_MAX: Final = 0.035
 _MIN_BUTTON_WIDTH: Final = 0.03
 _BUTTON_COUNT: Final = 4
-_WARM_RED_RANGE: Final = (150, 230)
+# Restore is darker gold when a fresh installation has no saved games.
+# It remains a visible control and must count when locating Play.
+_WARM_RED_RANGE: Final = (100, 230)
 _WARM_GREEN_RANGE: Final = (80, 160)
 _WARM_BLUE_RANGE: Final = (10, 100)
 _WARM_RED_GREEN_GAP: Final = 30

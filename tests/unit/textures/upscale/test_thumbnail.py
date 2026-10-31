@@ -34,6 +34,35 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+@pytest.mark.parametrize("bias", [-30.0, 13.0, 200.0])
+def test_unframed_tone_adjustment_preserves_black_backdrop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bias: float
+) -> None:
+    small = tmp_path / "PREVIEW.BMP"
+    Image.new("RGB", (16, 16)).save(small)
+    large = Image.new("RGB", (64, 64))
+    large.paste((80, 100, 120), (16, 16, 48, 48))
+    large.save(tmp_path / "PAINT.BMP")
+    recipe = ThumbnailRecipe(
+        (16, 16),
+        0.25,
+        (0, 0),
+        source_name="PAINT.BMP",
+        source_size=large.size,
+        brightness=1.25,
+        brightness_offset=bias,
+    )
+    monkeypatch.setattr("gk3hd.textures.upscale.thumbnail.thumbnail_recipe", lambda _name: recipe)
+
+    result = regenerate_thumbnail(small)
+
+    assert result.size == (64, 64)
+    assert result.getpixel((8, 8)) == (0, 0, 0)
+    assert result.getpixel((32, 32)) == tuple(
+        round(max(0, min(255, value * 1.25 + bias))) for value in (80, 100, 120)
+    )
+
+
 @pytest.mark.parametrize("black_level", [0, 8])
 @pytest.mark.parametrize("preserve_cutouts", [False, True])
 def test_framed_art_distinguishes_black_ink_from_verified_cutouts(
@@ -145,6 +174,20 @@ def test_separate_axis_scale_reproduces_authored_whole_object_dimensions() -> No
         "BLUEAPPLE3.BMP",
         "BLUEAPPLE9.BMP",
         "UNDEFINED9.BMP",
+        "CANDY3.BMP",
+        "CARDOU3.BMP",
+        "CHUPAM3.BMP",
+        "DAGGER3.BMP",
+        "DIAPER3.BMP",
+        "GABEROOMKEY3.BMP",
+        "GABEWALLET3.BMP",
+        "GRA_NYT3.BMP",
+        "MADCOLT3.BMP",
+        "TICKET_3.BMP",
+        "TIRETRACE3.BMP",
+        "PJAMESBIZCARD3.BMP",
+        "WILKESLETR3.BMP",
+        "SIDFILE_3.BMP",
     ],
 )
 def test_reconstruction_uses_original_large_source_and_refreshes(tmp_path: Path, name: str) -> None:
@@ -163,6 +206,29 @@ def test_reconstruction_uses_original_large_source_and_refreshes(tmp_path: Path,
     assert is_current_thumbnail(small, output)
     Image.new("RGB", recipe.source_size, (90, 60, 30)).save(large)
     assert not is_current_thumbnail(small, output)
+
+
+@pytest.mark.parametrize("name", ["GABEWALLET3.BMP", "NENOTE3.BMP"])
+def test_unframed_reconstruction_removes_source_key_before_filtering(
+    tmp_path: Path, name: str
+) -> None:
+    recipe = thumbnail_recipe(name)
+    assert recipe is not None
+    source = tmp_path / name
+    Image.new("RGB", recipe.size).save(source)
+    large = Image.new("RGB", recipe.source_size, (255, 0, 255))
+    large.paste((0, 180, 0), (180, 40, 450, 350))
+    large.paste((0, 0, 0), (270, 100, 300, 130))
+    large.save(tmp_path / recipe.source_name)
+
+    result = regenerate_thumbnail(source)
+    assert result.getchannel("B").getextrema() == (0, 0)
+    assert result.getchannel("R").getextrema() == (0, 0)
+    assert result.getchannel("G").getextrema() == (0, 180)
+    # Enclosed black ink remains black, rather than being treated as a key.
+    x = round((285 * recipe.source_scale + recipe.offset[0] + 0.5) * 4 - 0.5)
+    y = round((115 * recipe.source_scale + recipe.offset[1] + 0.5) * 4 - 0.5)
+    assert result.getpixel((x, y)) == (0, 0, 0)
     assert plan_texture(TextureFeatures(name=name)).kind is PipelineKind.THUMBNAIL_SOURCE_4X
 
 

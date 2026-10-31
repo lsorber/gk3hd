@@ -54,15 +54,19 @@ def test_pipeline_choice_does_not_lie_about_texture_features_and_survives_manife
     assert serialized["pipeline_override"]["status"] == "todo"
 
 
-def test_lady_howard_skin_uses_todo_bicubic_fallback(tmp_path: Path) -> None:
-    _write_bmp24(tmp_path / "LH3_CHEST.BMP")
-    report = analyze_directory(tmp_path)
+def test_temporary_native_fallback_keeps_color_semantics(tmp_path: Path) -> None:
+    _write_bmp24(tmp_path / "ART.BMP")
+    policy = _policy(
+        tmp_path, pipeline_overrides=[_decision(pipeline="retain", variant="native-size")]
+    )
+    report = analyze_directory(tmp_path, overrides=policy)
     feature = report.manifest.textures[0]
     assert feature.pipeline_override is not None
     assert feature.pipeline_override.status == "todo"
-    assert "skin" in feature.pipeline_override.reason
     assert feature.pipeline_override.todo
-    assert plan_texture(feature).kind is PipelineKind.COLOR_SMOOTH
+    assert feature.kind is TextureKind.COLOR
+    assert not feature.exact_raster
+    assert plan_texture(feature).kind.keeps_native_size
     path = tmp_path / "analysis.json"
     write_manifest(report.manifest, path)
     assert load_feature_manifest(path)[feature.name] == feature

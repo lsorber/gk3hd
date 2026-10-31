@@ -21,7 +21,7 @@ from gk3hd.textures.flat import (
     protect_short_name_alias,
     require_actual_file,
 )
-from gk3hd.textures.routing import PipelineKind, PipelinePlan, plan_texture
+from gk3hd.textures.routing import Pipeline, PipelineKind, PipelinePlan, plan_texture
 from gk3hd.textures.upscale.fonts.atlas import FONT_OUTLINE_STAMP, font_atlas_output_size
 from gk3hd.textures.upscale.generation import (
     ALPHA_STAMP,
@@ -30,7 +30,6 @@ from gk3hd.textures.upscale.generation import (
     generation_stamp,
     verify_generation_stamp,
 )
-from gk3hd.textures.upscale.replacement import is_current_replacement, regenerate_replacement
 from gk3hd.textures.upscale.sidney_frame import (
     FRAME_BATCH,
     FRAME_REGIONS,
@@ -224,9 +223,7 @@ def _upscale_one(
         plan = plan_texture(features)
         route = plan.kind
         stamp = generation_stamp(source, plan) if route in STAMPED_ROUTES else None
-        if route is PipelineKind.REVIEWED_REPLACEMENT:
-            transformed = regenerate_replacement(source)
-        elif route is PipelineKind.FONT_ATLAS_SOURCE_4X:
+        if route is PipelineKind.FONT_ATLAS_SOURCE_4X:
             transformed = regenerate_font_atlas(source)
         elif route is PipelineKind.FONT_BUTTON_SOURCE_4X:
             transformed = regenerate_font_button(source)
@@ -236,9 +233,19 @@ def _upscale_one(
             transformed = regenerate_ui_art(source)
         elif route is PipelineKind.THUMBNAIL_SOURCE_4X:
             transformed = regenerate_thumbnail(source)
+        elif route is PipelineKind.FACE_LAYER_AI:
+            from gk3hd.textures.upscale.face_layer import regenerate_face_layer  # noqa: PLC0415
+
+            transformed = regenerate_face_layer(
+                source, upscaler, detail_sharpening=plan.detail_sharpening
+            )
         else:
             with Image.open(source) as image:
                 transformed = upscale_texture(image, features, upscaler=upscaler)
+        if source.name.upper() == "DM_BASE.BMP":
+            from gk3hd.textures.upscale.driving_map import restore_map_artwork  # noqa: PLC0415
+
+            transformed = restore_map_artwork(source, transformed)
         if stamp is not None:
             verify_generation_stamp(source, plan, stamp)
             transformed.info[GENERATION_STAMP] = stamp
@@ -464,7 +471,6 @@ def _is_resumable_png(
     ):
         return False
     validators = {
-        PipelineKind.REVIEWED_REPLACEMENT: is_current_replacement,
         PipelineKind.FONT_ATLAS_SOURCE_4X: _is_vector_font_output,
         PipelineKind.FONT_BUTTON_SOURCE_4X: _is_vector_button_output,
         PipelineKind.DRIVING_MAP_COMPOSITE: _is_current_driving_map_output,
@@ -699,10 +705,7 @@ def upscale(
         overwrite=options.overwrite,
         font_outlines=font_outlines,
     )
-    needs_ai = any(
-        plan.kind in {PipelineKind.COLOR_AI, PipelineKind.ALPHA_TEST_AI, PipelineKind.ALPHA_AI}
-        for _path, plan, _destination in pending
-    )
+    needs_ai = any(plan.kind.pipeline is Pipeline.AI for _path, plan, _destination in pending)
     upscaler = None
     if needs_ai:
         upscaler = _create_seedvr2_upscaler(

@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 from gk3hd.textures.analyze.manifest import analyze_directory
+from gk3hd.textures.analyze.policy import POLICY_SCHEMA_VERSION
 from gk3hd.textures.routing import PipelineKind, plan_texture
 from gk3hd.textures.upscale.cursor_art import CURSOR_ART_FRAMES, regenerate_cursor_art
 from gk3hd.textures.upscale.ui_art import is_current_ui_art, regenerate_ui_art
@@ -129,7 +130,7 @@ def test_explicit_wait_retention_retains_both_layers(tmp_path: Path, name: str) 
     override.write_text(
         json.dumps(
             {
-                "schema_version": 9,
+                "schema_version": POLICY_SCHEMA_VERSION,
                 "feature_overrides": [
                     {
                         "textures": [name],

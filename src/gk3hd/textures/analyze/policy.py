@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from gk3hd.textures.bmp import BmpInfo
     from gk3hd.textures.model import TextureFeatures
 
-POLICY_SCHEMA_VERSION = 9
+POLICY_SCHEMA_VERSION = 11
 FEATURE_FIELDS = frozenset(
     {
         "kind",
@@ -28,6 +28,7 @@ FEATURE_FIELDS = frozenset(
         "native_size",
         "constant_color",
         "alpha_silhouette",
+        "eyelid_overlay",
     }
 )
 
@@ -109,7 +110,17 @@ def _rules(entries: object, *, pipeline: bool) -> tuple[PolicyRule, ...]:
 def _rule(entry: object, *, pipeline: bool) -> PolicyRule:
     """Decode a single feature correction or pipeline override group."""
     fields = (
-        {"textures", "when", "pipeline", "variant", "status", "reason", "todo"}
+        {
+            "textures",
+            "when",
+            "pipeline",
+            "variant",
+            "status",
+            "reason",
+            "todo",
+            "source_regions",
+            "detail_sharpening",
+        }
         if pipeline
         else {"textures", "when", "set", "reason"}
     )

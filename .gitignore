@@ -45,6 +45,3 @@ texture-pack-build/
 # The small README gallery is the only tracked image exception.
 !gallery/
 !gallery/*.webp
-
-# Explicitly reviewed, small replacement texture shipped with the package.
-!src/gk3hd/assets/textures/LHO_CHST.PNG

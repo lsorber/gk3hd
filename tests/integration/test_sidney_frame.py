@@ -31,7 +31,7 @@ def test_frame_is_joined_once_and_resume_binds_all_five_sources(
     analysis_file(source).write_text(
         json.dumps(
             {
-                "schema_version": 9,
+                "schema_version": 10,
                 "textures": [{"name": name, "native_size": True} for name in FRAME_REGIONS],
             }
         ),

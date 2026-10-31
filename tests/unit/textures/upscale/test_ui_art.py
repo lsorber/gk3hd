@@ -42,6 +42,7 @@ from gk3hd.patch.definitions.runtime2d.ui_frames import (
     SIDNEY_SHAPE_IMAGES,
     SIDNEY_SHARED_CONTROL_IMAGES,
     SIDNEY_TAB_IMAGES,
+    SMALL_CONTROL_IMAGES,
     TIMEBLOCK_BUTTON_IMAGES,
     TITLE_BUTTON_IMAGES,
     TUTORIAL_IMAGES,
@@ -62,6 +63,7 @@ from gk3hd.textures.upscale.ui_art import (
     GPS_MAP_SIZES,
     LEGACY_DOCUMENT_SIZES,
     MONOTONE_BUTTON_SIZES,
+    MONOTONE_CONTROL_SIZES,
     OPTIONS_LABEL_SIZES,
     OPTIONS_PANEL_SIZES,
     PARCHMENT_SIZES,
@@ -85,6 +87,43 @@ from gk3hd.textures.upscale.ui_art import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.parametrize("name", MONOTONE_CONTROL_SIZES)
+def test_shaded_controls_keep_reference_samples_and_color_bounds(tmp_path: Path, name: str) -> None:
+    width, height = MONOTONE_CONTROL_SIZES[name]
+    pixels = np.full((height, width, 3), (80, 110, 130), dtype=np.uint8)
+    pixels[1:-1, 1:-1] = (160, 170, 180)
+    pixels[height // 2, width // 2] = (30, 50, 70)
+    source = tmp_path / name
+    Image.fromarray(pixels).save(source)
+
+    dense = np.asarray(regenerate_ui_art(source))
+
+    assert dense.shape == (height * 4, width * 4, 3)
+    np.testing.assert_array_equal(dense[2::4, 2::4], pixels)
+    assert np.all(dense.min(axis=(0, 1)) >= pixels.min(axis=(0, 1)))
+    assert np.all(dense.max(axis=(0, 1)) <= pixels.max(axis=(0, 1)))
+
+
+@pytest.mark.parametrize("name", ["S_BAR_NOTCH.BMP", "TBBTBAKPAKOD.BMP"])
+def test_small_keyed_controls_preserve_native_contours_and_avoid_key_fringes(
+    tmp_path: Path, name: str
+) -> None:
+    width, height = UI_ART_SIZES[name]
+    pixels = np.full((height, width, 3), (255, 0, 255), dtype=np.uint8)
+    pixels[3:-3, 3:-3] = (0, 150, 0)
+    pixels[height // 2, width // 2] = (0, 0, 0)
+    source = tmp_path / name
+    Image.fromarray(pixels).save(source)
+
+    dense = np.asarray(regenerate_ui_art(source))
+
+    np.testing.assert_array_equal(dense[2::4, 2::4], pixels)
+    visible = ~np.all(dense == (255, 0, 255), axis=2)
+    assert np.all(dense[visible, 0] == 0)
+    assert np.all(dense[visible, 2] == 0)
+    assert 0 < visible.sum() < height * width * 16
 
 
 @pytest.mark.parametrize("name", FINGERPRINT_TOOL_SIZES)
@@ -149,6 +188,7 @@ def test_verified_ui_family_matches_engine_resources_and_respects_exclusions() -
                 *HELP_BUTTON_IMAGES,
                 *LEGACY_TOOLBAR_IMAGES,
                 *LEGACY_DOCUMENT_IMAGES,
+                *SMALL_CONTROL_IMAGES,
                 *MESSAGE_BUTTON_IMAGES,
                 *LOAD_SAVE_BUTTON_IMAGES,
                 *SIDNEY_FRAME_IMAGES,
@@ -475,9 +515,13 @@ def test_gps_map_and_opacity_share_reference_samples_without_ai(tmp_path: Path, 
         plan_texture(TextureFeatures(name, kind=TextureKind.ALPHA)).kind
         is PipelineKind.UI_SOURCE_4X
     )
-    color = tmp_path / name.replace("_ALPHA", "")
-    mask.convert("RGB").save(color)
-    assert regenerate_ui_art(color).convert("L").tobytes() == result.tobytes()
+    color_name = name.replace("_ALPHA", "")
+    # Some shipped areas have only an opacity image at this size. Do not
+    # manufacture a nonexistent color counterpart to test the paired path.
+    if color_name in GPS_MAP_SIZES:
+        color = tmp_path / color_name
+        mask.convert("RGB").save(color)
+        assert regenerate_ui_art(color).convert("L").tobytes() == result.tobytes()
     assert (
         plan_texture(TextureFeatures(name, kind=TextureKind.DATA)).kind
         is PipelineKind.DATA_UNCHANGED

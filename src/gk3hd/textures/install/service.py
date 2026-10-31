@@ -24,6 +24,7 @@ from gk3hd.system.ini import (
     restore_custom_path,
 )
 from gk3hd.system.locking import ExclusiveFileLock, executable_lock_path
+from gk3hd.textures.install.backdrop_edges import backdrop_edge_fixes
 from gk3hd.textures.install.conversion import _convert_archives, _worker_count
 from gk3hd.textures.install.journal import (
     JOURNAL_FILENAME,
@@ -109,7 +110,7 @@ def install_texture_pack(
             description="Verifying installed textures",
             check_ini=False,
         )
-        if _matches_current(before, source.inventory_sha256) and installed_ini_matches(
+        if _matches_current(before, source.inventory_sha256, game_dir) and installed_ini_matches(
             game_dir / before.ini.filename, before.ini
         ):
             return TextureInstallReport(
@@ -155,7 +156,7 @@ def install_texture_pack(
         journal.write()
         if before:
             target.replace(journal.backup)
-        _commit_staged_bmps(staging, target)
+        _commit_staged_resources(staging, target)
         apply_custom_path(game_dir, ini_change, ini_payload)
         atomic_write(state_path, json_bytes(state))
         report_install_progress(options.progress, "Installing textures", 1, 1)
@@ -193,7 +194,7 @@ def _stage_pack(
         manifest, parts, identity = _load_pack_set(archives, progress=options.progress)
         if (
             before is not None
-            and _matches_current(before, identity)
+            and _matches_current(before, identity, game_dir)
             and installed_ini_matches(game_dir / before.ini.filename, before.ini)
         ):
             return None
@@ -205,7 +206,7 @@ def _stage_pack(
         if reuse and before is not None:
             textures = []
             for entry in before.files:
-                if entry.filename == FACES_FILENAME:
+                if Path(entry.filename).suffix.casefold() != ".bmp":
                     continue
                 original = _texture_directory(game_dir) / entry.filename
                 try:
@@ -223,10 +224,22 @@ def _stage_pack(
                 archives, parts, manifest, staging, progress=options.progress
             )
             version, count = manifest["pack_version"], manifest["texture_count"]
-        return staging, [*textures, _install_faces_file(staging)], version, count, identity
+        # Face offsets are in texture pixels, independent of screen resolution.
+        resources = {
+            FACES_FILENAME: files("gk3hd").joinpath(f"assets/{FACES_FILENAME}").read_bytes()
+        }
+        resources.update(
+            backdrop_edge_fixes(game_dir, {row["filename"].upper() for row in textures})
+        )
+        for name, payload in resources.items():
+            destination = staging / name
+            atomic_write(destination, payload)
+            textures.append({"filename": name, "sha256": sha256_file(destination)})
     except BaseException:
         shutil.rmtree(staging)
         raise
+    else:
+        return staging, textures, version, count, identity
 
 
 def _recover_failed_install(
@@ -257,7 +270,7 @@ def verify_texture_pack(
     *,
     progress: TextureInstallProgressCallback | None = None,
 ) -> TextureInstallReport:
-    """Verify every installed BMP and the managed INI state."""
+    """Verify every installed resource and the managed INI state."""
     return _verify_texture_pack(
         game_dir,
         progress=progress,
@@ -274,7 +287,7 @@ def _verify_texture_pack(
     description: str,
     check_ini: bool = True,
 ) -> TextureInstallReport:
-    """Verify installation structure and optionally rehash every installed BMP."""
+    """Verify installation structure and optionally rehash every installed resource."""
     game_dir = game_dir.resolve()
     state = _load_state(game_dir / STATE_FILENAME)
     directory = _texture_directory(game_dir)
@@ -395,7 +408,7 @@ def _rollback_texture_journal(journal: TextureJournal, *, remove_state: bool) ->
 
 
 def _texture_directory(game_dir: Path) -> Path:
-    """Return the dedicated installed-BMP directory."""
+    """Return the dedicated installed-texture resource directory."""
     target = game_dir / WORK_DIRECTORY / TEXTURES_DIRECTORY / INSTALL_DIRECTORY
     if target.resolve() != target:
         msg = f"texture installation path was redirected: {target}"
@@ -404,29 +417,17 @@ def _texture_directory(game_dir: Path) -> Path:
 
 
 def _require_install_target_available(target: Path) -> None:
-    """Reserve the dedicated install directory for transaction-owned BMPs."""
+    """Reserve the dedicated install directory for transaction-owned resources."""
     if target.exists():
         msg = f"texture install directory exists but is not owned by gk3hd: {target}"
         raise TexturePackError(msg)
 
 
-def _commit_staged_bmps(staging: Path, target: Path) -> None:
-    """Atomically publish the complete dedicated BMP directory."""
+def _commit_staged_resources(staging: Path, target: Path) -> None:
+    """Atomically publish the complete dedicated texture resource directory."""
     _require_install_target_available(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     staging.replace(target)
-
-
-def _install_faces_file(staging: Path) -> dict[str, str]:
-    """Install face placement in 4x texture pixels, independent of display resolution.
-
-    GK3 composites eyes, eyelids, foreheads and mouths into the face bitmap
-    before projecting the actor into the scene. These offsets belong beside
-    the replacement textures; scaling them by the screen size would be wrong.
-    """
-    destination = staging / FACES_FILENAME
-    atomic_write(destination, files("gk3hd").joinpath(f"assets/{FACES_FILENAME}").read_bytes())
-    return {"filename": destination.name, "sha256": sha256_file(destination)}
 
 
 def _prune_empty_install_directories(target: Path, game_dir: Path) -> None:
@@ -482,7 +483,8 @@ def _state_from_payload(payload: object, path: Path) -> _InstalledState:
     if (
         type(texture_count) is not int
         or texture_count <= 0
-        or texture_count != len(identities) - 1
+        or texture_count
+        != sum(Path(entry.filename).suffix.casefold() == ".bmp" for entry in identities)
         or len(names) != len(identities)
         or FACES_FILENAME.casefold() not in names
     ):
@@ -597,13 +599,24 @@ def install(
         )
 
 
-def _matches_current(state: _InstalledState, inventory_sha256: str | None) -> bool:
-    """Reuse a pack only if its logical inventory and bundled face correction match."""
+def _matches_current(state: _InstalledState, inventory_sha256: str | None, game_dir: Path) -> bool:
+    """Reuse matching textures only with current face and backdrop corrections."""
     faces = files("gk3hd").joinpath(f"assets/{FACES_FILENAME}").read_bytes()
-    return inventory_sha256 == state.manifest_sha256 and any(
+    faces_match = any(
         entry.filename == FACES_FILENAME and entry.sha256 == hashlib.sha256(faces).hexdigest()
         for entry in state.files
     )
+    if inventory_sha256 != state.manifest_sha256 or not faces_match:
+        return False
+    expected = backdrop_edge_fixes(game_dir, {entry.filename.upper() for entry in state.files})
+    installed = {
+        entry.filename: entry.sha256
+        for entry in state.files
+        if Path(entry.filename).suffix.casefold() == ".bsp"
+    }
+    return installed == {
+        name: hashlib.sha256(payload).hexdigest() for name, payload in expected.items()
+    }
 
 
 def _request_source(request: TextureInstallRequest, game_dir: Path) -> TexturePackSource:
@@ -631,7 +644,9 @@ def prefetch(
     target = discover_game(game_dir=request.game_dir, exe=request.exe)
     source = _request_source(request, target.game_dir)
     state = target.game_dir / STATE_FILENAME
-    if state.is_file() and _matches_current(_load_state(state), source.inventory_sha256):
+    if state.is_file() and _matches_current(
+        _load_state(state), source.inventory_sha256, target.game_dir
+    ):
         return
     archives = _obtain_archives(
         source, cache_dir=request.cache_dir, offline=request.offline, progress=progress

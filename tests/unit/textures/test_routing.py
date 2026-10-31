@@ -14,7 +14,7 @@ from gk3hd.textures.analyze.manifest import (
 )
 from gk3hd.textures.analyze.policy import load_policy
 from gk3hd.textures.bmp import BmpInfo
-from gk3hd.textures.model import TextureFeatures, TextureKind, TextureManifest
+from gk3hd.textures.model import PipelineOverride, TextureFeatures, TextureKind, TextureManifest
 from gk3hd.textures.routing import Pipeline, PipelineKind, PipelinePlan, plan_texture
 
 if TYPE_CHECKING:
@@ -31,6 +31,27 @@ def test_every_recipe_belongs_to_exactly_one_of_four_methods() -> None:
             "pipeline": kind.pipeline.value,
             "variant": kind.variant,
         }
+
+
+@pytest.mark.parametrize("pipeline", ["ai", "resample"])
+def test_ui_color_can_choose_a_reviewed_transform_without_changing_semantics(pipeline: str) -> None:
+    choice = PipelineOverride.from_dict(
+        {
+            "pipeline": pipeline,
+            "variant": "color",
+            "status": "final",
+            "reason": "Reviewed color artwork retains its logical layout.",
+        }
+    )
+    feature = TextureFeatures("GPSMCB_M.BMP", pipeline_override=choice)
+    assert plan_texture(feature).kind.pipeline.value == pipeline
+    assert feature.kind is TextureKind.COLOR
+    assert not feature.native_size
+    assert not feature.exact_raster
+    with pytest.raises(ValueError, match="incompatible"):
+        plan_texture(
+            TextureFeatures("GPSMCB_L_ALPHA.BMP", kind=TextureKind.ALPHA, pipeline_override=choice)
+        )
 
 
 def test_written_analysis_explains_and_validates_its_action(tmp_path: Path) -> None:

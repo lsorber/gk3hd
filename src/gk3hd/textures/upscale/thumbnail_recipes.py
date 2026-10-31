@@ -24,8 +24,8 @@ class ThumbnailRecipe:
     # Some authored hover/pressed states change contrast as well as brightness.
     # This additive RGB offset applies to covered artwork, never its backdrop.
     brightness_offset: float = 0.0
-    # Original clothing buttons sometimes use a different authored aspect ratio.
-    # None preserves the normal uniform scale; this is not a free-form warp.
+    # Some original views use a different authored whole-image aspect ratio.
+    # None preserves uniform scale. This never reshapes individual details.
     source_scale_y: float | None = None
     source_color_key: tuple[int, int, int] | None = None
     # Two independently visible originals must agree on the shared backdrop,
@@ -268,7 +268,158 @@ _OBJECT_ACTION_SOURCES = (
 )
 
 
+# These item registrations share the native 32x30 preview and a 6_ALPHA source.
+# Each row records source dimensions, uniform scale and translation.
+_REGISTERED_ITEMS = {
+    "CANDY": ((263, 158), 0.123093894, (-0.403087942, 5.870841578)),
+    "CARDOU": ((348, 400), 0.068216441, (3.015440082, 0.97083438)),
+    "CHUPAM": ((624, 416), 0.072808586, (-7.114238322, -0.727794873)),
+    "DAGGER": ((640, 378), 0.051953302, (-0.773940958, 5.518320301)),
+    "DIAPER": ((513, 340), 0.058041323, (0.792036133, 5.213505922)),
+    "FREELANCE": ((483, 331), 0.06321436213841237, (0.2604827990866089, 4.602403274825562)),
+    "GAB_PASSOPEN": ((260, 329), 0.07874101002528135, (5.746035353400638, 1.6496833057946194)),
+    "GAB_PASSOPEN_DIS": ((253, 325), 0.07972273046541167, (5.860856882541475, 1.7608303511095926)),
+    "GAUNTLET": ((640, 400), 0.06578007355648335, (-4.726828517726203, 1.2582806354187188)),
+    "GRACEWALLET": ((400, 218), 0.07933405317546709, (-0.0940499887360845, 5.5850148147712595)),
+    "GRA_BBANK": ((381, 263), 0.0814683110053857, (0.03127713588722181, 3.8098259983028733)),
+    "GRA_DIAPER": ((398, 299), 0.07840015049964955, (0.2631107117738873, 2.9487829496560014)),
+    "GRA_FREELANCE": ((427, 273), 0.072889798339942, (-0.3280891558886841, 3.7446890864133366)),
+    "GRA_NYT": ((405, 266), 0.07814468135885595, (-0.4701279816775291, 3.2241381598236085)),
+    "GRA_PASSOPEN": ((274, 335), 0.07707607833060565, (5.013944383393003, 1.8927963732437783)),
+    "GRA_SHINEON": ((414, 279), 0.07436032711205648, (-0.41908928526373096, 3.969084954395228)),
+    "HBHGBK": ((425, 406), 0.07345840185612972, (0.1710602073635708, 0.05809601508160453)),
+    "HDKEY": ((306, 187), 0.13415129412019405, (-1.1955040862160158, 4.2260336517179145)),
+    "L'ERMITAGE": ((352, 400), 0.07735451919115208, (1.552879393530709, -0.7276738725418358)),
+    "LAHOESTLIC": ((312, 400), 0.07701833436488818, (2.928586225699096, -0.6808218719935472)),
+    "MANU": ((347, 400), 0.07509050907526013, (2.5421521780995584, -0.4028963600117335)),
+    "MEDALLION": ((243, 344), 0.08658191441680894, (5.017232069880882, -0.5538303718172118)),
+    "MINIRCRDER": ((405, 296), 0.08055820572347058, (-0.3208145029722399, 2.1687472522352)),
+    "MOSLICPLATE": ((369, 398), 0.07917549596043891, (0.77576723167246, -1.062770319275671)),
+    "MTAPE_": ((262, 194), 0.10553506810931584, (1.9621807633374557, 5.45066159949674)),
+    "NOTEBK": ((249, 329), 0.09277281520680639, (4.532318924255017, -0.6419083363114696)),
+    "NYT": ((436, 302), 0.07241445887746684, (-0.3243628331105714, 2.9508110109226338)),
+    "PARCH1_": ((335, 397), 0.07827811556707216, (2.544363019157477, -0.7238495396331578)),
+    "PARCH2_": ((334, 398), 0.07787053858361903, (3.3095027692618104, -1.2759622280052778)),
+    "PASSOPEN": ((260, 331), 0.08062629207404845, (4.999999894071827, 1.6294014898595528)),
+    "PASSOPENDIS": ((254, 335), 0.08824289528554956, (4.766934782010736, 0.15508816033332756)),
+    "POEMWONOTE": ((318, 400), 0.07740007792815931, (3.3526347560274234, -1.1597445782168585)),
+    "POUTOMB": ((433, 312), 0.07456655696042451, (0.04757893158312863, 3.124492814533128)),
+    "PREPH": ((361, 348), 0.08534187417741142, (0.3680519457332351, -0.1817537998400385)),
+    "ROOMKEY": ((369, 202), 0.08943490595667412, (-0.9829609586806568, 4.218742366486578)),
+    "SCOOTERKEY": ((342, 230), 0.1105026738726299, (-6.244876332392627, -0.20120319169318385)),
+    "SERPENT": ((342, 399), 0.0764685997395289, (3.33320121046311, -0.326600628084928)),
+    "SHINEON": ((433, 312), 0.07099383670850892, (0.36073186570020965, 2.9325671701189755)),
+    "STONE": ((542, 327), 0.06115489792349319, (-1.030474271296032, 4.856671118878882)),
+    "STASTP": ((485, 338), 0.06526065802280462, (-0.4105193003189435, 3.080332719590273)),
+    "SYRUP": ((243, 154), 0.13026986521743605, (0.73946046767258, 3.7924498842298493)),
+    "TICKET_": ((323, 238), 0.10173822801566562, (-0.8312869383231333, 3.606345277985801)),
+    "TIRETRACE": ((280, 361), 0.0851168646920228, (4.111465028369422, -0.8830258911141071)),
+    "WILHANKY_": ((469, 358), 0.07008975801756506, (-0.6593280353934331, 1.660107523341995)),
+    "WILLICPLATE": ((356, 400), 0.0828807935043332, (2.193322892040593, -2.153408277991537)),
+}
+
+
 _RECIPES = {
+    **{
+        f"{name}3.BMP": ThumbnailRecipe((32, 30), scale, offset, f"{name}6_ALPHA.BMP", size)
+        for name, (size, scale, offset) in _REGISTERED_ITEMS.items()
+    },
+    # These previews match larger originals with one whole-image registration.
+    # Axis scales reproduce authored aspect ratios. The painting also uses its
+    # original preview's global brightness, without changing local details.
+    "COORDPAPER13.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.0917810858830921,
+        (-13.428517835218413, -1.486256098135934),
+        "COORDPAPER16_ALPHA.BMP",
+        (640, 400),
+        source_scale_y=0.08554430768151666,
+        source_color_key=(255, 0, 255),
+    ),
+    "COORDPAPER23.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.09334676838400631,
+        (-14.09628764991593, -2.3630525809888865),
+        "COORDPAPER26_ALPHA.BMP",
+        (640, 400),
+        source_scale_y=0.08725017212919493,
+        source_color_key=(255, 0, 255),
+    ),
+    "COORDPAPER33.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.09310368892946363,
+        (-13.669224064621762, -3.6123813399708515),
+        "COORDPAPER36_ALPHA.BMP",
+        (640, 400),
+        source_scale_y=0.09304662383834321,
+        source_color_key=(255, 0, 255),
+    ),
+    "EGYPTPHOTO3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.0733256338341858,
+        (-0.792967202413163, 0.5973001166793476),
+        "EGYPTPHOTO6_ALPHA.BMP",
+        (441, 375),
+        source_scale_y=0.07350209523930974,
+    ),
+    "EMLLICPLATE3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.0797866740915595,
+        (3.01273742362097, -0.9164491541956858),
+        "EMLLICPLATE6_ALPHA.BMP",
+        (313, 392),
+        source_scale_y=0.07985204366429932,
+    ),
+    "FAKEID3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.07651548754447021,
+        (4.716680776577798, 0.59466789236006),
+        "FAKEID6_ALPHA.BMP",
+        (285, 375),
+        source_scale_y=0.07721898389839923,
+    ),
+    "FINGRPRNTKIT3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.05017051147409901,
+        (0.228007224668805, 7.999047374097531),
+        "FINGRPRNTKIT6_ALPHA.BMP",
+        (629, 298),
+        source_scale_y=0.047141250862694946,
+    ),
+    "POEM3.BMP": ThumbnailRecipe(
+        (30, 32),
+        0.08843898777223312,
+        (1.6577063504133676, 0.3894689645499478),
+        "POEM6_ALPHA.BMP",
+        (303, 396),
+        source_scale_y=0.07575336825372227,
+    ),
+    "SPRAYBOTTLE3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.31830234592313456,
+        (0.22281286053463994, -0.3790373903649255),
+        "SPRAYBOTTLE9.BMP",
+        (94, 94),
+        source_scale_y=0.319088048524906,
+    ),
+    "SERPENT9.BMP": ThumbnailRecipe(
+        (94, 94),
+        0.23334841259784633,
+        (8.566285026717388, 0.4109394396583744),
+        "SERPENT6_ALPHA.BMP",
+        (342, 399),
+        source_scale_y=0.23343396422748933,
+    ),
+    "TEMPSTANT3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.07543713881863424,
+        (4.783695659669541, 1.5672669907798042),
+        "TEMPSTANT6_ALPHA.BMP",
+        (291, 370),
+        source_scale_y=0.07026328018360077,
+        brightness=1.2914116494166752,
+        brightness_offset=13.829159272117433,
+    ),
     **{
         f"{family}_{state}.BMP": ThumbnailRecipe(
             (32, 32),
@@ -805,6 +956,93 @@ _RECIPES = {
     ),
     "SNOTE9.BMP": ThumbnailRecipe(
         (94, 94), 0.14978116591253288, (2.837351449514391, 16.76910783569999)
+    ),
+    # The same rendered object survives in the large original. Register the
+    # complete object once instead of inventing text, wrapper folds or hardware
+    # from the blurred inventory preview. No per-letter or local reshaping.
+    "GABEROOMKEY3.BMP": ThumbnailRecipe(
+        (30, 32),
+        0.08024394338999076,
+        (-0.5569183484567743, 4.704379024464947),
+        "GABEROOMKEY6_ALPHA.BMP",
+        (387, 251),
+    ),
+    "GABEWALLET3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.08058723400154988,
+        (-10.749385604570163, -0.6188119875661525),
+        "GABEWALLET6_ALPHA.BMP",
+        (640, 400),
+        source_color_key=(255, 0, 255),
+    ),
+    "MADCOLT3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.05628873222144129,
+        (1.1229797310283731, 1.6163078904277428),
+        "MADCOLT6.BMP",
+        (530, 397),
+    ),
+    "NENOTE3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.07421570308866761,
+        (-7.634260287771491, -0.39537848856215563),
+        "NENOTE6_ALPHA.BMP",
+        (640, 400),
+        source_color_key=(255, 0, 255),
+    ),
+    "PLATE_B3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.07773165312777636,
+        (-10.078560046136483, -0.8877228904716908),
+        "PLATE_B6.BMP",
+        (640, 400),
+    ),
+    # Matching clue and item artwork restores real symbols, lettering and
+    # material detail. The letter and business card use their authored whole-
+    # image aspect ratios, without fitting individual lines or glyphs.
+    "SIDFILE_3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.32956045774362663,
+        (0.3599966987407005, -0.7324563554574272),
+        "SIDFILE_9.BMP",
+        (94, 94),
+    ),
+    "SUMNOTE3.BMP": ThumbnailRecipe(
+        (30, 32),
+        0.08962009626794872,
+        (-0.3895913837827013, -0.05347626762977899),
+        "SUMNOTE6_ALPHA.BMP",
+        (335, 348),
+    ),
+    "SYMBOLNOTE3.BMP": ThumbnailRecipe(
+        (30, 32),
+        0.08969764252816335,
+        (0.3679139007347369, -0.11211295370567984),
+        "SYMBOLNOTE6_ALPHA.BMP",
+        (327, 353),
+    ),
+    "UNDEFINED3.BMP": ThumbnailRecipe(
+        (32, 32),
+        0.07994380573520739,
+        (-10.044809463209015, -0.4585921828693206),
+        "UNDEFINED6.BMP",
+        (640, 400),
+    ),
+    "WILKESLETR3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.06984499102489652,
+        (4.3702225340913845, 0.36678006240681466),
+        "WILKESLETR6_ALPHA.BMP",
+        (325, 383),
+        source_scale_y=0.0753060406732765,
+    ),
+    "PJAMESBIZCARD3.BMP": ThumbnailRecipe(
+        (32, 30),
+        0.09258017384414667,
+        (-0.2512982622963561, 4.731477502974439),
+        "PJAMESBIZCARD6_ALPHA.BMP",
+        (346, 195),
+        source_scale_y=0.09906484196334574,
     ),
     "GRANOTEBK3.BMP": ThumbnailRecipe(
         (30, 32),

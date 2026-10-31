@@ -12,6 +12,7 @@ from PIL import Image
 import gk3hd.textures.analyze.manifest as texture_analyze
 import gk3hd.textures.upscale.service as texture_upscale
 from gk3hd.textures.analyze.manifest import load_feature_manifest, write_manifest
+from gk3hd.textures.analyze.policy import POLICY_SCHEMA_VERSION, load_policy
 from gk3hd.textures.install.service import (
     install_texture_pack,
     uninstall_texture_pack,
@@ -236,23 +237,36 @@ def test_thumbnail_pair_reuses_large_original_without_ai(
     assert (refreshed.created, refreshed.skipped) == (2, 1)
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "COFFEECUP1",
-        "COFFEECUP2",
-        "BETSLCHRWOOD",
-        "BROWNPLASTIC",
-        "CLOPINEWHT",
-        "CLORED",
-        "CS2STRFRNT",
-        "CHUFENCEGR",
-        "CANDLE",
-    ],
-)
+@pytest.fixture
+def material_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Exercise an explicit processing choice independently of artistic policy."""
+    name = "MATERIAL"
+    path = tmp_path / "policy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": POLICY_SCHEMA_VERSION,
+                "pipeline_overrides": [
+                    {
+                        "textures": [f"{name}.BMP"],
+                        "pipeline": "resample",
+                        "variant": "color",
+                        "status": "final",
+                        "reason": "Preserve source shading without AI inference.",
+                    }
+                ],
+            }
+        )
+    )
+    policy = load_policy(path)
+    monkeypatch.setattr(texture_analyze, "load_policy", lambda _path=None: policy)
+    return name
+
+
 def test_smooth_material_replaces_ai_and_tracks_source_and_periodicity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, material_name: str
 ) -> None:
+    name = material_name
     source, output = tmp_path / "original", tmp_path / "upscaled"
     source.mkdir()
     output.mkdir()
@@ -289,22 +303,10 @@ def test_smooth_material_replaces_ai_and_tracks_source_and_periodicity(
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize(
-    ("name", "old_schema"),
-    [
-        ("COFFEECUP1", 113),
-        ("COFFEECUP2", 113),
-        ("BETSLCHRWOOD", 114),
-        ("BROWNPLASTIC", 114),
-        ("CLOPINEWHT", 114),
-        ("CLORED", 114),
-        ("CS2STRFRNT", 115),
-        ("CHUFENCEGR", 115),
-    ],
-)
 def test_smooth_families_migrate_old_ai_routes_without_affecting_other_materials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, old_schema: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, material_name: str
 ) -> None:
+    name = material_name
     source, output = tmp_path / "original", tmp_path / "upscaled"
     source.mkdir()
     output.mkdir()
@@ -313,7 +315,7 @@ def test_smooth_families_migrate_old_ai_routes_without_affecting_other_materials
     analysis_file(source).write_text(
         json.dumps(
             {
-                "schema_version": old_schema,
+                "schema_version": TEXTURE_MANIFEST_SCHEMA_VERSION - 1,
                 "textures": [TextureFeatures(f"{name}.BMP").to_dict()],
             }
         )

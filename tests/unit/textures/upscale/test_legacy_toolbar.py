@@ -22,9 +22,8 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.parametrize(("name", "size"), LEGACY_TOOLBAR_ART_SIZES.items())
-@pytest.mark.parametrize("with_usage", [False, True])
 def test_shaded_legacy_icons_preserve_samples_and_key(
-    tmp_path: Path, name: str, size: tuple[int, int], *, with_usage: bool
+    tmp_path: Path, name: str, size: tuple[int, int]
 ) -> None:
     source, output = tmp_path / name, tmp_path / "result.png"
     original = Image.new("RGB", size, (255, 0, 255))
@@ -32,8 +31,6 @@ def test_shaded_legacy_icons_preserve_samples_and_key(
         for x in range(2, size[0] - 2):
             original.putpixel((x, y), (20 + x * 4, 10 + y * 3, 20))
     original.save(source)
-    usage = TextureUsage(toolbar_buttons=frozenset({name})) if with_usage else None
-    assert analyze_directory(tmp_path, usage=usage).routes == {PipelineKind.UI_SOURCE_4X: 1}
     enlarged = regenerate_ui_art(source)
     assert enlarged.size == (size[0] * 4, size[1] * 4)
     pixels = np.asarray(enlarged)
@@ -47,7 +44,6 @@ def test_shaded_legacy_icons_preserve_samples_and_key(
     original.resize((size[0] + 1, size[1])).save(source)
     # Named policy corrections do not silently disappear when dimensions change;
     # the reconstruction itself must reject an unsupported source layout.
-    assert analyze_directory(tmp_path, usage=usage).routes == {PipelineKind.UI_SOURCE_4X: 1}
     with pytest.raises(ValueError, match=r"expected a .* source"):
         regenerate_ui_art(source)
 

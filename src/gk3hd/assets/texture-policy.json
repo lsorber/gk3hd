@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 11,
   "feature_overrides": [
     {
       "textures": [
@@ -699,26 +699,532 @@
         "exact_raster": false
       },
       "reason": "Verified opaque menu or framed inventory art has a reconstruction recipe; the generic small-button heuristic is too conservative.",
-      "when": {"color_key": false}
+      "when": {
+        "color_key": false
+      }
+    },
+    {
+      "textures": [
+        "SIGNAVAILABLE.BMP",
+        "SIGNDISABLED.BMP",
+        "SIGNEXPANDED.BMP",
+        "SIGNSELECTED.BMP"
+      ],
+      "set": {
+        "exact_raster": true
+      },
+      "reason": "The source states use deliberate hard pixel boundaries. Preserve the same pixel grid across normal, disabled, expanded and selected states."
     }
   ],
   "pipeline_overrides": [
     {
-      "textures": ["LHO_CHST.BMP"],
-      "pipeline": "reconstruct",
-      "variant": "reviewed-artwork",
+      "textures": [
+        "STRPRUG1.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
       "status": "final",
-      "reason": "Use the reviewed packaged torso artwork: it preserves softer skin shading than SeedVR2's hard circular contours. The replacement is bound to the original pixels and layout."
+      "reason": "Preserve the fine multicolored textile grain and original small markings at 4x. AI removes the grain and invents sharply rectangular marks in its place."
     },
     {
       "textures": [
-        "LH3_CHEST.BMP"
+        "ARMFOOTSHADOW.BMP",
+        "ARMSHADBLOOD.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the authored soft decal coverage and blood/shadow contours at 4x. AI adds hard outlines and loop-like details absent from the original. Original ARM_A/ARM_B resources reference these textures. Source-preserving color interpolation retains their pixels without assuming an opacity-map role."
+    },
+    {
+      "textures": [
+        "DRK_EYES.BMP"
       ],
       "pipeline": "resample",
       "variant": "color",
       "status": "todo",
-      "reason": "Lady Howard's torso material supplies skin shading under clothing. SeedVR2 invents hard circular contours that look like objects rather than a body; bicubic preserves the original shading.",
-      "todo": "Find or reproduce a more faithful upscale without invented contours, and validate the mapped skin under Lady Howard's clothing before replacing the bicubic fallback."
+      "reason": "Preserve the actual eye, eyelid, mouth and brow geometry at 4x. AI changes expressions, iris proportions or facial contours and invents raised eye rims. Source-preserving color interpolation retains authored anatomy and animation-state differences. Original animation scripts bind Jean and VM1 to these overlays. Bindings for the other legacy overlays remain unconfirmed.",
+      "todo": "Compare original/current/proposed in the actual bound scene or UI, then resolve the material or state family. Record genuinely unverified resource use rather than guessing from the name."
+    },
+    {
+      "textures": [
+        "HITME.BMP",
+        "MASCRASIDE.BMP",
+        "WILKSCOMPSCREEN2.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the actual authored lettering, logos and drawn marks at 4x. AI replaces them with different characters, invented words or a different drawing. Source-preserving interpolation keeps the information in the original."
+    },
+    {
+      "textures": [
+        "BIK_OFF.BMP",
+        "BIK_ON.BMP",
+        "BIK_TOFF.BMP",
+        "BIK_TON.BMP",
+        "GABPROP.BMP",
+        "GABPROP2.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the original soft shading and transitions at 4x. AI invents irregular hard structures or ribs in these small fields. Keep the authored differences between related light states without new inferred geometry."
+    },
+    {
+      "textures": [
+        "MICROSHEEP1.BMP",
+        "MICROSHEEP2.BMP",
+        "MICROSHEEP3.BMP",
+        "STEELDRAIN.BMP",
+        "TRNOVRLMP.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Preserve the original small artwork, shading and internal marks at 4x with source-aligned transparency. AI flattens shaded forms, redraws symbols, invents lettering or joins separate decorative marks into new shapes."
+    },
+    {
+      "textures": [
+        "LIPSTKCAP.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          8,
+          9,
+          22,
+          25
+        ]
+      ],
+      "reason": "Restore the original cap engraving instead of altered AI letters. Retain the improved circular highlight and surrounding metal shading."
+    },
+    {
+      "textures": [
+        "SEATTOP01.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          8,
+          1,
+          30,
+          30
+        ]
+      ],
+      "reason": "Restore the original left-hand seat-panel markings instead of invented large lettering. Retain the sharper right-hand grille and unaffected panel edges."
+    },
+    {
+      "textures": [
+        "VITPENCIL.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          17,
+          12,
+          32,
+          32
+        ]
+      ],
+      "reason": "Restore the original exposed pencil-wood contour and marks instead of invented lettering. Retain the sharper metal band, eraser shading and painted body."
+    },
+    {
+      "textures": [
+        "CS2MDSKCNDL.BMP",
+        "GRILTSWTCHSD.BMP",
+        "HE2_DEADSKIN.BMP",
+        "PADBACK.BMP",
+        "PAILWINE.BMP",
+        "ROQTABWD.BMP",
+        "SED_WIN_6.BMP",
+        "T_CHAIN.BMP",
+        "CLOBLEACHCAP.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the authored soft shading, fine mottling and color variation at 4x. AI erases those fields or invents lettering, carved marks, grooves or hard rims absent from the original. Source-preserving interpolation avoids adding object detail to small material fields."
+    },
+    {
+      "textures": [
+        "CHUSTATBXS.BMP",
+        "CS2WININ.BMP",
+        "FOODPEAS.BMP",
+        "TE6PLRTPPRSDS.BMP",
+        "TE6DKBRWN.BMP",
+        "VANBLUEMETAL.BMP",
+        "VESPA_BAD4.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the actual surface pattern and material at 4x. AI replaces paper embossing, mottling, stone grain or metal finish with oversized grooves, smooth cells, ornament or scratches. Source-preserving interpolation retains the authored pattern and roughness."
+    },
+    {
+      "textures": [
+        "RL1_PATH2.BMP",
+        "NEWBLOOD.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve fine authored ground or surface granularity at 4x. AI removes much of the small aggregate, grass or soil detail and substitutes broad smooth patches. Source-preserving interpolation keeps the original grain scale and vegetation distribution."
+    },
+    {
+      "textures": [
+        "HOTELHLCHNDLR.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Preserve the original hammered red metal grain and relief at 4x, consistently with RC1CHANDELR. AI flattens the finish into smooth facets. Keep source-aligned color and unbiased transparency contours."
+    },
+    {
+      "textures": [
+        "LERGRACEX2.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Preserve the original small irregular cross and surrounding fragments at 4x. AI replaces it with larger angular intersecting slabs. Keep the actual source geometry and unbiased transparency contours."
+    },
+    {
+      "textures": [
+        "EST_SHIRT3.BMP",
+        "GRACASERIGHT.BMP",
+        "GKRAG2.BMP",
+        "LHO_BAG.BMP",
+        "MOSCASE1.BMP",
+        "MOSCASEFRNT.BMP",
+        "MOSCASESIDE.BMP",
+        "MOSWHTSCUFF.BMP",
+        "MOS_SHEET.BMP",
+        "BABY_FOOT.BMP",
+        "BABY_JAMSBLU.BMP",
+        "BABY_JAMSBLUA.BMP",
+        "GABCASTOP.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the original fine fabric grain, weave, plaid and printed decoration at 4x. AI removes the authored surface texture or replaces it with silky folds, grooves, flat patches or invented ornament. Source-preserving interpolation keeps the actual material."
+    },
+    {
+      "textures": [
+        "JANLINENSIDE.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Preserve the original linen grain and folded edges at 4x. AI replaces the fabric with smooth fields and heavily outlined bands. Source-preserving color interpolation and unbiased key contours retain the authored stack and transparency."
+    },
+    {
+      "textures": [
+        "VIT_FACE2.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the original identity, expression and facial markings in these tiny portrait textures at 4x. AI invents different eyes, mouths, wrinkles or facial contours. Source-preserving interpolation retains the actual face instead of substituting plausible but different features."
+    },
+    {
+      "textures": [
+        "BETSLCHRFRNT.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          24,
+          13,
+          104,
+          102
+        ],
+        [
+          16,
+          20,
+          24,
+          96
+        ],
+        [
+          104,
+          20,
+          113,
+          96
+        ]
+      ],
+      "reason": "Restore the original red upholstery grain that AI erased. Retain the sharper surrounding wooden frame and gold fittings."
+    },
+    {
+      "textures": [
+        "BETSLCHRWDNCSHN.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          0,
+          0,
+          32,
+          20
+        ]
+      ],
+      "reason": "Restore the original upper upholstery weave instead of invented raised fragments. Retain AI improvements to the lower wooden rails."
+    },
+    {
+      "textures": [
+        "GRACASELEFT.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          0,
+          0,
+          54,
+          64
+        ],
+        [
+          67,
+          0,
+          128,
+          64
+        ],
+        [
+          54,
+          0,
+          67,
+          16
+        ],
+        [
+          54,
+          36,
+          67,
+          64
+        ]
+      ],
+      "reason": "Restore the original green suitcase fabric around the clasp. Retain the sharper AI rendition of the existing gold clasp."
+    },
+    {
+      "textures": [
+        "MOSCASETOP.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          0,
+          0,
+          128,
+          24
+        ],
+        [
+          0,
+          46,
+          128,
+          64
+        ],
+        [
+          0,
+          34,
+          47,
+          46
+        ],
+        [
+          78,
+          34,
+          128,
+          46
+        ]
+      ],
+      "reason": "Restore the original fine suitcase cloth instead of silky folds. Retain the sharper horizontal trim and handle."
+    },
+    {
+      "textures": [
+        "CARDSIDE.BMP",
+        "PSPRTSD.BMP",
+        "PSPRTSD2.BMP",
+        "R23IDIOTSD.BMP",
+        "SOHGSIDE.BMP",
+        "PHOTOBACK.BMP",
+        "MS2PCEDGES.BMP",
+        "SOHGBOOKBACK.BMP",
+        "MANUEDGETOP.BMP",
+        "MANUSEDGE.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the original paper-edge shading, backing grain and printed marks at 4x. AI substitutes deeply engraved lines, pseudo-printing or stains and sometimes removes authored marks. Source-preserving interpolation retains the actual surface without invented writing."
+    },
+    {
+      "textures": [
+        "BRISTLESIDE.BMP",
+        "BRISTLETOP.BMP",
+        "TRVLTBRSH.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the actual bristle rows and fine shading at 4x. AI joins the tips into loops, invents pseudo-lettering or erases the bristles. Source-preserving interpolation retains their spacing and shape."
+    },
+    {
+      "textures": [
+        "DINPLATESD.BMP",
+        "DU1LATCHTNG.BMP",
+        "BETCORNICE.BMP",
+        "HDKEYLEFT.BMP",
+        "HDKEYRIGHT.BMP",
+        "STRIPEBRASS.BMP",
+        "TE3SCLMETAL.BMP",
+        "TE3SCLTRAY.BMP",
+        "TE3POST.BMP",
+        "21LAMPSTAND.BMP",
+        "27LAMPSTAND.BMP",
+        "GRICIELINGBRDR.BMP",
+        "LBYSTRRAILRST.BMP",
+        "PHOCORD.BMP",
+        "R23LANGSPN.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the authored smooth or mottled surface shading at 4x. AI turns these small fields into engraved grooves, cracks, ornament or pseudo-lettering that changes the material. Source-preserving interpolation retains the original finish without invented geometry."
+    },
+    {
+      "textures": [
+        "WILHANDLE.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Preserve the original smooth handle finish and silhouette at 4x. AI adds engraved floral ornament absent from the source. Source-preserving color interpolation and unbiased key contours retain the actual handle."
+    },
+    {
+      "textures": [
+        "BUTDOORFRM2.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          2,
+          2,
+          12,
+          8
+        ],
+        [
+          50,
+          2,
+          63,
+          8
+        ]
+      ],
+      "reason": "Preserve the actual two gold corner ornaments instead of AI-invented lettering. Retain AI improvements to the door panels and moulding."
+    },
+    {
+      "textures": [
+        "ROCKSAVAILABLE.BMP",
+        "ROCKSDISABLED.BMP",
+        "ROCKSEXPANDED.BMP",
+        "ROCKSSELECTED.BMP",
+        "TREESAVAILABLE.BMP",
+        "TREESDISABLED.BMP",
+        "TREESEXPANDED.BMP",
+        "TREESSELECTED.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Preserve the authored rock, sign and tree icons consistently across all states at 4x. AI invents new facets, vent-like bars and blocky foliage that change the objects. Source-preserving shading and unbiased key contours retain their actual shapes and state differences."
+    },
+    {
+      "textures": [
+        "ACIDBOIL1.BMP",
+        "ACIDBOIL2.BMP",
+        "MIST1.BMP",
+        "MIST2.BMP",
+        "RL2_BALLIGHTS.BMP",
+        "TE4ACIDREFLECT.BMP",
+        "WINESPRAY.BMP",
+        "WINESPRAY2.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Preserve the authored spray, glow and liquid-effect fields at 4x. AI replaces their soft shading with flat polygonal pieces or faceted beads. Source-preserving color interpolation and unbiased key contours retain the intended effect without invented solid geometry."
+    },
+    {
+      "textures": [
+        "WINEPOOL1.BMP",
+        "WINEPOOL2.BMP",
+        "WINEREFLECT.BMP",
+        "WINEREFLECT1.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the authored liquid ripples and soft light reflections at 4x. AI turns them into engraved rings and hard segmented shapes. Source-preserving color interpolation retains their shading without inventing solid geometry."
+    },
+    {
+      "textures": [
+        "DINCH08_SHADOW.BMP",
+        "DINCH09_SHADOW.BMP",
+        "DINCH16_SHADOW.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the authored soft chair shadows at 4x. AI turns their penumbrae into sharp, opaque-looking chair silhouettes with invented slats and corners. These are color textures, not opacity companions."
+    },
+    {
+      "textures": [
+        "DUMBDOOR.BMP",
+        "R23DUMBDOOR.BMP",
+        "21DMBWTRDR.BMP",
+        "27DMBWTRDR.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          0,
+          8,
+          7,
+          34
+        ],
+        [
+          0,
+          87,
+          7,
+          118
+        ]
+      ],
+      "reason": "Keep AI detail on the door panels, but preserve the two left hinges from source-pixel rectangles. AI turns the small regular hinge segments into irregular pseudo-lettering. A one-source-pixel transition outside each rectangle avoids a pasted edge."
+    },
+    {
+      "textures": [
+        "CARPET1.BMP",
+        "CARPET2.BMP",
+        "CARPETB.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "final",
+      "reason": "Preserve the mottled textile material and matching carpet variants at 4x. SeedVR2 invents broad stone-like patches and erases the original fine pile. CARPET2 is used on Gabriel's hotel-room floor."
     },
     {
       "textures": [
@@ -732,9 +1238,6 @@
     {
       "textures": [
         "BETSLCHRWOOD.BMP",
-        "BROWNPLASTIC.BMP",
-        "CHUFENCEGR.BMP",
-        "CLOPINEWHT.BMP",
         "CLORED.BMP",
         "COFFEECUP1.BMP",
         "COFFEECUP2.BMP",
@@ -742,9 +1245,17 @@
       ],
       "pipeline": "resample",
       "variant": "color",
-      "status": "todo",
-      "reason": "Current bicubic fallback avoids previously observed invented detail or excessive contrast; these are conservative decisions, not proof that AI can never improve the artwork.",
-      "todo": "Review the remaining-resampling comparisons in their actual scene/material use. Promote individual textures to the default AI route only when the changed detail is faithful, otherwise record a final source-preserving decision."
+      "status": "final",
+      "reason": "Round 4 review prefers the source-preserving 4x artwork after checking these materials on their bound game objects. Preserve the authored shading and grain without inferred grooves or stronger outlines."
+    },
+    {
+      "textures": [
+        "CHUFENCEGR.BMP"
+      ],
+      "pipeline": "retain",
+      "variant": "native-size",
+      "status": "final",
+      "reason": "Round 4 in-game review prefers the original pixels on the green church rail. Keep its soft painted shading without AI-invented grain or redundant enlargement."
     },
     {
       "textures": [
@@ -788,6 +1299,517 @@
       "status": "todo",
       "reason": "The atlas layout is verified, but the default recipe still copies source glyph artwork. Six atlases support optional verified supplied-font outlines with per-glyph fallback; complete outline recovery is not established.",
       "todo": "Improve Goudy caption variants and remaining Arial/SSerif glyph fidelity. Use explicitly supplied licensed font files and existing character-cell gates; retain original artwork for authored symbols or rejected contours. Keep font digest and per-glyph outcomes in PNG metadata."
+    },
+    {
+      "textures": [
+        "GPSMCB_M.BMP",
+        "GPSMCB_S.BMP",
+        "GPS_MCF_S.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "reason": "Human review prefers the sharper color artwork for these legacy GPS maps. Keep their authored layout and independent scalar-opacity semantics."
+    },
+    {
+      "textures": [
+        "S_BAR_SIDNEY.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "reason": "Human review prefers the current shaded separator artwork. Keep 4x color inference while the runtime retains the authored logical dimensions."
+    },
+    {
+      "textures": [
+        "S_BAR_NOTCH.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Human review prefers the current shaded notch artwork. Keep AI color with source-derived transparency and the authored logical dimensions."
+    },
+    {
+      "textures": [
+        "LH3_CHEST.BMP",
+        "LHO_CHST.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "todo",
+      "reason": "Round 4 review prefers the source-preserving 4x skin artwork. SeedVR2 and the former bundled replacement introduce heavy anatomical contours absent from the original shading.",
+      "todo": "Find a faithful skin restoration without added creases, and verify the still-unresolved LH3_CHEST resource binding. LHO_CHST has a verified neckline use, but its reviewed bicubic fallback remains an improvement opportunity."
+    },
+    {
+      "textures": [
+        "LHIMAP03.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "todo",
+      "reason": "Round 4 review prefers the source-preserving 4x map artwork. Preserve the authored folds and printed detail without inferred features. Its actual resource binding remains unverified.",
+      "todo": "Verify the exact LHIMAP03 resource use and seek a faithful restoration of the map artwork before making this fallback final."
+    },
+    {
+      "textures": [
+        "GPSMCB_L_ALPHA.BMP",
+        "GPSMCB_S_ALPHA.BMP"
+      ],
+      "pipeline": "retain",
+      "variant": "native-size",
+      "status": "final",
+      "reason": "Human review prefers the original scalar contour coverage for these legacy GPS masks. Preserve native grayscale values and verify registration independently of color-image density."
+    },
+    {
+      "textures": [
+        "THUMPER_DWN.BMP",
+        "THUMPER_HOV.BMP",
+        "THUMPER_STD.BMP"
+      ],
+      "pipeline": "retain",
+      "variant": "native-size",
+      "status": "final",
+      "reason": "Preserve the original mechanism artwork across normal, hover and pressed states. Human review prefers native pixels to both enlargement candidates."
+    },
+    {
+      "textures": [
+        "RC1CHAIN.BMP",
+        "RC1CHAINALP.BMP",
+        "RC1CHNALPHA.BMP"
+      ],
+      "pipeline": "retain",
+      "variant": "native-size",
+      "status": "final",
+      "reason": "Preserve the original chain contours and their actual color channels at native size. Human review rejects both enlarged candidates. These names do not establish opacity-map semantics."
+    },
+    {
+      "textures": [
+        "BIK_BOFF.BMP",
+        "BIK_BON.BMP",
+        "SED_INT_CLR2.BMP",
+        "SED_INT_CLR2_BLUE.BMP"
+      ],
+      "pipeline": "retain",
+      "variant": "native-size",
+      "status": "final",
+      "reason": "Preserve the authored soft material and light-state fields at native size. Human review prefers their original shading without inferred edges or interpolation changes."
+    },
+    {
+      "textures": [
+        "C45_BK_SLVR.BMP",
+        "CAMBODY1ZOOM.BMP",
+        "CDBTSCRUB.BMP",
+        "CLOLINENTOP.BMP",
+        "CLOPINETOP.BMP",
+        "COMPROOF.BMP",
+        "CS3MTLTB.BMP",
+        "CSEGRASS.BMP",
+        "GABCASE.BMP",
+        "KITFRGGRN.BMP",
+        "KITPOTBTM01.BMP",
+        "LBYSHDDBLACK.BMP",
+        "LHILAMPBASE.BMP",
+        "MS2PCBACK.BMP",
+        "PADEDGE.BMP",
+        "RC1CHANDELR.BMP",
+        "RL2CIELING.BMP",
+        "SCRIBBLE.BMP",
+        "S_SLIDER_STD.BMP",
+        "TBBTBAKPAKOD.BMP"
+      ],
+      "pipeline": "retain",
+      "variant": "native-size",
+      "status": "final",
+      "reason": "Human review prefers the authored artwork at native dimensions. Neither the current AI nor the proposed enlargement improves its intended appearance. Keep the original pixels without relabeling this artwork as data or pixel art."
+    },
+    {
+      "textures": [
+        "TE4LANTERNHEX.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color-key",
+      "status": "todo",
+      "reason": "Round 4 review prefers the SeedVR2 color-key candidate over the interpolated fallback. Retain source-derived transparency, while recording that its actual scene use remains unverified.",
+      "todo": "Find the exact resource binding and inspect the reviewed AI artwork against its background before making this treatment final."
+    },
+    {
+      "textures": [
+        "DIRT.BMP",
+        "RL1HILLS.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "todo",
+      "reason": "Preserve fine authored ground or surface granularity at 4x. AI removes much of the small aggregate, grass or soil detail and substitutes broad smooth patches. Source-preserving interpolation keeps the original grain scale and vegetation distribution.",
+      "todo": "Compare original/current/proposed in the actual bound scene or UI, then resolve the material or state family. Record genuinely unverified resource use rather than guessing from the name."
+    },
+    {
+      "textures": [
+        "TE6GREYBRK.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color",
+      "status": "todo",
+      "reason": "Preserve the authored stone grain and shading at 4x. Source-preserving interpolation matches the reviewed candidate without substituting invented rock detail. Its actual scene or material use remains unverified.",
+      "todo": "Verify the original resource binding and inspect the source-preserving candidate in that context before making this treatment final."
+    },
+    {
+      "textures": [
+        "ABE_BLINK_01.BMP",
+        "ABE_BLINK_02.BMP",
+        "ABE_EYELIDS.BMP",
+        "BAR_BLINK_01.BMP",
+        "BAR_BLINK_02.BMP",
+        "BAR_EYELIDS.BMP",
+        "BIG_BLINK_01.BMP",
+        "BIG_BLINK_02.BMP",
+        "BIG_EYELIDS.BMP",
+        "EML_BLINK_01.BMP",
+        "EML_BLINK_02.BMP",
+        "EML_EYELIDS.BMP",
+        "EST_BLINK_01.BMP",
+        "EST_BLINK_02.BMP",
+        "EST_EYELIDS.BMP",
+        "GA3_BLINK_01.BMP",
+        "GA3_BLINK_02.BMP",
+        "GA3_EYELIDS.BMP",
+        "GA3_WINK_01.BMP",
+        "GA3_WINK_02.BMP",
+        "GAB_BLINK_01.BMP",
+        "GAB_BLINK_02.BMP",
+        "GAB_EYELIDS.BMP",
+        "GAB_WINK_01.BMP",
+        "GAB_WINK_02.BMP",
+        "GRA_BLINK_01.BMP",
+        "GRA_BLINK_02.BMP",
+        "GRA_EYELIDS.BMP",
+        "GRA_WINK_01.BMP",
+        "GRA_WINK_02.BMP",
+        "HE1_BLINK_01.BMP",
+        "HE1_BLINK_02.BMP",
+        "HE1_EYELIDS.BMP",
+        "HE2_BLINK_01.BMP",
+        "HE2_BLINK_02.BMP",
+        "HE2_EYELIDS.BMP",
+        "JAM_BLINK_01.BMP",
+        "JAM_BLINK_02.BMP",
+        "JAM_EYELIDS.BMP",
+        "JEA_BLINK_01.BMP",
+        "JEA_BLINK_02.BMP",
+        "JEA_EYELIDS.BMP",
+        "JEA_WINK_01.BMP",
+        "JEA_WINK_02.BMP",
+        "LAD_BLINK_01.BMP",
+        "LAD_BLINK_02.BMP",
+        "LAD_EYELIDS.BMP",
+        "LAR_BLINK_01.BMP",
+        "LAR_BLINK_02.BMP",
+        "LAR_EYELIDS.BMP",
+        "LHO_BLINK_01.BMP",
+        "LHO_BLINK_02.BMP",
+        "LHO_EYELIDS.BMP",
+        "MAD_BLINK_01.BMP",
+        "MAD_BLINK_02.BMP",
+        "MAD_EYELIDS.BMP",
+        "MAD_WINK_01.BMP",
+        "MAD_WINK_02.BMP",
+        "MAR_BLINK_01.BMP",
+        "MAR_BLINK_02.BMP",
+        "MAR_EYELIDS.BMP",
+        "MES_BLINK_01.BMP",
+        "MES_BLINK_02.BMP",
+        "MES_EYELIDS.BMP",
+        "MON_BLINK_01.BMP",
+        "MON_BLINK_02.BMP",
+        "MON_EYELIDS.BMP",
+        "MOS_BLINK_01.BMP",
+        "MOS_BLINK_02.BMP",
+        "MOS_EYELIDS.BMP",
+        "MOS_WINK_01.BMP",
+        "OLD_BLINK_01.BMP",
+        "OLD_BLINK_02.BMP",
+        "OLD_EYELIDS.BMP",
+        "ROX_BLINK_01.BMP",
+        "ROX_BLINK_02.BMP",
+        "ROX_EYELIDS.BMP",
+        "SIM_BLINK_01.BMP",
+        "SIM_BLINK_02.BMP",
+        "SIM_EYELIDS.BMP",
+        "TAX_BLINK_01.BMP",
+        "TAX_BLINK_02.BMP",
+        "TAX_EYELIDS.BMP",
+        "TAX_WINK_01.BMP",
+        "TAX_WINK_02.BMP",
+        "VA1_BLINK_01.BMP",
+        "VA1_BLINK_02.BMP",
+        "VA1_EYELIDS.BMP",
+        "VA3_BLINK_01.BMP",
+        "VA3_BLINK_02.BMP",
+        "VA3_EYELIDS.BMP",
+        "VIT_BLINK_01.BMP",
+        "VIT_BLINK_02.BMP",
+        "VIT_EYELIDS.BMP",
+        "VM1_BLINK_01.BMP",
+        "VM1_BLINK_02.BMP",
+        "VM1_EYELIDS.BMP",
+        "VM2_BLINK_01.BMP",
+        "VM2_BLINK_02.BMP",
+        "VM2_EYELIDS.BMP",
+        "VM3_BLINK_01.BMP",
+        "VM3_BLINK_02.BMP",
+        "VM3_EYELIDS.BMP",
+        "WIL_BLINK_01.BMP",
+        "WIL_BLINK_02.BMP",
+        "WIL_EYELIDS.BMP",
+        "WIL_WINK_01.BMP",
+        "WIL_WINK_02.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "face-layer",
+      "status": "final",
+      "reason": "Restore contextual face detail using the original face and eye metadata. Preserve expression geometry, coverage and separate eyeballs."
+    },
+    {
+      "textures": [
+        "MOS_WINK_02.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "face-layer",
+      "status": "final",
+      "reason": "Refine the soft half-open eyelid edge with mild, locally bounded detail sharpening. Keep the authored aperture, partial-opacity pixels, separate eyeballs and animation placement.",
+      "detail_sharpening": true
+    },
+    {
+      "textures": [
+        "MOV_BLINK_01.BMP",
+        "MOV_BLINK_02.BMP",
+        "MOV_EYELIDS.BMP",
+        "VA2_BLINK_01.BMP",
+        "VA2_BLINK_02.BMP",
+        "VA2_EYELIDS.BMP"
+      ],
+      "pipeline": "resample",
+      "variant": "color-key",
+      "status": "todo",
+      "reason": "Use source-preserving 4x artwork because the MOV and VA2 expression bindings cannot be established unambiguously from original metadata.",
+      "todo": "Resolve actual expression placement before enabling contextual inference. Do not borrow a similar actor or eye color."
+    },
+    {
+      "textures": [
+        "BABY_JAMS.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "reason": "Keep the sharper existing chest logo while restoring the original fabric everywhere else. Match the source-preserving fabric of BABY_JAMSBLU, BABY_JAMSBLUA and BABY_FOOT, without adding logos to those textures.",
+      "source_regions": [
+        [
+          0,
+          0,
+          128,
+          24
+        ],
+        [
+          0,
+          45,
+          128,
+          128
+        ],
+        [
+          0,
+          24,
+          55,
+          45
+        ],
+        [
+          72,
+          24,
+          128,
+          45
+        ]
+      ]
+    },
+    {
+      "textures": [
+        "LHO.BMP",
+        "MAD.BMP",
+        "MON.BMP",
+        "MOS.BMP",
+        "WIL.BMP"
+      ],
+      "pipeline": "reconstruct",
+      "variant": "ui-artwork",
+      "status": "final",
+      "reason": "Preserve the five authored miniature portraits and native color samples with bounded, shape-preserving interpolation rather than substituting different character identities."
+    },
+    {
+      "textures": [
+        "LGBUTTONDWN.BMP",
+        "LGBUTTONUP.BMP",
+        "SMBUTTONDWN.BMP",
+        "SMBUTTONUP.BMP"
+      ],
+      "pipeline": "reconstruct",
+      "variant": "ui-artwork",
+      "status": "final",
+      "reason": "Reconstruct the authored bevel and shadow regions consistently for large/small up/down states, preserving every native sample and each original state extent."
+    },
+    {
+      "textures": [
+        "LHE_BOX.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "reason": "Retain the sharper existing logo and cardboard detail, but preserve the original small caption instead of inventing its letters. Treat matching box faces consistently.",
+      "source_regions": [
+        [
+          1,
+          12,
+          18,
+          17
+        ]
+      ]
+    },
+    {
+      "textures": [
+        "LHE_BOXSIDE.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "reason": "Retain the sharper existing logo and cardboard detail, but preserve the original small caption instead of inventing its letters. Treat matching box faces consistently.",
+      "source_regions": [
+        [
+          1,
+          20,
+          17,
+          24
+        ]
+      ]
+    },
+    {
+      "textures": [
+        "LHE_BOXFRONT.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color-key",
+      "status": "final",
+      "reason": "Retain the sharper existing logo and cardboard detail, but preserve the original small caption instead of inventing its letters. Treat matching box faces consistently.",
+      "source_regions": [
+        [
+          1,
+          20,
+          18,
+          25
+        ]
+      ]
+    },
+    {
+      "textures": [
+        "CS8TABLECLOTH.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "reason": "The sharper crochet loops and knots match the actual tablecloth. Retain the reviewed AI detail."
+    },
+    {
+      "textures": [
+        "NAILPOLISH.BMP",
+        "RC1RAIL.BMP",
+        "SCISSOR.BMP",
+        "SCISSRBLD.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "reason": "The sharper AI rendition preserves the object and material in its inspected scene. Retain the reviewed detail."
+    },
+    {
+      "textures": [
+        "MOPSHVLBND.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          0,
+          0,
+          5,
+          8
+        ],
+        [
+          27,
+          0,
+          32,
+          8
+        ]
+      ],
+      "reason": "Preserve the original plain ends of the metal band instead of invented embossed scrollwork. Retain the improved reflective shading through its center."
+    },
+    {
+      "textures": [
+        "R21CIELLINGBAND.BMP",
+        "R27CIELLINGBAND.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          0,
+          5,
+          16,
+          25
+        ],
+        [
+          0,
+          30,
+          16,
+          32
+        ]
+      ],
+      "reason": "Restore the original fine ceiling-band mottling that AI erased. Retain the sharper horizontal moulding edges."
+    },
+    {
+      "textures": [
+        "SEATTOP03.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "source_regions": [
+        [
+          0,
+          0,
+          32,
+          32
+        ]
+      ],
+      "reason": "Preserve the original leather finish on the left half and sharper AI detail on the right-hand grille. Blend narrowly outside the preserved leather region."
+    },
+    {
+      "textures": [
+        "SIGNAVAILABLE.BMP",
+        "SIGNDISABLED.BMP",
+        "SIGNEXPANDED.BMP",
+        "SIGNSELECTED.BMP"
+      ],
+      "pipeline": "retain",
+      "variant": "pixel-art",
+      "status": "final",
+      "reason": "Keep these authored hard-pixel button states at native dimensions, preserving all original pixels and state extents. Nearest-neighbor magnification is a rendering choice and needs no redundant 4x replacement file."
+    },
+    {
+      "textures": [
+        "DM_BASE.BMP"
+      ],
+      "pipeline": "ai",
+      "variant": "color",
+      "status": "final",
+      "reason": "Keep the selected AI terrain outside the shared support of authored location artwork. Restore source detail only within the union of both location states, then compose every overlay against that same corrected base. This reconciles the reviewed overlay fixes without replacing unrelated background terrain."
     }
   ]
 }

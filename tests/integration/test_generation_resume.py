@@ -156,3 +156,57 @@ def test_new_background_regenerates_previously_current_overlays(
     with Image.open(output / f"{overlay_name[:-4]}.PNG") as overlay:
         assert overlay.getextrema() == ((80, 80), (30, 30), (20, 20))
     assert texture_upscale.upscale(source, output, options=options).skipped == 2
+
+
+@pytest.mark.integration
+def test_location_changes_refresh_shared_artwork_and_both_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, output = tmp_path / "original", tmp_path / "upscaled"
+    source.mkdir()
+    Image.new("RGB", (640, 480), (40, 30, 20)).save(source / "DM_BASE.BMP")
+    unlit = Image.new("RGB", (98, 75), (40, 30, 20))
+    unlit.save(source / "DM_WOD_UL.BMP")
+    lit = unlit.copy()
+    lit.paste((120, 130, 140), (30, 20, 60, 50))
+    lit.save(source / "DM_WOD.BMP")
+    manifest = tmp_path / "analysis.json"
+    write_manifest(
+        TextureManifest(
+            tuple(TextureFeatures(name) for name in ("DM_BASE.BMP", "DM_WOD.BMP", "DM_WOD_UL.BMP"))
+        ),
+        manifest,
+    )
+
+    class TexturedBackend(_Backend):
+        calls = 0
+
+        def upscale(self, image: Image.Image) -> Image.Image:
+            self.calls += 1
+            return Image.new("RGB", (image.width * 4, image.height * 4), (200, 210, 220))
+
+    backend = TexturedBackend()
+    monkeypatch.setattr(service, "_create_seedvr2_upscaler", lambda *_args: backend)
+    options = UpscaleOptions(features=manifest)
+    assert texture_upscale.upscale(source, output, options=options).created == 3
+    assert texture_upscale.upscale(source, output, options=options).skipped == 3
+    with (
+        Image.open(output / "DM_WOD.PNG") as active,
+        Image.open(output / "DM_WOD_UL.PNG") as inactive,
+    ):
+        previous_active = active.tobytes()
+        previous_inactive = inactive.tobytes()
+        assert active.getpixel((10, 10)) == inactive.getpixel((10, 10)) == (200, 210, 220)
+    # Growing the foreground changes the shared suppression support, including
+    # the unlit state. Both states must use the same newly corrected terrain.
+    lit.paste((120, 130, 140), (20, 10, 70, 60))
+    lit.save(source / "DM_WOD.BMP")
+    report = texture_upscale.upscale(source, output, options=options)
+    assert (report.created, report.skipped, backend.calls) == (3, 0, 2)
+    with (
+        Image.open(output / "DM_WOD_UL.PNG") as inactive,
+        Image.open(output / "DM_WOD.PNG") as active,
+    ):
+        assert inactive.tobytes() != previous_inactive
+        assert active.tobytes() != previous_active
+    assert texture_upscale.upscale(source, output, options=options).skipped == 3

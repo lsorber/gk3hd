@@ -6,9 +6,11 @@ source-faithful 4x regenerator while unrecognized ones remain untouched; reviewe
 exact raster art and constant-color materials keep their native dimensions unless
 a coupled resource requires matching density. Continuous alpha uses grayscale
 resampling; edge-only silhouettes may use shape-checked AI with resampling fallback.
-Ordinary color uses SeedVR2
-unless policy explicitly requests source-preserving bicubic; and alpha-test
-color separates its binary key mask from RGB inference. ``tiled`` composes
+Ordinary color uses SeedVR2 unless policy explicitly requests source-preserving
+bicubic. Layered eyelid artwork uses source-preserving bicubic or explicitly
+reviewed contextual fine detail, preserving blink geometry and separate eyeballs.
+Alpha-test color separates its binary key mask from RGB
+inference. ``tiled`` composes
 periodic edge handling with the selected route. Verified geometric UI controls
 use a file-aware source resampler rather than inferred bevels and corners.
 """
@@ -75,7 +77,7 @@ def upscale_texture(
     if plan.kind.keeps_native_size:
         return image.copy()
     file_aware_routes = {
-        PipelineKind.REVIEWED_REPLACEMENT: "reviewed replacement artwork",
+        PipelineKind.FACE_LAYER_AI: "face/eyeball contextual restorer",
         PipelineKind.FONT_ATLAS_SOURCE_4X: "font-atlas copier",
         PipelineKind.FONT_BUTTON_SOURCE_4X: "font-button copier",
         PipelineKind.FINGERPRINT_SOURCE_4X: "source-faithful fingerprint resampler",
@@ -122,7 +124,51 @@ def _upscale_ai(
             plan=plan,
             padding=padding,
         )
-    return _upscale_color(image, upscaler, periodic=plan.periodic, padding=padding)
+    generated = _upscale_color(image, upscaler, periodic=plan.periodic, padding=padding)
+    return (
+        preserve_source_regions(image, generated, plan.source_regions, periodic=plan.periodic)
+        if plan.source_regions
+        else generated
+    )
+
+
+def preserve_source_regions(
+    source: Image.Image,
+    generated: Image.Image,
+    regions: tuple[tuple[int, int, int, int], ...],
+    *,
+    periodic: bool,
+) -> Image.Image:
+    """Restore specified source-pixel rectangles with a one-pixel exterior feather.
+
+    Preserve the selected details exactly as source-preserving bicubic at the
+    generated density. Blend only the one-source-pixel band outside their bounds.
+    Leave unrelated AI pixels byte-for-byte unchanged. This is an opaque color
+    postprocess, never an opacity, atlas-layout or data-texture transformation.
+    """
+    scale, remainder = divmod(generated.width, source.width)
+    if remainder or scale <= 0 or generated.height != source.height * scale:
+        msg = "source preservation requires an integer uniform generated scale"
+        raise ValueError(msg)
+    x = (np.arange(generated.width) + 0.5) / scale
+    y = (np.arange(generated.height) + 0.5) / scale
+    weight = np.zeros((generated.height, generated.width), dtype=np.float64)
+    for left, top, right, bottom in regions:
+        if left < 0 or top < 0 or right <= left or bottom <= top:
+            msg = "source preservation requires positive source-pixel rectangles"
+            raise ValueError(msg)
+        if right > source.width or bottom > source.height:
+            msg = "source preservation region exceeds original texture dimensions"
+            raise ValueError(msg)
+        distance_x = np.maximum(np.maximum(left - x, x - right), 0)
+        distance_y = np.maximum(np.maximum(top - y, y - bottom), 0)
+        amount = np.clip(1 - np.hypot(distance_y[:, None], distance_x[None, :]), 0, 1)
+        # Smoothstep reaches both endpoints with zero slope.
+        weight = np.maximum(weight, amount * amount * (3 - 2 * amount))
+    original = upscale_smooth_color(source, scale, periodic=periodic)
+    pixels = np.asarray(generated.convert("RGB"), dtype=np.float64)
+    result = pixels + weight[:, :, None] * (np.asarray(original) - pixels)
+    return Image.fromarray(np.clip(np.rint(result), 0, 255).astype(np.uint8))
 
 
 @dataclass(slots=True)
@@ -246,6 +292,18 @@ def _upscale_alpha_test(
     # into an opaque corner (e.g. the black frame around BINOCMASK's aperture).
     if mask[0, 0]:
         output[0, 0] = KEY_COLOR
+    if plan.source_regions:
+        # Blend filled RGB, then restore the exact pre-existing binary mask.
+        # Scalar opacity and key contours never participate in this edit.
+        output_key = np.all(output == KEY_COLOR, axis=2)
+        result = preserve_source_regions(
+            Image.fromarray(_bleed_key(rgb, mask)),
+            Image.fromarray(output),
+            plan.source_regions,
+            periodic=periodic,
+        )
+        output = np.asarray(result).copy()
+        output[output_key] = KEY_COLOR
     return Image.fromarray(output, mode="RGB")
 
 
@@ -478,21 +536,22 @@ def upscale_key_mask(
 
 
 def _pad_key_mask(mask: np.ndarray, padding: int) -> np.ndarray:
-    """Wrap artwork edges without filling a wholly transparent source gutter.
+    """Wrap artwork without borrowing opacity across transparent edge segments.
 
-    PINE2 has an empty top row and a trunk at the bottom. Ordinary wrap
-    interpolation creates a detached one-output-pixel line above its treetop.
-    Periodic context remains unchanged on edges that actually contain artwork.
+    A treetop can touch a few pixels of the upper edge while the rest is empty.
+    Wrapping a dense lower edge into that empty space creates a detached line.
+    Extend each keyed edge segment into its padding, not only wholly empty rows.
+    Keep periodic context where artwork actually reaches the sampled boundary.
     """
     padded = _pad(mask, padding, periodic=True)
-    if mask[0].all():
-        padded[:padding] = True
-    if mask[-1].all():
-        padded[-padding:] = True
-    if mask[:, 0].all():
-        padded[:, :padding] = True
-    if mask[:, -1].all():
-        padded[:, -padding:] = True
+    top = np.pad(mask[0], padding, mode="wrap")
+    bottom = np.pad(mask[-1], padding, mode="wrap")
+    left = np.pad(mask[:, 0], padding, mode="wrap")
+    right = np.pad(mask[:, -1], padding, mode="wrap")
+    padded[:padding] |= top
+    padded[-padding:] |= bottom
+    padded[:, :padding] |= left[:, None]
+    padded[:, -padding:] |= right[:, None]
     return padded
 
 

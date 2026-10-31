@@ -11,7 +11,8 @@ if TYPE_CHECKING:
 
 
 # The revision also invalidates cached analysis when packaged routing changes.
-TEXTURE_MANIFEST_SCHEMA_VERSION = 166
+TEXTURE_MANIFEST_SCHEMA_VERSION = 171
+_REGION_BOUND_COUNT = 4
 
 
 class TextureKind(StrEnum):
@@ -35,6 +36,7 @@ class TextureFeatures:
     native_size: bool = False
     constant_color: bool = False
     alpha_silhouette: bool = False
+    eyelid_overlay: bool = False
     pipeline_override: PipelineOverride | None = None
 
     def __post_init__(self) -> None:
@@ -47,6 +49,9 @@ class TextureFeatures:
             raise ValueError(msg)
         if self.kind is not TextureKind.COLOR and self.exact_raster:
             msg = f"{self.name}: exact_raster is valid only for color textures"
+            raise ValueError(msg)
+        if self.eyelid_overlay and self.kind is not TextureKind.COLOR:
+            msg = f"{self.name}: eyelid_overlay requires color artwork"
             raise ValueError(msg)
         if self.kind is TextureKind.DATA and self.font_atlas:
             msg = f"{self.name}: font_atlas is invalid for data textures"
@@ -67,6 +72,7 @@ class TextureFeatures:
             "native_size": self.native_size,
             "constant_color": self.constant_color,
             "alpha_silhouette": self.alpha_silhouette,
+            "eyelid_overlay": self.eyelid_overlay,
         }
         if self.pipeline_override is not None:
             result["pipeline_override"] = self.pipeline_override.to_dict()
@@ -108,6 +114,9 @@ class TextureFeatures:
             ),
             alpha_silhouette=_bool_override(
                 values, "alpha_silhouette", default=self.alpha_silhouette, name=self.name
+            ),
+            eyelid_overlay=_bool_override(
+                values, "eyelid_overlay", default=self.eyelid_overlay, name=self.name
             ),
             pipeline_override=self.pipeline_override,
         )
@@ -153,6 +162,8 @@ class PipelineOverride:
     status: str
     reason: str
     todo: str | None = None
+    source_regions: tuple[tuple[int, int, int, int], ...] = ()
+    detail_sharpening: bool = False
 
     def __post_init__(self) -> None:
         """Require an explanation and actionable work for temporary decisions."""
@@ -170,10 +181,27 @@ class PipelineOverride:
         if self.status == "final" and self.todo is not None:
             msg = "final pipeline override must not contain a todo"
             raise ValueError(msg)
+        if not isinstance(self.source_regions, tuple):
+            msg = "source_regions must be an immutable tuple of rectangles"
+            raise TypeError(msg)
+        for region in self.source_regions:
+            _source_region(region)
+        if self.source_regions and (self.pipeline, self.variant) not in {
+            ("ai", "color"),
+            ("ai", "color-key"),
+        }:
+            msg = "source_regions requires an AI color pipeline"
+            raise ValueError(msg)
+        if not isinstance(self.detail_sharpening, bool):
+            msg = "detail_sharpening must be boolean"
+            raise TypeError(msg)
+        if self.detail_sharpening and (self.pipeline, self.variant) != ("ai", "face-layer"):
+            msg = "detail_sharpening requires contextual face-layer AI"
+            raise ValueError(msg)
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         """Serialize status and rationale without mixing them into feature flags."""
-        result = {
+        result: dict[str, object] = {
             "pipeline": self.pipeline,
             "variant": self.variant,
             "status": self.status,
@@ -181,6 +209,10 @@ class PipelineOverride:
         }
         if self.todo is not None:
             result["todo"] = self.todo
+        if self.source_regions:
+            result["source_regions"] = [list(region) for region in self.source_regions]
+        if self.detail_sharpening:
+            result["detail_sharpening"] = True
         return result
 
     @classmethod
@@ -192,14 +224,44 @@ class PipelineOverride:
             "status",
             "reason",
             "todo",
+            "source_regions",
+            "detail_sharpening",
         }:
             msg = "invalid pipeline override fields"
             raise ValueError(msg)
         if not {"pipeline", "variant", "status", "reason"} <= set(value) or not all(
-            isinstance(v, str) for v in value.values()
+            isinstance(v, str)
+            for k, v in value.items()
+            if k not in {"source_regions", "detail_sharpening"}
         ):
             msg = "pipeline override requires string pipeline, variant, status and reason"
             raise ValueError(msg)
+        regions = value.get("source_regions", [])
+        if not isinstance(regions, list):
+            msg = "source_regions must be an array of source-pixel rectangles"
+            raise TypeError(msg)
         return cls(
-            value["pipeline"], value["variant"], value["status"], value["reason"], value.get("todo")
+            value["pipeline"],
+            value["variant"],
+            value["status"],
+            value["reason"],
+            value.get("todo"),
+            tuple(_source_region(region) for region in regions),
+            detail_sharpening=value.get("detail_sharpening", False),
         )
+
+
+def _source_region(value: object) -> tuple[int, int, int, int]:
+    """Validate exclusive source-pixel bounds, not resolution-dependent output coordinates."""
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != _REGION_BOUND_COUNT
+        or any(not isinstance(v, int) or isinstance(v, bool) for v in value)
+    ):
+        msg = "source region requires four integer bounds: left, top, right, bottom"
+        raise ValueError(msg)
+    left, top, right, bottom = value
+    if left < 0 or top < 0 or right <= left or bottom <= top:
+        msg = "source region must have non-negative origin and positive area"
+        raise ValueError(msg)
+    return left, top, right, bottom

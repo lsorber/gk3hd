@@ -25,14 +25,14 @@ _MINIMUM_SHARED_COLORS = 4
 def regenerate_thumbnail(source: Path) -> Image:
     """Sample real higher-resolution content in the original thumbnail's frame.
 
-    The small images and larger original were registered using a single uniform
-    scale, translation and (for framed artwork) rotation, never per-glyph fitting.
+    The small images and larger original were registered using one whole-image
+    scale, translation and (for framed artwork) rotation. Explicit axis scales
+    reproduce verified authored aspect ratios, never per-glyph fitting.
     Minification is prefiltered; destination centers use the original texture
     coordinate phase. The normal alpha pipeline must enlarge any paired opacity.
     """
     import numpy as np  # noqa: PLC0415
     from PIL import Image as PillowImage  # noqa: PLC0415
-    from scipy.ndimage import gaussian_filter, map_coordinates  # noqa: PLC0415
 
     recipe = thumbnail_recipe(source.name)
     if recipe is None:
@@ -53,25 +53,12 @@ def regenerate_thumbnail(source: Path) -> Image:
                 recipe,
                 backdrops=_load_backdrops(source, recipe),
             )
-        pixels = np.asarray(large.convert("RGB"), dtype=float)
+        artwork = large.convert("RGB")
     width, height = recipe.size
     scale = 4
     y, x = np.mgrid[: height * scale, : width * scale]
-    factor = recipe.source_scale
-    offset_x, offset_y = recipe.offset
-    pixels = gaussian_filter(pixels, (0.35 / (factor * scale), 0.35 / (factor * scale), 0))
-    coordinates = np.array(
-        [
-            ((y + 0.5) / scale - 0.5 - offset_y) / factor,
-            ((x + 0.5) / scale - 0.5 - offset_x) / factor,
-        ]
-    )
-    result = np.stack(
-        [
-            map_coordinates(pixels[:, :, channel], coordinates, order=1, mode="constant", cval=0)
-            for channel in range(3)
-        ],
-        axis=2,
+    result, _ = _project_thumbnail_art(
+        artwork, recipe, (x + 0.5) / scale - 0.5, (y + 0.5) / scale - 0.5
     )
     return PillowImage.fromarray(np.clip(np.rint(result), 0, 255).astype("uint8"))
 

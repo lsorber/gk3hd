@@ -16,7 +16,7 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 
 - ⚙️ Highest-quality graphics settings by default
 - 🔍 Added support for and enabled anisotropic filtering by default
-- 🖼️ 99.63% of textures (>1024 pixels) upscaled at 4× resolution with [SeedVR2 3B](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
+- 🖼️ 99.33% of textures (>1024 pixels) upscaled 4× with [SeedVR2 3B](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
 - 🔤 90% of font atlases reconstructed at 4× resolution for sharper text
 - 🎬 Cinematics upscaled at 4× resolution, with a smoother 60 fps Sierra logo
 - 📍 Corrected location alignment with background on the driving map

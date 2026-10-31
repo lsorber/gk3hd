@@ -36,6 +36,19 @@ def test_periodic_mask_still_connects_authored_nonempty_edges() -> None:
     assert not enlarged[:, 24:40].any()
 
 
+@pytest.mark.parametrize("turns", [0, 1, 2, 3])
+def test_periodic_mask_does_not_borrow_opacity_across_partial_edge_gutters(turns: int) -> None:
+    mask = np.ones((16, 32), dtype=np.bool_)
+    # A treetop touches the upper edge, but its broad base only touches the bottom.
+    mask[:, 15:17] = False
+    mask[8:, 2:30] = False
+    enlarged = np.rot90(upscale_key_mask(np.rot90(mask, turns), 4, periodic=True), -turns)
+    assert enlarged[:2, 8:48].all()
+    assert enlarged[:2, 80:120].all()
+    assert not enlarged[0, 62:66].any()
+    assert not enlarged[-1, 16:112].any()
+
+
 def test_monotone_art_retains_reference_samples_and_local_color_bounds() -> None:
     pixels = ((np.arange(45).reshape(3, 5, 3) * 37) % 256).astype(np.uint8)
     enlarged = np.asarray(resample_monotone_art(Image.fromarray(pixels)))

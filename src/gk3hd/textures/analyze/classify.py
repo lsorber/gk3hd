@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 _SKYBOX_DATA_RE = re.compile(r"_[0-9]+(?:FT|BK|LF|RT|UP|DN)_MASK$")
 _BOUNDARY_DATA_RE = re.compile(r"(?:WALK|WLK|WK).*?(?:BOUND|BND)|(?:BOUND|BNDS)|^BNDRY[0-9_]*$")
 _MENU_BUTTON_SIZE = 32
+_EYELID_OVERLAY_RE = re.compile(r"_(?:EYELIDS|(?:BLINK|WINK)_[0-9]+)$")
 
 
 def classify_texture(
@@ -31,6 +32,8 @@ def classify_texture(
     Tiling describes how the game consumes a texture and cannot be proven from
     BMP pixels. It therefore defaults to false and can be supplied through the
     analyzer's archive usage scan or explicit override manifest.
+    The named eyelid/blink/wink families are layered color artwork whose small
+    aperture geometry must survive. Their opacity companions remain scalar.
     """
     normalized = Path(name).name.upper()
     stem = Path(normalized).stem
@@ -48,6 +51,7 @@ def classify_texture(
         constant_color=info.constant_color,
         alpha_silhouette=kind is TextureKind.ALPHA and info.alpha_silhouette,
         font_atlas=kind is not TextureKind.DATA and stem.startswith("F_"),
+        eyelid_overlay=kind is TextureKind.COLOR and bool(_EYELID_OVERLAY_RE.search(stem)),
     )
 
 

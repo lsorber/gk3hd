@@ -8,6 +8,7 @@ import pytest
 
 import gk3hd.textures.analyze.manifest as texture_analyze
 from gk3hd.textures.analyze.manifest import analyze_directory, load_feature_manifest, write_manifest
+from gk3hd.textures.analyze.policy import POLICY_SCHEMA_VERSION
 from gk3hd.textures.analyze.usage import TextureUsage
 from gk3hd.textures.model import TEXTURE_MANIFEST_SCHEMA_VERSION, TextureFeatures, TextureKind
 from gk3hd.textures.routing import PipelineKind, plan_texture
@@ -114,7 +115,7 @@ def _by_name(report: AnalysisReport) -> dict[str, TextureFeatures]:
 def _feature_policy(names: list[str], **values: object) -> str:
     return json.dumps(
         {
-            "schema_version": 9,
+            "schema_version": POLICY_SCHEMA_VERSION,
             "feature_overrides": [
                 {"textures": names, "set": values, "reason": "Explicit test correction."}
             ],
@@ -404,6 +405,7 @@ def test_writes_deterministic_explicit_manifest(tmp_path: Path) -> None:
         "native_size": False,
         "constant_color": False,
         "alpha_silhouette": False,
+        "eyelid_overlay": False,
         "processing": {"pipeline": "ai", "variant": "color"},
     }
 

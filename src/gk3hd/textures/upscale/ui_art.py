@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 LEGACY_TOOLBAR_ART_SIZES = {
     "TBBTBAKPAKCU.BMP": (22, 22),
     "TBBTBAKPAKOU.BMP": (22, 27),
+    "TBBTBAKPAKOD.BMP": (22, 27),
     "TBBTCAMERA_D.BMP": (22, 24),
     "TBBTCAMERA_G.BMP": (22, 22),
     "TBBTCAMERA_U.BMP": (22, 24),
@@ -74,6 +75,15 @@ GPS_MAP_SIZES = {
     for location in ("BEC", "LER", "MCF")
     for variant, size in (("L", (222, 332)), ("M", (208, 311)), ("S", (139, 208)))
     for opacity in ("", "_ALPHA")
+} | {
+    # This fourth area has shorter authored maps and an incomplete set of
+    # sizes/companions. Preserve the actual originals, not invented missing
+    # variants or the other areas' taller geometry.
+    "GPSMCB_L_ALPHA.BMP": (222, 288),
+    "GPSMCB_M.BMP": (208, 270),
+    "GPSMCB_S.BMP": (139, 180),
+    "GPSMCB_S_ALPHA.BMP": (139, 180),
+    "GPS_MCF_S.BMP": (139, 180),
 }
 SIDNEY_MAP_SIZES = {"SIDNEYBIGMAP.BMP": (1368, 1368), "SIDNEYLITTLEMAP.BMP": (342, 342)}
 SIDNEY_SHARED_CONTROL_SIZES = {
@@ -284,6 +294,24 @@ BINOCULAR_LABEL_SIZES = {
     "BINOCBTNZOOMOUTHOV.BMP": (134, 30),
     "BINOCBTNZOOMOUTU.BMP": (134, 30),
 }
+# Shared blank bevels and small shaded controls need the authored shading and
+# corner geometry, not inferred rounded corners, new lettering or embossed rims.
+BEVEL_BUTTON_SIZES = {
+    "LGBUTTONDWN.BMP": (68, 38),
+    "LGBUTTONUP.BMP": (69, 38),
+    "SMBUTTONDWN.BMP": (35, 38),
+    "SMBUTTONUP.BMP": (35, 38),
+}
+MONOTONE_CONTROL_SIZES = {
+    **BEVEL_BUTTON_SIZES,
+    "S_BAR_SIDNEY.BMP": (56, 11),
+    "S_SLIDER_STD.BMP": (6, 6),
+}
+PORTRAIT_ART_SIZES = {
+    f"{name}.BMP": (32, 32)
+    for name in ("LHO", "MAD", "MON", "MOS", "WIL")  # codespell:ignore wil
+}
+KEYED_CONTROL_SIZES = {"S_BAR_NOTCH.BMP": (21, 14)}
 MONOTONE_BUTTON_SIZES = (
     DEATH_BUTTON_SIZES
     | TITLE_BUTTON_SIZES
@@ -296,6 +324,7 @@ MONOTONE_BUTTON_SIZES = (
     | OPTIONS_ACTION_SIZES
     | SIDNEY_TAB_SIZES
     | BINOCULAR_LABEL_SIZES
+    | MONOTONE_CONTROL_SIZES
 )
 OPTIONS_LABEL_SIZES = {
     "ADVOP_ANI_DIS.BMP": (164, 16),
@@ -311,6 +340,7 @@ OPTIONS_LABEL_SIZES = {
     "GROPT_INREND_R.BMP": (158, 21),
 }
 UI_ART_SIZES = {
+    **PORTRAIT_ART_SIZES,
     **LEGACY_DOCUMENT_SIZES,
     **LEGACY_TOOLBAR_ART_SIZES,
     **CURSOR_ART_SIZES,
@@ -323,6 +353,7 @@ UI_ART_SIZES = {
     **MONOTONE_BUTTON_SIZES,
     **OPTIONS_LABEL_SIZES,
     **SIDNEY_SHARED_CONTROL_SIZES,
+    **KEYED_CONTROL_SIZES,
     **PARCHMENT_SIZES,
     **ZODIAC_PAGE_SIZES,
     **ZODIAC_OVERLAY_SIZES,
@@ -504,6 +535,7 @@ def regenerate_ui_art(source: Path) -> Image:
             | CONSERVATIVE_MENU_SIZES.keys()
             | MONOTONE_BUTTON_SIZES.keys()
             | OPTIONS_LABEL_SIZES.keys()
+            | PORTRAIT_ART_SIZES.keys()
         ):
             return _resample_detailed_art(original, name)
         if name in CONSOLE_PATTERN_SIZES:
@@ -539,6 +571,7 @@ def regenerate_ui_art(source: Path) -> Image:
             or name in SIDNEY_MAP_OVERLAY_SIZES
             or name in ZODIAC_OVERLAY_SIZES
             or name in FINGERPRINT_TOOL_SIZES
+            or name in KEYED_CONTROL_SIZES
         ):
             from gk3hd.textures.upscale.pipeline import resample_keyed_art  # noqa: PLC0415
 
@@ -551,6 +584,7 @@ def regenerate_ui_art(source: Path) -> Image:
                     or name in SIDNEY_MAP_OVERLAY_SIZES
                     or name in ZODIAC_OVERLAY_SIZES
                     or name in FINGERPRINT_TOOL_SIZES
+                    or name in KEYED_CONTROL_SIZES
                 ),
             )
         method = (
@@ -565,6 +599,11 @@ def _resample_detailed_art(original: Image, name: str) -> Image:
     """Select the measured sampling contract for cursor, menu and lettered art."""
     from gk3hd.textures.upscale.menu_art import resample_menu_art  # noqa: PLC0415
     from gk3hd.textures.upscale.pipeline import resample_keyed_art, resample_monotone_art  # noqa: PLC0415
+
+    if name in BEVEL_BUTTON_SIZES:
+        from gk3hd.textures.upscale.bevel import reconstruct_bevel  # noqa: PLC0415
+
+        return reconstruct_bevel(original)
 
     if name in CURSOR_ART_SIZES or name in CURSOR_OPACITY_SIZES:
         return regenerate_cursor_art(original, name)

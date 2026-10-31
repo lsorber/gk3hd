@@ -121,6 +121,42 @@ def test_texture_updates_and_uninstall_preserve_unrelated_optional_files(tmp_pat
     assert _snapshot(game) == optional
 
 
+def test_backdrop_correction_updates_without_reconverting_and_uninstalls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    game = tmp_path / "game"
+    game.mkdir()
+    original_ini = b"CUSTOM PATHS = existing\r\n"
+    (game / "GK3.ini").write_bytes(original_ini)
+    source = _pack(tmp_path, "1.0.0")
+    monkeypatch.setattr(
+        service, "backdrop_edge_fixes", lambda *_args: {"SCENE.BSP": b"first correction"}
+    )
+    installed = service.install_texture_pack(game, source)
+    assert installed.textures == 1
+    assert (installed.directory / "SCENE.BSP").read_bytes() == b"first correction"
+    pixels = (installed.directory / "ROOM.BMP").read_bytes()
+    lock = json.loads(next((tmp_path / "pack-1.0.0").glob("*.json")).read_bytes())
+    remote = TexturePackSource.from_lock(lock)
+    assert not service.install_texture_pack(game, remote).changed
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("updating auxiliary scene corrections must reuse converted textures")
+
+    monkeypatch.setattr(service, "_obtain_archives", forbidden)
+    monkeypatch.setattr(service, "_convert_archives", forbidden)
+    monkeypatch.setattr(
+        service, "backdrop_edge_fixes", lambda *_args: {"SCENE.BSP": b"updated correction"}
+    )
+    assert service.install_texture_pack(game, remote).changed
+    assert (installed.directory / "SCENE.BSP").read_bytes() == b"updated correction"
+    assert (installed.directory / "ROOM.BMP").read_bytes() == pixels
+    assert service.verify_texture_pack(game).textures == 1
+    service.uninstall_texture_pack(game)
+    assert not installed.directory.exists()
+    assert (game / "GK3.ini").read_bytes() == original_ini
+
+
 @pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
 def test_failed_swap_restores_prior_pack_and_ini(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type[BaseException]

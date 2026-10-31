@@ -13,8 +13,11 @@ from gk3hd.textures.upscale.fonts.button import FONT_BUTTON_SIZES
 from gk3hd.textures.upscale.menu_art import CONSERVATIVE_MENU_SIZES
 from gk3hd.textures.upscale.thumbnail_recipes import FRAMED_THUMBNAIL_SIZES
 from gk3hd.textures.upscale.ui_art import (
+    KEYED_CONTROL_SIZES,
     LEGACY_DOCUMENT_SIZES,
     LEGACY_TOOLBAR_ART_SIZES,
+    MONOTONE_CONTROL_SIZES,
+    PORTRAIT_ART_SIZES,
     QUIT_BUTTON_SIZES,
 )
 
@@ -195,11 +198,18 @@ SIDNEY_FRAME_IMAGES = tuple(
 # Their heights are layout units, not the fourfold source raster's texel count.
 SIDNEY_SEPARATOR_IMAGES = ((b"s_bit_space1", 2, 1),)
 SIDNEY_BACKGROUND_IMAGES = ((b"s_bkgnd", 640, 480), (b"s_main_scn", 640, 480))
-GPS_MAP_IMAGES = tuple(
-    (b"gps" + location + b"_" + variant + opacity, width, height)
-    for location in (b"bec", b"ler", b"mcf")
-    for variant, width, height in ((b"l", 222, 332), (b"m", 208, 311), (b"s", 139, 208))
-    for opacity in (b"", b"_alpha")
+GPS_MAP_IMAGES = (
+    *(
+        (b"gps" + location + b"_" + variant + opacity, width, height)
+        for location in (b"bec", b"ler", b"mcf")
+        for variant, width, height in ((b"l", 222, 332), (b"m", 208, 311), (b"s", 139, 208))
+        for opacity in (b"", b"_alpha")
+    ),
+    (b"gpsmcb_l_alpha", 222, 288),
+    (b"gpsmcb_m", 208, 270),
+    (b"gpsmcb_s", 139, 180),
+    (b"gpsmcb_s_alpha", 139, 180),
+    (b"gps_mcf_s", 139, 180),
 )
 SIDNEY_MAP_IMAGES = ((b"sidneybigmap", 1368, 1368), (b"sidneylittlemap", 342, 342))
 SIDNEY_MAP_OVERLAY_IMAGES = (
@@ -331,6 +341,10 @@ LEGACY_DOCUMENT_IMAGES = tuple(
     (name.removesuffix(".BMP").lower().encode("ascii"), *size)
     for name, size in LEGACY_DOCUMENT_SIZES.items()
 )
+SMALL_CONTROL_IMAGES = tuple(
+    (name.removesuffix(".BMP").lower().encode("ascii"), *size)
+    for name, size in (MONOTONE_CONTROL_SIZES | KEYED_CONTROL_SIZES | PORTRAIT_ART_SIZES).items()
+)
 
 UI_IMAGES = (
     ZODIAC_IMAGES
@@ -372,6 +386,7 @@ UI_IMAGES = (
     + FINGERPRINT_TOOL_IMAGES
     + LEGACY_TOOLBAR_IMAGES
     + LEGACY_DOCUMENT_IMAGES
+    + SMALL_CONTROL_IMAGES
     + OPACITY_IMAGE_PAIRS
 )
 # A one-byte record length skips a variable-length terminated name in O(1),

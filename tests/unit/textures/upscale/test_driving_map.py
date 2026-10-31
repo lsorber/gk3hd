@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -7,7 +9,11 @@ from PIL import Image
 from gk3hd.textures.upscale.driving_map import (
     compose_driving_map_overlay,
     driving_map_overlay_origin,
+    restore_map_artwork,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_catalog_recognizes_both_location_states_only() -> None:
@@ -52,6 +58,44 @@ def test_location_delta_is_scaled_without_changing_opaque_border() -> None:
     assert np.all(pixels[:, 0] == (80, 90, 100))
     assert np.all(pixels[:, -1] == (80, 90, 100))
     assert tuple(pixels[37 * 4 + 2, 49 * 4 + 2]) > (80, 90, 100)
+
+
+def test_shared_restoration_removes_invented_detail_for_both_states_only_where_needed(
+    tmp_path: Path,
+) -> None:
+    base = Image.new("RGB", (640, 480), (40, 50, 60))
+    source = tmp_path / "DM_BASE.BMP"
+    base.save(source)
+    # Different coverage in lit and unlit artwork must protect both positions
+    # on the shared base, rather than changing terrain detail on hover.
+    for name, box in (("DM_LHM.BMP", (10, 10, 14, 14)), ("DM_LHM_UL.BMP", (20, 10, 24, 14))):
+        art = Image.new("RGB", (37, 32), (40, 50, 60))
+        art.paste((160, 170, 180), box)
+        art.save(tmp_path / name)
+    hd = Image.new("RGB", (2560, 1920), (200, 210, 220))
+    corrected = restore_map_artwork(source, hd)
+
+    assert corrected.getpixel((0, 0)) == hd.getpixel((0, 0))
+    for x in (12, 22):
+        assert corrected.getpixel(((442 + x) * 4, (155 + 12) * 4)) == (40, 50, 60)
+    x, y, width, height = 442, 155, 37, 32
+    crop = np.asarray(corrected.crop((x * 4, y * 4, (x + width) * 4, (y + height) * 4)))
+    for name in ("DM_LHM.BMP", "DM_LHM_UL.BMP"):
+        with Image.open(tmp_path / name) as art:
+            result = np.asarray(compose_driving_map_overlay(art, base, corrected, name=name))
+        assert np.array_equal(result[0], crop[0])
+        assert np.array_equal(result[-1], crop[-1])
+        assert np.array_equal(result[:, 0], crop[:, 0])
+        assert np.array_equal(result[:, -1], crop[:, -1])
+
+
+def test_no_authored_difference_leaves_the_selected_background_untouched(tmp_path: Path) -> None:
+    base = Image.new("RGB", (640, 480), (40, 50, 60))
+    source = tmp_path / "DM_BASE.BMP"
+    base.save(source)
+    base.crop((442, 155, 479, 187)).save(tmp_path / "DM_LHM.BMP")
+    hd = Image.new("RGB", (2560, 1920), (200, 210, 220))
+    assert restore_map_artwork(source, hd).tobytes() == hd.tobytes()
 
 
 @pytest.mark.parametrize(

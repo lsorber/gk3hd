@@ -17,7 +17,6 @@ from gk3hd.textures.upscale.fingerprint import (
 from gk3hd.textures.upscale.fonts.atlas import font_atlas_recipe
 from gk3hd.textures.upscale.fonts.button import font_button_recipe
 from gk3hd.textures.upscale.menu_art import CONSERVATIVE_MENU_SIZES
-from gk3hd.textures.upscale.replacement import has_replacement
 from gk3hd.textures.upscale.sidney_frame import FRAME_REGIONS
 from gk3hd.textures.upscale.thumbnail_recipes import thumbnail_recipe
 from gk3hd.textures.upscale.timeblock import BACKGROUND_NAMES as TIMEBLOCK_BACKGROUND_NAMES
@@ -55,8 +54,8 @@ class PipelineKind(StrEnum):
     EXACT_RASTER_UNCHANGED = "exact-raster-unchanged"
     CONSTANT_COLOR_UNCHANGED = "constant-color-unchanged"
     COLOR_AI = "color-ai"
+    FACE_LAYER_AI = "face-layer-ai"
     COLOR_SMOOTH = "color-smooth"
-    REVIEWED_REPLACEMENT = "reviewed-replacement"
     THUMBNAIL_SOURCE_4X = "thumbnail-source-4x"
     ALPHA_TEST_AI = "alpha-test-ai"
     ALPHA_TEST_SMOOTH = "alpha-test-smooth"
@@ -79,6 +78,7 @@ class PipelineKind(StrEnum):
 
 _VARIANTS = {
     PipelineKind.COLOR_AI: (Pipeline.AI, "color"),
+    PipelineKind.FACE_LAYER_AI: (Pipeline.AI, "face-layer"),
     PipelineKind.ALPHA_TEST_AI: (Pipeline.AI, "color-key"),
     PipelineKind.ALPHA_SMOOTH: (Pipeline.RESAMPLE, "opacity"),
     PipelineKind.ALPHA_AI: (Pipeline.AI, "opacity-guarded"),
@@ -89,7 +89,6 @@ _VARIANTS = {
     PipelineKind.FINGERPRINT_SOURCE_4X: (Pipeline.RECONSTRUCT, "fingerprint"),
     PipelineKind.UI_SOURCE_4X: (Pipeline.RECONSTRUCT, "ui-artwork"),
     PipelineKind.THUMBNAIL_SOURCE_4X: (Pipeline.RECONSTRUCT, "larger-source"),
-    PipelineKind.REVIEWED_REPLACEMENT: (Pipeline.RECONSTRUCT, "reviewed-artwork"),
     PipelineKind.DRIVING_MAP_COMPOSITE: (Pipeline.RECONSTRUCT, "driving-map"),
     PipelineKind.TIMEBLOCK_COMPOSITE: (Pipeline.RECONSTRUCT, "chapter-card"),
     PipelineKind.DATA_UNCHANGED: (Pipeline.RETAIN, "data"),
@@ -106,10 +105,18 @@ class PipelinePlan:
 
     kind: PipelineKind
     periodic: bool
+    source_regions: tuple[tuple[int, int, int, int], ...] = ()
+    detail_sharpening: bool = False
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str | bool]:
         """Expose the resolved action without duplicating editable feature flags."""
-        return {"pipeline": self.kind.pipeline.value, "variant": self.kind.variant}
+        result: dict[str, str | bool] = {
+            "pipeline": self.kind.pipeline.value,
+            "variant": self.kind.variant,
+        }
+        if self.detail_sharpening:
+            result["detail_sharpening"] = True
+        return result
 
 
 def plan_texture(features: TextureFeatures) -> PipelinePlan:
@@ -120,7 +127,9 @@ def plan_texture(features: TextureFeatures) -> PipelinePlan:
     choice = features.pipeline_override
     kind = pipeline_kind(choice.pipeline, choice.variant)
     _validate_override(features, kind, default.kind)
-    return PipelinePlan(kind, features.tiled)
+    return PipelinePlan(
+        kind, features.tiled, choice.source_regions, detail_sharpening=choice.detail_sharpening
+    )
 
 
 def pipeline_kind(pipeline: str, variant: str) -> PipelineKind:
@@ -146,24 +155,24 @@ def _validate_override(
         permitted.add(PipelineKind.EXACT_RASTER_UNCHANGED)
     elif default.pipeline is not Pipeline.RECONSTRUCT:
         permitted.add(PipelineKind.NATIVE_SIZE_UNCHANGED)
-        if features.kind is TextureKind.ALPHA:
-            permitted.add(PipelineKind.ALPHA_SMOOTH)
-            if features.alpha_silhouette:
-                permitted.add(PipelineKind.ALPHA_AI)
-        else:
-            permitted.add(PipelineKind.EXACT_RASTER_UNCHANGED)
+        permitted.update(_ordinary_routes(features))
+    else:
+        permitted.add(PipelineKind.NATIVE_SIZE_UNCHANGED)
+        if default is PipelineKind.UI_SOURCE_4X and features.kind is TextureKind.COLOR:
+            # A reviewed UI color image may use another 4x color transform.
+            # Its logical dimensions are enforced by the runtime independently
+            # of the reconstruction method. Scalar masks stay scalar.
             permitted.update(
                 {PipelineKind.ALPHA_TEST_AI, PipelineKind.ALPHA_TEST_SMOOTH}
                 if features.alphatest
                 else {PipelineKind.COLOR_AI, PipelineKind.COLOR_SMOOTH}
             )
-    else:
-        permitted.add(PipelineKind.NATIVE_SIZE_UNCHANGED)
     if features.kind is not TextureKind.DATA and not features.native_size:
         available = _default_plan(replace(features, exact_raster=False))
         if available.kind.pipeline is Pipeline.RECONSTRUCT:
             permitted.add(available.kind)
-    permitted.update(_replacement_routes(features))
+    if features.eyelid_overlay and not features.native_size and not features.font_atlas:
+        permitted.add(PipelineKind.FACE_LAYER_AI)
     if kind not in permitted:
         msg = (
             f"{features.name}: pipeline override {kind} is incompatible with "
@@ -172,15 +181,19 @@ def _validate_override(
         raise ValueError(msg)
 
 
-def _replacement_routes(features: TextureFeatures) -> set[PipelineKind]:
-    """Only reviewed, opaque color artwork admits a replacement."""
-    if (
-        features.kind is TextureKind.COLOR
-        and not any((features.native_size, features.font_atlas, features.alphatest))
-        and has_replacement(features.name)
-    ):
-        return {PipelineKind.REVIEWED_REPLACEMENT}
-    return set()
+def _ordinary_routes(features: TextureFeatures) -> set[PipelineKind]:
+    """Keep scalar opacity separate from RGB and binary color-key transforms."""
+    if features.kind is TextureKind.ALPHA:
+        return (
+            {PipelineKind.ALPHA_SMOOTH, PipelineKind.ALPHA_AI}
+            if features.alpha_silhouette
+            else {PipelineKind.ALPHA_SMOOTH}
+        )
+    return {PipelineKind.EXACT_RASTER_UNCHANGED} | (
+        {PipelineKind.ALPHA_TEST_AI, PipelineKind.ALPHA_TEST_SMOOTH}
+        if features.alphatest
+        else {PipelineKind.COLOR_AI, PipelineKind.COLOR_SMOOTH}
+    )
 
 
 def _default_plan(features: TextureFeatures) -> PipelinePlan:
@@ -237,9 +250,23 @@ def _upscale_kind(features: TextureFeatures) -> PipelineKind:
         return PipelineKind.TIMEBLOCK_COMPOSITE
     if features.kind is TextureKind.ALPHA:
         return PipelineKind.ALPHA_AI if features.alpha_silhouette else PipelineKind.ALPHA_SMOOTH
+    # These small, layered facial images encode exact blink geometry. In
+    # isolation AI turns their eye openings into glasses-like rims and invents
+    # crease lines, even when supplied with the complete original face. Keep
+    # their source shading and let the existing color-key/opacity paths retain
+    # the authored aperture. The main face and other expressions still use AI.
     # Coupled compositions still need every enlarged source, even if one
     # member happens to be a flat fill. Opacity companions likewise retain
     # their matching dimensions through the alpha route above.
-    if features.constant_color and features.name.upper() not in _COMPOSITED_COLOR_INPUTS:
+    if (
+        features.constant_color
+        and not features.eyelid_overlay
+        and features.name.upper() not in _COMPOSITED_COLOR_INPUTS
+    ):
         return PipelineKind.CONSTANT_COLOR_UNCHANGED
-    return PipelineKind.ALPHA_TEST_AI if features.alphatest else PipelineKind.COLOR_AI
+    color, keyed = (
+        (PipelineKind.COLOR_SMOOTH, PipelineKind.ALPHA_TEST_SMOOTH)
+        if features.eyelid_overlay
+        else (PipelineKind.COLOR_AI, PipelineKind.ALPHA_TEST_AI)
+    )
+    return keyed if features.alphatest else color

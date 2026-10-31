@@ -99,6 +99,17 @@ def test_rejects_logo_like_warm_art_above_title_band() -> None:
     assert not title_ready(frame)
 
 
+def test_fresh_install_title_can_locate_play_with_restore_disabled() -> None:
+    frame = Image.new("RGB", (1024, 768), "black")
+    draw = ImageDraw.Draw(frame)
+    for left in (160, 360, 560, 760):
+        color = (132, 81, 24) if left == 560 else (181, 105, 33)
+        draw.rectangle((left, 700, left + 80, 730), fill=color)
+
+    assert title_ready(frame)
+    assert title_play_center(frame) == (400, 715)
+
+
 def test_large_title_returns_coordinates_in_the_original_frame() -> None:
     frame = Image.new("RGB", (1024, 768), "black")
     draw = ImageDraw.Draw(frame)

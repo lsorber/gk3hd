@@ -42,7 +42,7 @@ class JournalFile:
         filename = value.get("filename")
         sha256 = value.get("sha256")
         valid_filename = isinstance(filename, str) and (
-            Path(filename).suffix.casefold() == ".bmp"
+            Path(filename).suffix.casefold() in {".bmp", ".bsp"}
             or filename.casefold() == _FACES_FILENAME.casefold()
         )
         if (
