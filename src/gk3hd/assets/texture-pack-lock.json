@@ -1,16 +1,16 @@
 {
   "archives": [
     {
-      "filename": "gk3hd-texture-pack-v1.0.0-part01-of-02.zip",
-      "sha256": "7e33f9bba4771d389938874fa74db6dedee4db1f5753cfaa1763e06db461fcf6",
-      "size": 1986885859
+      "filename": "gk3hd-texture-pack-v1.2.1-part01-of-02.zip",
+      "sha256": "13ca730f0a21bc218ff4db720db171d611c7cac697319c179fe1de850ee0d39b",
+      "size": 1987104261
     },
     {
-      "filename": "gk3hd-texture-pack-v1.0.0-part02-of-02.zip",
-      "sha256": "e6448f87016e4a3e2852c2df279e84e80a16c8ffd95e38c0e1c67b6c8b9224f5",
-      "size": 996761614
+      "filename": "gk3hd-texture-pack-v1.2.1-part02-of-02.zip",
+      "sha256": "bf7a408c68abc30c6c215d14748f7fd1bf89336ccf80750f17f89229dc884a2c",
+      "size": 989128909
     }
   ],
-  "inventory_sha256": "30ad7125174dd8ec2d271e6e6b913f2d77d10c51ce2e0f36104c235ce91d47bb",
-  "tag": "v1.0.0"
+  "inventory_sha256": "b24dee4da180f0eb7e9921349439ec61ca5d35e73c2f566ec6c6721d0c4163fc",
+  "tag": "v1.2.1"
 }

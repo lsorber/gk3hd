@@ -1,3 +1,9 @@
+## v1.2.1 (2026-10-31)
+
+### Fix
+
+- **textures**: preserve original artwork and facial expressions
+
 ## v1.2.0 (2026-10-25)
 
 ### Feat
