@@ -58,6 +58,7 @@ dev = [
   "numpy>=2.5.4",
   "poethepoet>=0.49.0",
   "pytest>=9.1.1",
+  "pytest-xdist>=3.8.0",
   "ruff>=0.17.2",
   "scipy>=1.18.1",
   "ty>=0.0.91",
@@ -90,6 +91,7 @@ unfixable = ["ERA001", "F401", "F841", "T201", "T203"]
 [tool.ruff.lint.per-file-ignores]
 # Typer discovers a command's flat option schema from its Python signature.
 "src/gk3hd/cli/*.py" = ["FBT001", "FBT002", "PLR0913", "PLR0917"]
+"src/gk3hd/vr/**/cli.py" = ["PLR0913"]
 # Native-code builders deliberately expose complete named ABI inputs and keep
 # branch-local instruction emission together. Splitting those emitters to meet
 # generic Python complexity limits would obscure the byte contract verified by
@@ -166,7 +168,8 @@ show_missing = true
 skip_covered = true
 
 [tool.codespell]
-ignore-words-list = "lod,seh,tre"
+# Common create-info abbreviation also appears in upstream patch context.
+ignore-words-list = "aci,cant,iself,lod,nd,putpose,seh,tre,zink"
 skip = "./docs,./build,./dist,./src/gk3hd/assets/FACES.TXT,./src/gk3hd/assets/texture-policy.json,./src/gk3hd/textures/_vendor,./src/gk3hd/renderer/renderer.patch,./uv.lock"
 
 [tool.commitizen]
@@ -188,7 +191,7 @@ lint = [
   { cmd = "codespell ." },
 ]
 visual = { cmd = "pytest tests/visual --visual", help = "Opt-in visual comparisons (small=12, medium=25, large=100)" }
-test = { cmd = "pytest", help = "Fast tests; add --slow to include reconstruction and native emulation" }
+test = { cmd = "pytest -n auto --maxprocesses=4 --dist=loadscope", help = "Fast tests; add --slow to include reconstruction and native emulation" }
 
 [tool.poe.tasks.coverage]
 sequence = [

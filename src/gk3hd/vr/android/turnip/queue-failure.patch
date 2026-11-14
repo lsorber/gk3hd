@@ -1,0 +1,73 @@
+--- a/src/freedreno/vulkan/tu_queue.cc
++++ b/src/freedreno/vulkan/tu_queue.cc
+@@ -345,8 +345,10 @@
+    pthread_mutex_lock(&device->submit_mutex);
+ 
+    void *submit = tu_submit_create(device);
+-   if (!submit)
++   if (!submit) {
++      pthread_mutex_unlock(&device->submit_mutex);
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
++   }
+ 
+    for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++) {
+       const VkSparseBufferMemoryBindInfo *bind = &vk_submit->buffer_binds[i];
+@@ -441,8 +443,10 @@
+ 
+    VkResult result =
+       tu_insert_dynamic_cmdbufs(device, &cmd_buffers, &cmdbuf_count);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      pthread_mutex_unlock(&device->submit_mutex);
+       return result;
++   }
+ 
+    bool has_trace_points = false;
+    static_assert(offsetof(struct tu_cmd_buffer, vk) == 0,
+@@ -455,19 +459,21 @@
+    struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
+ 
+    void *submit = tu_submit_create(device);
+-   if (!submit)
+-      goto fail_create_submit;
++   if (!submit) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      goto fail_before_submit;
++   }
+ 
+    result = resolve_vis_stream_patchpoints(queue, submit, &dump_cmds,
+                                            cmd_buffers, cmdbuf_count);
+    if (result != VK_SUCCESS)
+-      goto out;
++      goto fail_before_submit;
+ 
+    result = resolve_cb_control_patchpoints(queue, submit, &dump_cmds,
+                                            cmd_buffers, cmdbuf_count);
+ 
+    if (result != VK_SUCCESS)
+-      goto out;
++      goto fail_before_submit;
+ 
+    if (has_trace_points) {
+       tu_u_trace_submission_data_create(
+@@ -594,13 +600,17 @@
+    u_trace_context_process(&device->trace_context, false);
+ 
+ out:
+-   tu_submit_finish(device, submit);
+-
+-fail_create_submit:
++   if (submit)
++      tu_submit_finish(device, submit);
+    if (cmd_buffers != (struct tu_cmd_buffer **) vk_submit->command_buffers)
+       vk_free(&queue->device->vk.alloc, cmd_buffers);
+ 
+    return result;
++
++fail_before_submit:
++   util_dynarray_fini(&dump_cmds);
++   pthread_mutex_unlock(&device->submit_mutex);
++   goto out;
+ }
+ 
+ VkResult

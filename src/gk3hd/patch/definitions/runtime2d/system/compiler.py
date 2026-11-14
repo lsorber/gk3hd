@@ -20,10 +20,12 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SPRITE_CACHE_SEGMENT,
     SPRITE_CACHE_TRANSFER_OFFSET,
     SYSTEM_ACTION_LAYOUT_STATE_END_OFFSET,
+    SYSTEM_ACTION_LAYOUT_STATE_OFFSET,
     SYSTEM_CONTROL_HD_FONT_ACTIVE_OFFSET,
     SYSTEM_CONTROL_HD_FONT_STATE_END_OFFSET,
     SYSTEM_CONTROL_SEGMENT,
     SYSTEM_SEGMENT,
+    SYSTEM_STATE_OFFSET,
     UI_FILTER_SEGMENT,
     UI_FRAMES_SEGMENT,
     ZODIAC_SEGMENT,
@@ -358,8 +360,13 @@ class SystemScreenCompiler(SystemCompilerContext):
             ),
         ):
             system_payload.place(label=label, offset=offset, payload=payload, limit=limit)
-        if self._off_cursor_scope_wrapper < SYSTEM_ACTION_LAYOUT_STATE_END_OFFSET:
-            msg = f"{self.id} ActionMenu layout state overlaps system code"
+        if not (
+            SYSTEM_STATE_OFFSET
+            <= SYSTEM_ACTION_LAYOUT_STATE_OFFSET
+            < SYSTEM_ACTION_LAYOUT_STATE_END_OFFSET
+            <= SYSTEM_SEGMENT.size
+        ):
+            msg = f"{self.id} ActionMenu layout state leaves its data page"
             raise PatchError(msg)
 
         for label, offset, payload, limit in (

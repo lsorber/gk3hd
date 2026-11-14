@@ -1,0 +1,473 @@
+--- a/server/registry.c
++++ b/server/registry.c
+@@ -29,6 +29,12 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <limits.h>
++#include <dirent.h>
++#include <poll.h>
++#include <stdint.h>
++#include <signal.h>
++#include <sys/prctl.h>
++#include <time.h>
+ #include <stdio.h>
+ #include <stdarg.h>
+ #include <string.h>
+@@ -88,6 +94,7 @@
+     int               nb_values;   /* count of allocated values in array */
+     struct key_value *values;      /* values array */
+     unsigned int      flags;       /* flags */
++    uint64_t          dirty_epoch; /* last persistent mutation in lazy mode */
+     timeout_t         modif;       /* last modification time */
+     struct list       notify_list; /* list of notifications */
+ };
+@@ -138,9 +145,12 @@
+ {
+     struct key  *key;
+     const char  *filename;
++    uint64_t     saved_epoch;
+ };
+ 
+ #define MAX_SAVE_BRANCH_INFO 3
++static int registry_epoch_mode = 1;
++static uint64_t registry_epoch = 1;
+ static int save_branch_count;
+ static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
+ 
+@@ -701,6 +711,7 @@
+             key->class       = NULL;
+             key->classlen    = 0;
+             key->flags       = 0;
++            key->dirty_epoch = 0;
+             key->last_subkey = -1;
+             key->nb_subkeys  = 0;
+             key->subkeys     = NULL;
+@@ -720,7 +731,11 @@
+                 release_object( key );
+                 return NULL;
+             }
+-            else key->flags |= KEY_DIRTY;
++            else
++            {
++                key->flags |= KEY_DIRTY;
++                if (registry_epoch_mode) key->dirty_epoch = registry_epoch;
++            }
+         }
+     }
+     return key;
+@@ -729,6 +744,15 @@
+ /* mark a key and all its parents as dirty (modified) */
+ static void make_dirty( struct key *key )
+ {
++    if (registry_epoch_mode)
++    {
++        while (key && !(key->flags & KEY_VOLATILE) && key->dirty_epoch != registry_epoch)
++        {
++            key->dirty_epoch = registry_epoch;
++            key = get_parent( key );
++        }
++        return;
++    }
+     while (key)
+     {
+         if (key->flags & (KEY_DIRTY|KEY_VOLATILE)) return;  /* nothing to do */
+@@ -1800,6 +1824,7 @@
+         if (f)
+         {
+             load_keys( key, NULL, f, -1 );
++            if (registry_epoch_mode) make_dirty( key );
+             fclose( f );
+         }
+         else file_set_error();
+@@ -1909,6 +1934,9 @@
+ 
+     if (fchdir( config_dir_fd ) == -1) fatal_error( "chdir to config dir: %s\n", strerror( errno ));
+ 
++    p = getenv( "GK3HD_REGISTRY_EPOCHS" );
++    registry_epoch_mode = !p || strcmp( p, "0" );
++
+     /* create the root key */
+     root_key = create_key_object( NULL, &root_name, OBJ_PERMANENT, 0, current_time, NULL );
+     assert( root_key );
+@@ -2052,15 +2080,23 @@
+     }
+ }
+ 
++static int registry_branch_dirty( const struct save_branch_info *branch )
++{
++    return registry_epoch_mode ? branch->key->dirty_epoch > branch->saved_epoch
++                               : (branch->key->flags & KEY_DIRTY) != 0;
++}
++
+ /* save a registry branch to a file */
+-static int save_branch( struct key *key, const char *filename )
+-{
++static int save_branch( struct save_branch_info *branch )
++{
++    struct key *key = branch->key;
++    const char *filename = branch->filename;
+     struct stat st;
+     char tmp[32];
+     int fd, count = 0, ret = 0;
+     FILE *f;
+ 
+-    if (!(key->flags & KEY_DIRTY))
++    if (!registry_branch_dirty( branch ))
+     {
+         if (debug_level > 1) dump_operation( key, NULL, "Not saving clean" );
+         return 1;
+@@ -2118,19 +2154,336 @@
+     }
+ 
+ done:
+-    if (ret) make_clean( key );
++    if (ret)
++    {
++        if (registry_epoch_mode)
++        {
++            branch->saved_epoch = key->dirty_epoch;
++            ++registry_epoch;
++        }
++        else make_clean( key );
++    }
+     return ret;
+ }
++
++/* Snapshot in a worker; publish completed hive files in the server. */
++struct registry_snapshot
++{
++    struct save_branch_info *branch;
++    uint64_t dirty_epoch;
++    struct stat original;
++    char temp[48];
++    int existed;
++    int output;
++    int identity;
++};
++
++static struct registry_snapshot registry_snapshots[MAX_SAVE_BRANCH_INFO];
++static unsigned int registry_snapshot_count;
++static int registry_result = -1;
++static struct timeout_user *registry_writer_poll;
++
++static const int registry_signals[] = { SIGCHLD, SIGHUP, SIGINT, SIGALRM, SIGIO, SIGQUIT, SIGTERM };
++
++static unsigned long long registry_trace_time(void)
++{
++    struct timespec now;
++    if (clock_gettime( CLOCK_MONOTONIC, &now )) return 0;
++    return (unsigned long long)now.tv_sec * 1000000000 + now.tv_nsec;
++}
++
++static int trace_registry_worker(void)
++{
++    const char *value = getenv( "GK3HD_ASYNC_REGISTRY_TRACE" );
++    return value && !strcmp( value, "1" );
++}
++
++static int ordinary_registry_target( const char *name, struct stat *st, int *existed )
++{
++    if (fstatat( config_dir_fd, name, st, AT_SYMLINK_NOFOLLOW ) == -1)
++    {
++        *existed = 0;
++        return errno == ENOENT;
++    }
++    *existed = 1;
++    return S_ISREG(st->st_mode) && st->st_nlink == 1;
++}
++
++static int make_registry_temp( struct registry_snapshot *snapshot )
++{
++    unsigned int i;
++
++    for (i = 0; i < 32; i++)
++    {
++        char name[sizeof(snapshot->temp)];
++        int fd;
++
++        snprintf( name, sizeof(name), "reg%lx%04x.tmp", (long)getpid(), i );
++        fd = openat( config_dir_fd, name, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0666 );
++        if (fd >= 0)
++        {
++            strcpy( snapshot->temp, name );
++            snapshot->output = fd;
++            snapshot->identity = openat( config_dir_fd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC );
++            return snapshot->identity >= 0;
++        }
++        if (errno != EEXIST) return 0;
++    }
++    return 0;
++}
++
++static void free_registry_snapshots( int retry_failed, unsigned int written )
++{
++    unsigned int i;
++
++    for (i = 0; i < registry_snapshot_count; i++)
++    {
++        struct registry_snapshot *snapshot = &registry_snapshots[i];
++        struct stat target, temp, owned;
++        const char *name = snapshot->branch->filename;
++        int exists;
++        int fd = snapshot->identity >= 0 ? snapshot->identity : snapshot->output;
++        int own_temp = fd >= 0 && !fstat( fd, &owned ) &&
++                       !fstatat( config_dir_fd, snapshot->temp, &temp, AT_SYMLINK_NOFOLLOW ) &&
++                       owned.st_dev == temp.st_dev && owned.st_ino == temp.st_ino;
++
++        if (!own_temp || !(written & (1u << i)) ||
++            !ordinary_registry_target( name, &target, &exists ) || exists != snapshot->existed ||
++            (exists && (target.st_dev != snapshot->original.st_dev ||
++                        target.st_ino != snapshot->original.st_ino)) ||
++            renameat( config_dir_fd, snapshot->temp, config_dir_fd, name ))
++        {
++            if (own_temp) unlinkat( config_dir_fd, snapshot->temp, 0 );
++            if (retry_failed && !registry_epoch_mode) make_dirty( snapshot->branch->key );
++        }
++        else if (registry_epoch_mode) snapshot->branch->saved_epoch = snapshot->dirty_epoch;
++        if (snapshot->output >= 0) close( snapshot->output );
++        if (snapshot->identity >= 0) close( snapshot->identity );
++        memset( snapshot, 0, sizeof(*snapshot) );
++    }
++    registry_snapshot_count = 0;
++}
++
++static void finish_registry_writer( int blocking )
++{
++    unsigned char written = 0;
++    ssize_t result;
++    unsigned long long start;
++    struct pollfd pollfd;
++
++    if (registry_result == -1) return;
++    start = registry_trace_time();
++    do result = read( registry_result, &written, 1 ); while (result == -1 && errno == EINTR);
++    if (result == -1 && errno == EAGAIN)
++    {
++        int ready;
++        if (!blocking) return;
++        pollfd.fd = registry_result;
++        pollfd.events = POLLIN;
++        do ready = poll( &pollfd, 1, 1000 ); while (ready == -1 && errno == EINTR);
++        if (ready > 0)
++            do result = read( registry_result, &written, 1 ); while (result == -1 && errno == EINTR);
++    }
++    if (result != 1 || written >> registry_snapshot_count) written = 0;
++    close( registry_result );
++    registry_result = -1;
++    free_registry_snapshots( 1, written );
++    if (trace_registry_worker())
++        fprintf( stderr, "GK3HD_REGISTRY_PUBLISH %llu %llu %u\n", start, registry_trace_time(), written );
++}
++
++static void poll_registry_writer( void *unused )
++{
++    registry_writer_poll = NULL;
++    finish_registry_writer( 0 );
++    if (registry_result != -1 &&
++        !(registry_writer_poll = add_timeout_user( -TICKS_PER_SEC / 100, poll_registry_writer, NULL )))
++        finish_registry_writer( 1 );
++}
++
++static int owned_registry_fd( int fd, int result, int debug )
++{
++    unsigned int i;
++
++    if (fd == result || (fd == STDERR_FILENO && debug)) return 1;
++    for (i = 0; i < registry_snapshot_count; i++)
++        if (fd == registry_snapshots[i].output) return 1;
++    return 0;
++}
++
++static int registry_fd_list( int *fds, size_t limit, size_t *count );
++
++/* Wine's SIGCHLD handler may reap this process. Its exit status is deliberately
++ * separate from the one-byte, single-writer result used for publication. */
++static void write_registry_child( int result, const int *fds, size_t fd_count,
++                                  const sigset_t *mask, pid_t parent, int debug, int enumerate )
++{
++    unsigned int i;
++    unsigned char written = 0;
++    unsigned long long start;
++    size_t j;
++    ssize_t sent;
++    int child_fds[4096];
++    unsigned long long enumerate_start;
++
++    if (prctl( PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0 ) || getppid() != parent) _exit( 1 );
++    for (i = 0; i < sizeof(registry_signals) / sizeof(registry_signals[0]); i++)
++        if (signal( registry_signals[i], SIG_DFL ) == SIG_ERR) _exit( 1 );
++    if (enumerate)
++    {
++        enumerate_start = debug ? registry_trace_time() : 0;
++        if (!registry_fd_list( child_fds, sizeof(child_fds) / sizeof(child_fds[0]), &fd_count )) _exit( 1 );
++        fds = child_fds;
++        if (debug)
++            fprintf( stderr, "GK3HD_REGISTRY_CHILD_FDS %llu %llu %zu\n", enumerate_start, registry_trace_time(), fd_count );
++    }
++    for (j = 0; j < fd_count; j++)
++        if (!owned_registry_fd( fds[j], result, debug )) close( fds[j] );
++    if (sigprocmask( SIG_SETMASK, mask, NULL )) _exit( 1 );
++
++    start = registry_trace_time();
++    for (i = 0; i < registry_snapshot_count; i++)
++    {
++        struct registry_snapshot *snapshot = &registry_snapshots[i];
++        FILE *file = fdopen( snapshot->output, "w" );
++        int ok;
++
++        if (!file) continue;
++        save_all_subkeys( snapshot->branch->key, file );
++        ok = !ferror( file );
++        if (!fclose( file ) && ok) written |= 1u << i;
++    }
++    if (debug)
++        fprintf( stderr, "GK3HD_REGISTRY_FORK_WRITER %llu %llu %u\n", start, registry_trace_time(), written );
++    do sent = write( result, &written, 1 ); while (sent == -1 && errno == EINTR);
++    _exit( sent == 1 ? 0 : 1 );
++}
++
++static int registry_fd_list( int *fds, size_t limit, size_t *count )
++{
++    DIR *dir;
++    struct dirent *entry;
++    int ok = 1;
++
++    *count = 0;
++    if (!(dir = opendir( "/proc/self/fd" ))) return 0;
++    for (;;)
++    {
++        int fd;
++        char *end;
++        long value;
++
++        errno = 0;
++        if (!(entry = readdir( dir )))
++        {
++            if (errno) ok = 0;
++            break;
++        }
++        if (entry->d_name[0] == '.') continue;
++        value = strtol( entry->d_name, &end, 10 );
++        if (*end || value < 0 || value > INT_MAX || *count == limit)
++        {
++            ok = 0;
++            break;
++        }
++        fd = value;
++        if (fd != dirfd( dir )) fds[(*count)++] = fd;
++    }
++    closedir( dir );
++    return ok;
++}
++
++static int save_registry_in_background(void)
++{
++    const char *enabled = getenv( "GK3HD_ASYNC_REGISTRY" );
++    const char *child_fds = getenv( "GK3HD_REGISTRY_ENUMERATE_CHILD" );
++    int enumerate = child_fds && !strcmp( child_fds, "1" );
++    unsigned int i;
++    unsigned long long start, files, descriptors, before_fork, after_fork, closed, clean;
++    int channel[2] = { -1, -1 }, fds[4096], debug;
++    size_t fd_count = 0;
++    sigset_t mask, original_mask;
++    pid_t parent, worker;
++
++    if (enabled && !strcmp( enabled, "0" )) return 0;
++    if (registry_result != -1) return 1;
++    start = registry_trace_time();
++    debug = trace_registry_worker();
++
++    for (i = 0; i < save_branch_count; i++)
++    {
++        struct save_branch_info *branch = &save_branch_info[i];
++        struct registry_snapshot *snapshot;
++
++        if (!registry_branch_dirty( branch )) continue;
++        snapshot = &registry_snapshots[registry_snapshot_count++];
++        snapshot->branch = branch;
++        snapshot->dirty_epoch = branch->key->dirty_epoch;
++        snapshot->output = snapshot->identity = -1;
++        if (!ordinary_registry_target( branch->filename, &snapshot->original, &snapshot->existed ) ||
++            !make_registry_temp( snapshot )) goto fallback;
++    }
++    if (!registry_snapshot_count) return 1;
++    files = debug ? registry_trace_time() : 0;
++    if (pipe2( channel, O_CLOEXEC | O_NONBLOCK ) ||
++        (!enumerate && !registry_fd_list( fds, sizeof(fds) / sizeof(fds[0]), &fd_count ))) goto fallback;
++    descriptors = debug ? registry_trace_time() : 0;
++    sigemptyset( &mask );
++    for (i = 0; i < sizeof(registry_signals) / sizeof(registry_signals[0]); i++) sigaddset( &mask, registry_signals[i] );
++    if (sigprocmask( SIG_BLOCK, &mask, &original_mask )) goto fallback;
++    parent = getpid();
++    before_fork = debug ? registry_trace_time() : 0;
++    worker = fork();
++    if (!worker) write_registry_child( channel[1], fds, fd_count, &original_mask, parent, debug, enumerate );
++    after_fork = debug ? registry_trace_time() : 0;
++    if (sigprocmask( SIG_SETMASK, &original_mask, NULL )) fatal_error( "restore registry writer signals: %s\n", strerror(errno) );
++    if (worker < 0) goto fallback;
++
++    close( channel[1] );
++    registry_result = channel[0];
++    for (i = 0; i < registry_snapshot_count; i++)
++    {
++        close( registry_snapshots[i].output );
++        registry_snapshots[i].output = -1;
++    }
++    closed = debug ? registry_trace_time() : 0;
++    /* Subsequent edits receive a new epoch before the request loop resumes. */
++    if (registry_epoch_mode) ++registry_epoch;
++    else for (i = 0; i < registry_snapshot_count; i++) make_clean( registry_snapshots[i].branch->key );
++    clean = debug ? registry_trace_time() : 0;
++    if (debug)
++        fprintf( stderr, "GK3HD_REGISTRY_FORK_DISPATCH %llu %llu %u %ld\n",
++                 start, clean, registry_snapshot_count, (long)worker );
++    if (debug)
++        fprintf( stderr, "GK3HD_REGISTRY_DISPATCH_PHASES %llu %llu %llu %llu %llu %llu %llu %zu %ld\n",
++                 start, files, descriptors, before_fork, after_fork, closed, clean, fd_count, (long)worker );
++    if (!(registry_writer_poll = add_timeout_user( -TICKS_PER_SEC / 100, poll_registry_writer, NULL )))
++        finish_registry_writer( 1 );
++    return 1;
++
++fallback:
++    if (channel[0] >= 0) close( channel[0] );
++    if (channel[1] >= 0) close( channel[1] );
++    free_registry_snapshots( 0, 0 );
++    return 0;
++}
++
++
+ 
+ /* periodic saving of the registry */
+ static void periodic_save( void *arg )
+ {
+     int i;
+ 
++    save_timeout_user = NULL;
++    if (save_registry_in_background())
++    {
++        set_periodic_save_timer();
++        return;
++    }
+     if (fchdir( config_dir_fd ) == -1) return;
+-    save_timeout_user = NULL;
+     for (i = 0; i < save_branch_count; i++)
+-        save_branch( save_branch_info[i].key, save_branch_info[i].filename );
++        save_branch( &save_branch_info[i] );
+     if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
+     set_periodic_save_timer();
+ }
+@@ -2147,10 +2500,13 @@
+ {
+     int i;
+ 
++    if (registry_writer_poll) remove_timeout_user( registry_writer_poll );
++    registry_writer_poll = NULL;
++    finish_registry_writer( 1 );
+     if (fchdir( config_dir_fd ) == -1) return;
+     for (i = 0; i < save_branch_count; i++)
+     {
+-        if (!save_branch( save_branch_info[i].key, save_branch_info[i].filename ))
++        if (!save_branch( &save_branch_info[i] ))
+         {
+             fprintf( stderr, "wineserver: could not save registry branch to %s",
+                      save_branch_info[i].filename );

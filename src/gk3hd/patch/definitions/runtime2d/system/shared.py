@@ -13,10 +13,12 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     LOAD_SAVE_HUD_FONT_ALPHA_TRANSFORM_COUNT_OFFSET,
     LOAD_SAVE_HUD_FONT_POINT_OFFSET,
     LOAD_SAVE_SEGMENT,
+    LOAD_SAVE_STATE_OFFSET,
     LOAD_SAVE_TEXT_ACTIVE_OFFSET,
     RESOURCE_SEGMENT,
     SIDNEY_NATIVE_BLT_TRAMPOLINE_OFFSET,
     SYSTEM_ACTION_LAYOUT_STATE_OFFSET,
+    SYSTEM_CLEAR_PENDING_OFFSET,
     SYSTEM_CONTROL_ACTION_LIFETIME_HELPER_OFFSET,
     SYSTEM_CONTROL_CURSOR_CLASSIFIER_OFFSET,
     SYSTEM_CONTROL_CURSOR_CLASSIFIER_TRACE_OFFSET,
@@ -40,6 +42,7 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_CONTROL_ROOM_STATUS_SEED_BUDGET_OFFSET,
     SYSTEM_CONTROL_ROOM_STATUS_SEED_REPLAY_COUNT_OFFSET,
     SYSTEM_CONTROL_SEGMENT,
+    SYSTEM_CONTROL_STATE_OFFSET,
     SYSTEM_CONTROL_TITLE_CACHE_DEST_RECT_OFFSET,
     SYSTEM_CONTROL_TITLE_CACHE_SOURCE_RECT_OFFSET,
     SYSTEM_CONTROL_TITLE_CACHE_TRACE_OFFSET,
@@ -50,6 +53,9 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_RENDER_DEPTH_OFFSET,
     SYSTEM_ROOT_POINTER_OFFSET,
     SYSTEM_SEGMENT,
+    SYSTEM_SOURCE_RECT_OFFSET,
+    SYSTEM_STATE_OFFSET,
+    SYSTEM_TARGET_RECT_OFFSET,
     SYSTEM_TOOLBAR_LAYOUT_OFFSET,
     SYSTEM_TOOLBAR_WARP_OFFSET,
     SYSTEM_TRANSFORM_MODE_OFFSET,
@@ -78,25 +84,25 @@ class SystemCompilerContext:
     _section_size: ClassVar[int] = SYSTEM_SEGMENT.size
     _section_characteristics: ClassVar[int] = SYSTEM_SEGMENT.characteristics
     _magic: ClassVar[bytes] = SYSTEM_SEGMENT.magic
-    _layout_version: ClassVar[int] = 213
+    _layout_version: ClassVar[int] = 215
     _off_layout_version: ClassVar[int] = 0x08
     _off_render_depth: ClassVar[int] = SYSTEM_RENDER_DEPTH_OFFSET
     _off_input_active: ClassVar[int] = SYSTEM_INPUT_ACTIVE_OFFSET
-    _off_clear_pending: ClassVar[int] = 0x14
-    _off_transform_count: ClassVar[int] = 0x18
+    _off_clear_pending: ClassVar[int] = SYSTEM_CLEAR_PENDING_OFFSET
+    _off_transform_count: ClassVar[int] = SYSTEM_STATE_OFFSET + 0x18
     _off_root_ptr: ClassVar[int] = SYSTEM_ROOT_POINTER_OFFSET
-    _off_source_rect: ClassVar[int] = 0x20
-    _off_target_rect: ClassVar[int] = 0x30
+    _off_source_rect: ClassVar[int] = SYSTEM_SOURCE_RECT_OFFSET
+    _off_target_rect: ClassVar[int] = SYSTEM_TARGET_RECT_OFFSET
     _off_dest_rect: ClassVar[int] = SYSTEM_DEST_RECT_OFFSET
-    _off_bltfx: ClassVar[int] = 0x50
-    _off_composite_surface: ClassVar[int] = 0xB4
-    _off_left_bar_rect: ClassVar[int] = 0xC0
-    _off_right_bar_rect: ClassVar[int] = 0xD0
+    _off_bltfx: ClassVar[int] = SYSTEM_STATE_OFFSET + 0x50
+    _off_composite_surface: ClassVar[int] = SYSTEM_STATE_OFFSET + 0xB4
+    _off_left_bar_rect: ClassVar[int] = SYSTEM_STATE_OFFSET + 0xC0
+    _off_right_bar_rect: ClassVar[int] = SYSTEM_STATE_OFFSET + 0xD0
     _off_transform_mode: ClassVar[int] = SYSTEM_TRANSFORM_MODE_OFFSET
-    _off_hud_transform_count: ClassVar[int] = 0xE4
-    _off_cursor_active: ClassVar[int] = 0xE8
-    _off_cursor_transform_count: ClassVar[int] = 0xEC
-    _off_hud_last_rect: ClassVar[int] = 0xF0
+    _off_hud_transform_count: ClassVar[int] = SYSTEM_STATE_OFFSET + 0xE4
+    _off_cursor_active: ClassVar[int] = SYSTEM_STATE_OFFSET + 0xE8
+    _off_cursor_transform_count: ClassVar[int] = SYSTEM_STATE_OFFSET + 0xEC
+    _off_hud_last_rect: ClassVar[int] = SYSTEM_STATE_OFFSET + 0xF0
     _off_root_draw_wrapper: ClassVar[int] = 0x100
     _off_show_wrapper: ClassVar[int] = 0x180
     _off_hide_wrapper: ClassVar[int] = 0x1C0
@@ -140,12 +146,12 @@ class SystemCompilerContext:
     # rectangles.  Keep one private source RECT for transfers that cross the
     # physical framebuffer edge: cropping both rectangles by the same ratio
     # avoids DirectDraw rejecting the whole operation or squashing its bitmap.
-    _off_control_clipped_source_rect: ClassVar[int] = 0x0C
+    _off_control_clipped_source_rect: ClassVar[int] = SYSTEM_CONTROL_STATE_OFFSET + 0x0C
     # Title's transformed children cannot repair a native cursor-sized damage
     # list reliably.  Store one vector-like region collection and its sole RECT
     # in otherwise-unused control-section data, before the first wrapper.
-    _off_control_full_damage_region: ClassVar[int] = 0x20
-    _off_control_full_damage_rect: ClassVar[int] = 0x30
+    _off_control_full_damage_region: ClassVar[int] = SYSTEM_CONTROL_STATE_OFFSET + 0x20
+    _off_control_full_damage_rect: ClassVar[int] = SYSTEM_CONTROL_STATE_OFFSET + 0x30
     _off_control_hd_font_active: ClassVar[int] = SYSTEM_CONTROL_HD_FONT_ACTIVE_OFFSET
     _off_control_hd_font_handle_count: ClassVar[int] = SYSTEM_CONTROL_HD_FONT_HANDLE_COUNT_OFFSET
     _off_control_hd_font_handles: ClassVar[int] = SYSTEM_CONTROL_HD_FONT_HANDLES_OFFSET
@@ -161,9 +167,9 @@ class SystemCompilerContext:
     # patch into a general-purpose logger. Each record contains wrapper
     # identities, dimensions, and the incoming destination RECT. The shared
     # constants are also consumed by the capture harness.
-    _off_control_dropdown_pending_ptr: ClassVar[int] = 0x170
-    _off_control_dropdown_saved_root_bottom: ClassVar[int] = 0x174
-    _off_control_dropdown_root_bottom_valid: ClassVar[int] = 0x178
+    _off_control_dropdown_pending_ptr: ClassVar[int] = SYSTEM_CONTROL_STATE_OFFSET + 0x170
+    _off_control_dropdown_saved_root_bottom: ClassVar[int] = SYSTEM_CONTROL_STATE_OFFSET + 0x174
+    _off_control_dropdown_root_bottom_valid: ClassVar[int] = SYSTEM_CONTROL_STATE_OFFSET + 0x178
     # Title's full-damage root wrapper is larger than the compact state
     # wrappers kept at the start of this section. Give it a dedicated tail slot.
     _off_title_root_draw_wrapper: ClassVar[int] = 0x1A00
@@ -318,7 +324,7 @@ class SystemCompilerContext:
     # unrelated early wrappers. This also leaves future COM teardown changes
     # subject to explicit, independently validated code-size limits.
     _off_ingame_toolbar_destructor_wrapper: ClassVar[int] = 0x5660
-    _off_toolbar_preview_surface: ClassVar[int] = 0x5500
+    _off_toolbar_preview_surface: ClassVar[int] = SYSTEM_CONTROL_STATE_OFFSET + 0x5500
     _off_toolbar_preview_prepare: ClassVar[int] = 0x5520
     _off_toolbar_preview_prepare_limit: ClassVar[int] = 0x55B0
     _off_toolbar_cursor_warp: ClassVar[int] = SYSTEM_TOOLBAR_WARP_OFFSET
@@ -437,15 +443,15 @@ class SystemCompilerContext:
     _loadsave_section_name: ClassVar[str] = LOAD_SAVE_SEGMENT.logical_name
     _loadsave_section_size: ClassVar[int] = LOAD_SAVE_SEGMENT.size
     _loadsave_magic: ClassVar[bytes] = LOAD_SAVE_SEGMENT.magic
-    _loadsave_layout_version: ClassVar[int] = 101
+    _loadsave_layout_version: ClassVar[int] = 102
     _off_loadsave_preview_attach: ClassVar[int] = 0xB50
-    _off_loadsave_layout_root: ClassVar[int] = 0x0C
-    _off_loadsave_scroll_raw_top: ClassVar[int] = 0x14
-    _off_loadsave_scroll_origin_seen: ClassVar[int] = 0x18
+    _off_loadsave_layout_root: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x0C
+    _off_loadsave_scroll_raw_top: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x14
+    _off_loadsave_scroll_origin_seen: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x18
     _off_loadsave_layout_wrapper: ClassVar[int] = 0x100
     _off_loadsave_rect_transform: ClassVar[int] = 0x300
     _off_hud_font_active: ClassVar[int] = LOAD_SAVE_HUD_FONT_ACTIVE_OFFSET
-    _off_hud_font_transform_count: ClassVar[int] = 0x24
+    _off_hud_font_transform_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x24
     _off_hud_font_last_point: ClassVar[int] = LOAD_SAVE_HUD_FONT_POINT_OFFSET
     _off_hud_font_alpha_transform_count: ClassVar[int] = (
         LOAD_SAVE_HUD_FONT_ALPHA_TRANSFORM_COUNT_OFFSET
@@ -453,34 +459,35 @@ class SystemCompilerContext:
     # Last successful save-record glyph rewrite.  Keeping the incoming and
     # outgoing points in the runtime image makes resolution regressions
     # diagnosable without timing-sensitive debugger attachment.
-    _off_loadsave_record_font_count: ClassVar[int] = 0x30
-    _off_loadsave_record_font_input: ClassVar[int] = 0x34
-    _off_loadsave_record_font_output: ClassVar[int] = 0x44
+    _off_loadsave_record_font_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x30
+    _off_loadsave_record_font_input: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x34
+    _off_loadsave_record_font_output: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x44
     _off_loadsave_record_text_active: ClassVar[int] = LOAD_SAVE_TEXT_ACTIVE_OFFSET
     # Load/Save's transformed object tree cannot consume GK3's authored-space
     # dirty regions safely. These fields retain page-copy and complete-damage
     # telemetry for runtime verification.
-    _off_loadsave_full_damage_count: ClassVar[int] = 0x6C
-    _off_loadsave_native_damage_ptr: ClassVar[int] = 0x74
-    _off_loadsave_native_damage_count: ClassVar[int] = 0x78
-    _off_loadsave_native_damage_rects: ClassVar[int] = 0x7C
+    _off_loadsave_full_damage_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x6C
+    _off_loadsave_native_damage_ptr: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x74
+    _off_loadsave_native_damage_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x78
+    _off_loadsave_native_damage_rects: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x7C
     # Load/Save merges native dirty rectangles into one canonical off-screen
     # composition, then replays it to the concrete page selected by Flip.
-    _off_loadsave_destination_handle: ClassVar[int] = 0xE00
-    _off_loadsave_frame_present_count: ClassVar[int] = 0xE04
-    _off_loadsave_cache_surface: ClassVar[int] = 0xE08
-    _off_loadsave_cache_owner: ClassVar[int] = 0xE0C
-    _off_loadsave_cache_ready: ClassVar[int] = 0xE10
-    _off_loadsave_cache_create_result: ClassVar[int] = 0xE14
-    _off_loadsave_cache_capture_result: ClassVar[int] = 0xE18
-    _off_loadsave_cache_present_result: ClassVar[int] = 0xE1C
-    _off_loadsave_cache_capture_count: ClassVar[int] = 0xE20
-    _off_loadsave_cache_present_count: ClassVar[int] = 0xE24
-    _off_loadsave_cache_source_rect: ClassVar[int] = 0xE28
-    _off_loadsave_cache_scratch_rect: ClassVar[int] = 0xE38
-    _off_loadsave_cache_descriptor: ClassVar[int] = 0xE48
-    _off_loadsave_page_clear_result: ClassVar[int] = 0xEC4
-    _off_loadsave_page_clear_count: ClassVar[int] = 0xEC8
+    _off_loadsave_destination_handle: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE00
+    _off_loadsave_frame_present_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE04
+    _off_loadsave_cache_surface: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE08
+    _off_loadsave_cache_owner: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE0C
+    _off_loadsave_cache_ready: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE10
+    _off_loadsave_cache_create_result: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE14
+    _off_loadsave_cache_capture_result: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE18
+    _off_loadsave_cache_present_result: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE1C
+    _off_loadsave_cache_capture_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE20
+    _off_loadsave_cache_present_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE24
+    _off_loadsave_cache_source_rect: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE28
+    _off_loadsave_cache_scratch_rect: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE38
+    _off_loadsave_cache_descriptor: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xE48
+    _off_loadsave_page_clear_result: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xEC4
+    _off_loadsave_page_clear_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xEC8
+    _off_loadsave_cache_state_end: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xF00
     _off_loadsave_cache_update_helper: ClassVar[int] = 0xF00
     _off_loadsave_frame_presenter: ClassVar[int] = 0x1400
     # Load/Save redraws can cover the software cursor without scheduling a new
@@ -513,27 +520,29 @@ class SystemCompilerContext:
     _off_loadsave_scroll_arrow_left_down_stub: ClassVar[int] = 0x1E90
     _off_loadsave_scroll_arrow_release_stub: ClassVar[int] = 0x1EA0
     _off_loadsave_scroll_arrow_release_dispatch: ClassVar[int] = 0x1ED0
-    _off_loadsave_scroll_input_mapped_point: ClassVar[int] = 0x1F28
-    _off_loadsave_scroll_input_depth: ClassVar[int] = 0x1F30
+    _off_loadsave_scroll_arrow_release_limit: ClassVar[int] = 0x1F28
+    _off_loadsave_scroll_input_mapped_point: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xF00
+    _off_loadsave_scroll_input_depth: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0xF08
     _off_loadsave_scroll_hit_test: ClassVar[int] = 0x1F40
     _off_loadsave_scroll_arrow_input: ClassVar[int] = 0x1F60
     _off_loadsave_scroll_input_tail_limit: ClassVar[int] = 0x2000
     # Construction preserves canonical dynamic child geometry before native
     # selection updates overwrite it. The preview trace retains RECT + source
     # width/height + count; the selection counter records root-level repairs.
-    # This data-only gap follows the RECT transformer and precedes helpers.
-    _off_loadsave_preview_rect: ClassVar[int] = 0x400
-    _off_loadsave_selection_rects: ClassVar[int] = 0x410
-    _off_loadsave_preview_trace: ClassVar[int] = 0x440
-    _off_loadsave_selection_repair_count: ClassVar[int] = 0x460
-    _off_loadsave_selection_repair_pending: ClassVar[int] = 0x464
-    _off_loadsave_dynamic_state_end: ClassVar[int] = 0x480
+    # Retained geometry belongs to the state page, not the RECT helper's page.
+    _off_loadsave_preview_rect: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x400
+    _off_loadsave_selection_rects: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x410
+    _off_loadsave_preview_trace: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x440
+    _off_loadsave_selection_repair_count: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x460
+    _off_loadsave_selection_repair_pending: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x464
+    _off_loadsave_dynamic_state_end: ClassVar[int] = LOAD_SAVE_STATE_OFFSET + 0x480
     _off_loadsave_initial_preview_transform: ClassVar[int] = 0x480
     _off_loadsave_damage_selector: ClassVar[int] = 0x500
     # Dynamic preview and selection-row redraws arrive in root-relative authored
     # coordinates. The preceding selector has ample slack, so this slot grows
     # backwards while the tightly packed, proven font slots remain fixed.
     _off_loadsave_background_helper: ClassVar[int] = 0x680
+    _off_loadsave_font_rect_helper_limit: ClassVar[int] = 0xE00
     _off_loadsave_font_rect_helper: ClassVar[int] = LOAD_SAVE_FONT_POINT_HELPER_OFFSET
 
     _hd_wrapper_offset: ClassVar[int] = 0x100
@@ -1046,7 +1055,7 @@ class SystemCompilerContext:
     _ddblt_colorfill_wait: ClassVar[int] = 0x01000400
     _ddsd_size: ClassVar[int] = 0x6C
     _ddsd_caps_height_width: ClassVar[int] = 0x00000007
-    _tooltip_panel_caps: ClassVar[int] = 0x00000040  # DDSCAPS_OFFSCREENPLAIN
+    _tooltip_panel_caps: ClassVar[int] = 0x00000840  # OFFSCREENPLAIN | SYSTEMMEMORY
     # GK3's software-cursor atlas has this authored extent. Other compositors
     # use the constant only where exact source identity is not yet available.
     _cursor_atlas_size: ClassVar[int] = 128

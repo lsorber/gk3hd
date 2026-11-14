@@ -62,6 +62,33 @@ def download_verified(
 
     partial = target.with_name(f"{target.name}.part")
     completed = partial.stat().st_size if partial.is_file() else 0
+    if size is not None and completed >= size:
+        # An interrupted download may have written its last byte but never
+        # verified or published the file. A range starting at EOF cannot resume.
+        if _matches(partial, sha256=sha256, size=size):
+            partial.replace(target)
+            if progress is not None:
+                progress(size, size)
+            return target
+        completed = 0
+    _stream_to_partial(url, partial, completed=completed, size=size, progress=progress)
+
+    if not _matches(partial, sha256=sha256, size=size):
+        actual = sha256_file(partial)
+        msg = f"download verification failed for {url}: expected {sha256}, got {actual}"
+        raise DownloadError(msg)
+    partial.replace(target)
+    return target
+
+
+def _stream_to_partial(
+    url: str,
+    partial: Path,
+    *,
+    completed: int,
+    size: int | None,
+    progress: ProgressCallback | None,
+) -> None:
     request = urllib.request.Request(url)  # noqa: S310 - URL passed _validate_url.
     if completed:
         request.add_header("Range", f"bytes={completed}-")
@@ -82,13 +109,6 @@ def download_verified(
                 completed += len(chunk)
                 if progress is not None:
                     progress(completed, announced)
-
-    if not _matches(partial, sha256=sha256, size=size):
-        actual = sha256_file(partial)
-        msg = f"download verification failed for {url}: expected {sha256}, got {actual}"
-        raise DownloadError(msg)
-    partial.replace(target)
-    return target
 
 
 def _validate_url(url: str) -> None:

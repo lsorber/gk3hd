@@ -1,4 +1,4 @@
-"""Load the private AV1 adapter beside the executable, never from cwd or the registry."""
+"""Load the private movie adapter beside the executable, never from cwd or the registry."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from gk3hd.patch.binary.x86 import Condition, X86Emitter
 
 PLAYER_PATH = b"gk3hd\\videos\\installed\\gk3hd-videos.dll\0"
 PLAYER_EXPORT = b"_Gk3hdOpenMovie@12\0"
+PLAYER_STATE_EXPORT = b"_Gk3hdSetMovieState@8\0"
 _PATH_CAPACITY = 300  # Match the native movie resolver's bounded path capacity.
 
 
@@ -22,6 +23,7 @@ class MoviePlayerABI:
     path: int
     symbol: int
     cached_function: int
+    cached_module: int
 
 
 def build_open_movie(*, wrapper_va: int, abi: MoviePlayerABI) -> bytes:
@@ -65,6 +67,7 @@ def build_open_movie(*, wrapper_va: int, abi: MoviePlayerABI) -> bytes:
     code.raw(b"\xb9" + struct.pack("<I", len(PLAYER_PATH)) + bytes.fromhex("fc f3a4 5f"))
     code.raw(b"\x57\xff\x15" + struct.pack("<I", abi.load_library) + bytes.fromhex("85c0"))
     code.jump_if(Condition.EQUAL, "fallback")
+    code.raw(b"\xa3" + struct.pack("<I", abi.cached_module))
     code.push_imm32(abi.symbol)
     code.raw(b"\x50\xff\x15" + struct.pack("<I", abi.get_proc_address) + bytes.fromhex("85c0"))
     code.jump_if(Condition.EQUAL, "fallback")
@@ -74,4 +77,68 @@ def build_open_movie(*, wrapper_va: int, abi: MoviePlayerABI) -> bytes:
     code.raw(bytes.fromhex("ffe0"))
     code.label("fallback")
     code.raw(bytes.fromhex("8d65f4 5f5e5b 5d 8b442404 8b00 ff6040"))
+    return code.build()
+
+
+@dataclass(frozen=True, slots=True)
+class MovieStateABI:
+    """Reuse the executable-relative player already resolved during Open."""
+
+    get_proc_address: int
+    cached_module: int
+    symbol: int
+    cached_function: int
+
+
+def build_movie_state_call(*, wrapper_va: int, abi: MovieStateABI) -> bytes:
+    """Keep the stream/state stdcall ABI, falling back to its native method."""
+    code = X86Emitter(base_va=wrapper_va)
+    code.raw(b"\xa1" + struct.pack("<I", abi.cached_function) + bytes.fromhex("85c0"))
+    code.jump_if(Condition.NOT_EQUAL, "invoke")
+    code.raw(b"\xa1" + struct.pack("<I", abi.cached_module) + bytes.fromhex("85c0"))
+    code.jump_if(Condition.EQUAL, "fallback")
+    code.push_imm32(abi.symbol)
+    code.raw(b"\x50\xff\x15" + struct.pack("<I", abi.get_proc_address))
+    code.raw(bytes.fromhex("85c0"))
+    code.jump_if(Condition.EQUAL, "fallback")
+    code.raw(b"\xa3" + struct.pack("<I", abi.cached_function))
+    code.label("invoke")
+    code.raw(bytes.fromhex("ffe0"))
+    code.label("fallback")
+    code.raw(bytes.fromhex("8b442404 8b00 ff601c"))
+    return code.build()
+
+
+def build_avi_state(*, wrapper_va: int, state_call_va: int, running: bool) -> bytes:
+    """Translate the native AVI thiscall into its existing COM stream/state call."""
+    code = X86Emitter(base_va=wrapper_va)
+    code.raw(bytes.fromhex("8b4154") + bytes((0x6A, int(running), 0x50)))
+    code.call_absolute(state_call_va)
+    code.raw(b"\xc3")
+    return code.build()
+
+
+def build_native_movie_attach(
+    *, entry_va: int, module_va: int, get_proc_address: int, complete_va: int
+) -> bytes:
+    """Offer the EDI full-screen replacement to an optional standalone provider.
+
+    Inline fragment: preserve all registers/flags and fall through. A missing
+    module/export retains the ordinary graph. The adapter must negotiate before
+    changing the native object. Its symbol occupies only this call's stack.
+    """
+    symbol = b"_Gk3hdAttachNativeMovie@8\0"
+    symbol += bytes(-len(symbol) % 4)
+    code = X86Emitter(base_va=entry_va)
+    code.raw(bytes.fromhex("9c60 a1") + struct.pack("<I", module_va) + bytes.fromhex("85c0"))
+    code.jump_if(Condition.EQUAL, "done")
+    for offset in range(len(symbol) - 4, -1, -4):
+        code.push_imm32(struct.unpack_from("<I", symbol, offset)[0])
+    code.raw(bytes.fromhex("54 50 ff15") + struct.pack("<I", get_proc_address))
+    code.raw(bytes((0x83, 0xC4, len(symbol))) + bytes.fromhex("85c0"))
+    code.jump_if(Condition.EQUAL, "done")
+    code.push_imm32(complete_va)
+    code.raw(bytes.fromhex("57 ffd0"))
+    code.label("done")
+    code.raw(bytes.fromhex("619d"))
     return code.build()

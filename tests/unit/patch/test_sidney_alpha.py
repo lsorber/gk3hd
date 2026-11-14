@@ -2,6 +2,10 @@
 
 import struct
 
+import pytest
+from unicorn import UC_ARCH_X86, UC_HOOK_CODE, UC_MODE_32, Uc
+from unicorn.x86_const import UC_X86_REG_EAX, UC_X86_REG_ECX, UC_X86_REG_ESP
+
 from gk3hd.patch.binary.x86 import BranchOpcode, decode_rel32_branch
 from gk3hd.patch.definitions.runtime2d.layout import (
     SIDNEY_ALPHA_CONSTRUCTOR_OFFSET,
@@ -63,6 +67,68 @@ def test_sidney_caret_retains_its_four_argument_fill_abi() -> None:
     assert len(payload) <= 0x100
     assert b"\x83\xc4\x14\xc2\x10\x00" in payload
     assert b"\xff\x74\x24\x24" * 3 in payload
+
+
+@pytest.mark.parametrize(("width", "height"), [(1024, 768), (1280, 800), (3840, 2160)])
+@pytest.mark.parametrize("scope", ["framebuffer", "inactive", "offscreen", "null_rect"])
+def test_sidney_caret_matches_text_affine_and_preserves_native_fill(
+    width: int, height: int, scope: str
+) -> None:
+    wrapper, target, resolve, stop = 0x100000, 0x101000, 0x102000, 0x103000
+    state, record, bitmap, rect, stack = 0x200000, 0x201000, 0x202000, 0x203000, 0x308000
+    machine = Uc(UC_ARCH_X86, UC_MODE_32)
+    for address in (wrapper, state, 0x300000):
+        machine.mem_map(address, 0x10000)
+    machine.mem_write(
+        wrapper,
+        build_caret_wrapper(
+            wrapper_va=wrapper,
+            target_va=target,
+            resolve_bitmap_va=resolve,
+            active_depth_va=state,
+            physical_width_va=state + 4,
+        ),
+    )
+    machine.mem_write(target, bytes.fromhex("c2 10 00"))
+    machine.mem_write(resolve, bytes.fromhex("c2 04 00"))
+    machine.mem_write(state, struct.pack("<3I", int(scope != "inactive"), width, height))
+    machine.mem_write(record + 0x30, struct.pack("<I", bitmap))
+    machine.mem_write(bitmap + 0x38, struct.pack("<2I", width - int(scope == "offscreen"), height))
+    original = (406, 338, 408, 353)  # Native multiline caret after four characters.
+    machine.mem_write(rect, struct.pack("<4I", *original))
+    rect_arg = 0 if scope == "null_rect" else rect
+    machine.mem_write(stack, struct.pack("<5I", stop, 37, 0x2FABC1, 0x2FABC1, rect_arg))
+    machine.reg_write(UC_X86_REG_ESP, stack)
+    machine.reg_write(UC_X86_REG_ECX, 0x123456)
+    observed: list[tuple[int, ...] | None] = []
+
+    def capture(current: Uc, address: int, _size: int, _context: object) -> None:
+        if address == resolve:
+            current.reg_write(UC_X86_REG_EAX, record)
+        if address == target:
+            args = struct.unpack("<4I", current.mem_read(current.reg_read(UC_X86_REG_ESP) + 4, 16))
+            assert args[:3] == (37, 0x2FABC1, 0x2FABC1)
+            assert current.reg_read(UC_X86_REG_ECX) == 0x123456
+            observed.append(
+                struct.unpack("<4I", current.mem_read(args[3], 16)) if args[3] else None
+            )
+
+    machine.hook_add(UC_HOOK_CODE, capture)
+    machine.emu_start(wrapper, stop, count=1000)
+    offset = (width - 1024 * height // 768) // 2
+    expected = (
+        tuple(
+            value * height // 768 + (offset if index % 2 == 0 else 0)
+            for index, value in enumerate(original)
+        )
+        if scope == "framebuffer"
+        else None
+        if scope == "null_rect"
+        else original
+    )
+    assert observed == [expected]
+    assert machine.mem_read(rect, 16) == struct.pack("<4I", *original)
+    assert machine.reg_read(UC_X86_REG_ESP) == stack + 20
 
 
 def test_sidney_solid_fill_scopes_only_framebuffer_rectangles() -> None:

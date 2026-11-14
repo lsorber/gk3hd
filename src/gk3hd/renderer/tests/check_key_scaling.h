@@ -1,4 +1,4 @@
-// Stable fixed-16.16 pixel-center sampling is the fidelity contract. Native
+// Exact pixel-center sampling is the fidelity contract. Native
 // Windows stretching can give an original glyph and its exact 4x replica
 // different footprints, so it is not a general fractional-scaling oracle.
 std::vector<uint16_t> readRaster(IDirectDrawSurface4* surface) {
@@ -17,7 +17,7 @@ uint16_t scalePattern(unsigned x,unsigned y) {
 
 // Independent closed-form oracle, not the production row/column accumulator.
 unsigned sampleCenter(unsigned offset,unsigned source,unsigned destination) {
-  return unsigned((uint64_t(2*offset+1)*((uint64_t(source)*65536)/destination))/131072);
+  return unsigned(((2*uint64_t(offset)+1)*source)/(2*uint64_t(destination)));
 }
 
 template<typename T>

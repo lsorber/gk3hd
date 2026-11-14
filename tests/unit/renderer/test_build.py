@@ -27,7 +27,25 @@ def test_license_changes_invalidate_build_reuse(
     assert build.recipe_digest() != previous
 
 
-@pytest.mark.parametrize("name", ["renderer.patch", "build.ps1", "upstream.json", "LICENSE"])
+def test_vr_source_changes_only_invalidate_the_vr_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(build, "RECIPE", tmp_path)
+    xr = tmp_path / "vr"
+    xr.mkdir()
+    camera = xr / "camera.cpp"
+    camera.write_text("// original")
+    flat, openxr = build.recipe_digest(), build.recipe_digest(variant="openxr")
+
+    camera.write_text("// revised")
+
+    assert build.recipe_digest() == flat
+    assert build.recipe_digest(variant="openxr") != openxr
+
+
+@pytest.mark.parametrize(
+    "name", ["renderer.patch", "build.ps1", "upstream.json", "LICENSE", "CMakeLists.txt"]
+)
 def test_line_endings_do_not_invalidate_build_reuse(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
 ) -> None:

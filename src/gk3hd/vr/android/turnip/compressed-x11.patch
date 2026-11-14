@@ -1,0 +1,240 @@
+diff --git a/src/vulkan/wsi/wsi_common_drm.c b/src/vulkan/wsi/wsi_common_drm.c
+--- a/src/vulkan/wsi/wsi_common_drm.c
++++ b/src/vulkan/wsi/wsi_common_drm.c
+@@ -774,8 +774,10 @@
+    const off_t backing_size = lseek(info->winlator_import_fd, 0, SEEK_END);
+    const int size_errno = errno;
+    const off_t reset = lseek(info->winlator_import_fd, 0, SEEK_SET);
++   const bool compressed = info->create.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    if (backing_size <= 0 || reset != 0 ||
+-       (uint64_t)backing_size < reqs->size) {
++       (uint64_t)backing_size < reqs->size ||
++       (compressed && (uint64_t)backing_size != reqs->size)) {
+       mesa_loge("gk3hd native backing seek size=%lld errno=%d reset=%lld required=%llu",
+          (long long)backing_size, size_errno, (long long)reset,
+          (unsigned long long)reqs->size);
+@@ -792,9 +794,19 @@
+    uint32_t bits = reqs->memoryTypeBits & properties.memoryTypeBits;
+    if (!bits)
+       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+-   const VkImageSubresource subresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT};
++   const VkImageSubresource subresource = {
++      .aspectMask = compressed ? VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT : VK_IMAGE_ASPECT_COLOR_BIT
++   };
+    VkSubresourceLayout layout;
+    wsi->GetImageSubresourceLayout(chain->device, image->image, &subresource, &layout);
++   if (compressed) {
++      VkImageDrmFormatModifierPropertiesEXT modifier = {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT,
++      };
++      result = wsi->GetImageDrmFormatModifierPropertiesEXT(chain->device, image->image, &modifier);
++      if (result != VK_SUCCESS || modifier.drmFormatModifier != DRM_FORMAT_MOD_QCOM_COMPRESSED)
++         return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
++   }
+    if (layout.rowPitch != info->winlator_row_pitch || layout.offset != 0 ||
+        layout.size > (uint64_t)backing_size) {
+       mesa_loge("gk3hd native layout pitch=%llu expected=%u offset=%llu size=%llu backing=%llu",
+@@ -830,7 +842,7 @@
+    image->dma_buf_fd = os_dupfd_cloexec(info->winlator_import_fd);
+    if (image->dma_buf_fd < 0)
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+-   image->drm_modifier = DRM_FORMAT_MOD_INVALID;
++   image->drm_modifier = compressed ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_INVALID;
+    image->num_planes = 1;
+    image->sizes[0] = reqs->size;
+    image->row_pitches[0] = layout.rowPitch;
+diff --git a/src/vulkan/wsi/wsi_common_x11.c b/src/vulkan/wsi/wsi_common_x11.c
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -48,6 +48,7 @@
+ #include "util/hash_table.h"
+ #include "util/mesa-blake3.h"
+ #include "util/os_file.h"
++#include "util/os_misc.h"
+ #include "util/os_time.h"
+ #include "util/u_debug.h"
+ #include "util/u_thread.h"
+@@ -490,11 +491,19 @@
+    return screen_resources;
+ }
+
++static bool
++winlator_compressed_rgba(const struct wsi_device *wsi)
++{
++   const char *value = os_get_option("MESA_GK3HD_COMPRESSED_X11");
++   return wsi->winlator_native_mem_imported && value && !strcmp(value, "1");
++}
++
+ static const VkFormat formats[] = {
+    VK_FORMAT_R5G6B5_UNORM_PACK16,
+    VK_FORMAT_B8G8R8A8_SRGB,
+    VK_FORMAT_B8G8R8A8_UNORM,
+    VK_FORMAT_A2R10G10B10_UNORM_PACK32,
++   VK_FORMAT_R8G8B8A8_SRGB,
+ };
+
+ static const VkPresentModeKHR present_modes[] = {
+@@ -1006,11 +1015,15 @@
+    /* use the root window's visual to set the default */
+    *count = 0;
+    for (unsigned i = 0; i < ARRAY_SIZE(formats); i++) {
++      if (formats[i] == VK_FORMAT_R8G8B8A8_SRGB && !winlator_compressed_rgba(wsi_device))
++         continue;
+       if (rgb_component_bits_are_equal(formats[i], rootvis))
+          sorted_formats[(*count)++] = formats[i];
+    }
+
+    for (unsigned i = 0; i < ARRAY_SIZE(formats); i++) {
++      if (formats[i] == VK_FORMAT_R8G8B8A8_SRGB && !winlator_compressed_rgba(wsi_device))
++         continue;
+       for (unsigned j = 0; j < *count; j++)
+          if (formats[i] == sorted_formats[j])
+             goto next_format;
+@@ -2625,6 +2638,49 @@
+
+ #ifdef HAVE_X11_DRM
+ static VkResult
++x11_import_winlator_compressed(struct x11_swapchain *chain, struct x11_image *image,
++                               const VkSwapchainCreateInfoKHR *create)
++{
++   xcb_generic_error_t *error = NULL;
++   xcb_dri3_buffers_from_pixmap_cookie_t cookie =
++      xcb_dri3_buffers_from_pixmap(chain->conn, image->pixmap);
++   xcb_dri3_buffers_from_pixmap_reply_t *reply =
++      xcb_dri3_buffers_from_pixmap_reply(chain->conn, cookie, &error);
++   VkResult result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   if (!error && reply && reply->nfd == 1 && reply->length == 2 &&
++       reply->bpp == 32 && reply->depth == 32 &&
++       reply->modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED &&
++       reply->width == create->imageExtent.width && reply->height == create->imageExtent.height) {
++      const uint32_t stride = xcb_dri3_buffers_from_pixmap_strides(reply)[0];
++      const uint32_t offset = xcb_dri3_buffers_from_pixmap_offsets(reply)[0];
++      const int fd = xcb_dri3_buffers_from_pixmap_reply_fds(chain->conn, reply)[0];
++      if (fd >= 0 && stride >= (uint32_t)reply->width * 4 && stride <= 8192u * 4 && !(stride % 4) && offset == 0) {
++         struct wsi_image_info info = chain->base.image_info;
++         const VkSubresourceLayout plane = {.rowPitch = stride};
++         const VkImageDrmFormatModifierExplicitCreateInfoEXT modifier = {
++            .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
++            .pNext = info.create.pNext,
++            .drmFormatModifier = reply->modifier,
++            .drmFormatModifierPlaneCount = 1,
++            .pPlaneLayouts = &plane,
++         };
++         info.create.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
++         info.create.pNext = &modifier;
++         info.winlator_import_fd = fd;
++         info.winlator_row_pitch = stride;
++         result = wsi_create_image(&chain->base, &info, &image->base);
++      }
++   }
++   if (reply) {
++      int *fds = xcb_dri3_buffers_from_pixmap_reply_fds(chain->conn, reply);
++      for (unsigned i = 0; i < reply->nfd; i++) close(fds[i]);
++   }
++   free(error);
++   free(reply);
++   return result;
++}
++
++static VkResult
+ x11_winlator_image_init(struct x11_swapchain *chain,
+                         const VkSwapchainCreateInfoKHR *create,
+                         struct x11_image *image)
+@@ -2633,7 +2689,8 @@
+        !create->imageExtent.height || create->imageExtent.width > UINT16_MAX ||
+        create->imageExtent.height > UINT16_MAX ||
+        (create->imageFormat != VK_FORMAT_B8G8R8A8_UNORM &&
+-        create->imageFormat != VK_FORMAT_B8G8R8A8_SRGB))
++        create->imageFormat != VK_FORMAT_B8G8R8A8_SRGB &&
++        !(create->imageFormat == VK_FORMAT_R8G8B8A8_SRGB && winlator_compressed_rgba(chain->base.wsi))))
+    {
+       mesa_loge("gk3hd native unsupported format=%u layers=%u size=%ux%u",
+          create->imageFormat, create->imageArrayLayers,
+@@ -2651,44 +2708,49 @@
+       image->pixmap = 0;
+       return VK_ERROR_SURFACE_LOST_KHR;
+    }
+-   xcb_dri3_buffer_from_pixmap_cookie_t query =
+-      xcb_dri3_buffer_from_pixmap(chain->conn, image->pixmap);
+-   xcb_dri3_buffer_from_pixmap_reply_t *reply =
+-      xcb_dri3_buffer_from_pixmap_reply(chain->conn, query, &error);
+-   int fd = -1;
+-   if (!error && reply && reply->nfd == 1) {
+-      fd = xcb_dri3_buffer_from_pixmap_reply_fds(chain->conn, reply)[0];
+-      /* This server's private protocol reports pixels, not DRI3 byte stride. */
+-      uint64_t bytes = (uint64_t)reply->stride * reply->height * 4;
+-      mesa_logi("gk3hd native reply pixmap=%u fd=%d nfd=%u bpp=%u width=%u height=%u stride=%u size=%u",
+-         image->pixmap, fd, reply->nfd, reply->bpp, reply->width, reply->height,
+-         reply->stride, reply->size);
+-      if (fd >= 0 && reply->bpp == 32 &&
+-          reply->width == create->imageExtent.width &&
+-          reply->height == create->imageExtent.height &&
+-          reply->stride >= reply->width && bytes <= reply->size) {
+-         struct wsi_image_info info = chain->base.image_info;
+-         info.create.extent.width = reply->stride;
+-         info.create.tiling = VK_IMAGE_TILING_LINEAR;
+-         info.winlator_import_fd = fd;
+-         info.winlator_row_pitch = (uint32_t)reply->stride * 4;
+-         result = wsi_create_image(&chain->base, &info, &image->base);
+-         mesa_logi("gk3hd native image result=%d", result);
+-         if (result == VK_SUCCESS)
+-            mesa_logi("gk3hd native image pixmap=%u width=%u height=%u rowPitch=%u",
+-               image->pixmap, reply->width, reply->height, info.winlator_row_pitch);
+-      }
+-   } else if (reply) {
+-      mesa_loge("gk3hd native invalid reply nfd=%u error=%u", reply->nfd,
+-         error ? error->error_code : 0);
+-      int *fds = xcb_dri3_buffer_from_pixmap_reply_fds(chain->conn, reply);
+-      for (uint32_t i = 0; i < reply->nfd; i++)
+-         close(fds[i]);
+-   }
+-   if (fd >= 0)
+-      close(fd);
+-   free(error);
+-   free(reply);
++   if (create->imageFormat == VK_FORMAT_R8G8B8A8_SRGB) {
++      result = x11_import_winlator_compressed(chain, image, create);
++   } else {
++      xcb_dri3_buffer_from_pixmap_cookie_t query =
++         xcb_dri3_buffer_from_pixmap(chain->conn, image->pixmap);
++      xcb_dri3_buffer_from_pixmap_reply_t *reply =
++         xcb_dri3_buffer_from_pixmap_reply(chain->conn, query, &error);
++      int fd = -1;
++      if (!error && reply && reply->nfd == 1) {
++         fd = xcb_dri3_buffer_from_pixmap_reply_fds(chain->conn, reply)[0];
++         /* This server's private protocol reports pixels, not DRI3 byte stride. */
++         uint64_t bytes = (uint64_t)reply->stride * reply->height * 4;
++         mesa_logi("gk3hd native reply pixmap=%u fd=%d nfd=%u bpp=%u width=%u height=%u stride=%u size=%u",
++            image->pixmap, fd, reply->nfd, reply->bpp, reply->width, reply->height,
++            reply->stride, reply->size);
++         if (fd >= 0 && reply->bpp == 32 &&
++             reply->width == create->imageExtent.width &&
++             reply->height == create->imageExtent.height &&
++             reply->stride >= reply->width && bytes <= reply->size) {
++            struct wsi_image_info info = chain->base.image_info;
++            info.create.extent.width = reply->stride;
++            info.create.tiling = VK_IMAGE_TILING_LINEAR;
++            info.winlator_import_fd = fd;
++            info.winlator_row_pitch = (uint32_t)reply->stride * 4;
++            result = wsi_create_image(&chain->base, &info, &image->base);
++            mesa_logi("gk3hd native image result=%d", result);
++            if (result == VK_SUCCESS)
++               mesa_logi("gk3hd native image pixmap=%u width=%u height=%u rowPitch=%u",
++                  image->pixmap, reply->width, reply->height, info.winlator_row_pitch);
++         }
++      } else if (reply) {
++         mesa_loge("gk3hd native invalid reply nfd=%u error=%u", reply->nfd,
++            error ? error->error_code : 0);
++         int *fds = xcb_dri3_buffer_from_pixmap_reply_fds(chain->conn, reply);
++         for (uint32_t i = 0; i < reply->nfd; i++)
++            close(fds[i]);
++      }
++      if (fd >= 0)
++         close(fd);
++      free(error);
++      error = NULL;
++      free(reply);
++   }
+    if (result == VK_SUCCESS)
+       return result;
+    cookie = xcb_free_pixmap(chain->conn, image->pixmap);

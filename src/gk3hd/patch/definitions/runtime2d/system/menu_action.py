@@ -108,7 +108,7 @@ class ActionMenuFeatureCompiler(SystemCompilerContext):
             label="toolbar selected-item surface",
             offset=self._off_toolbar_preview_surface,
             payload=bytes(4),
-            limit=self._off_toolbar_preview_prepare,
+            limit=self._off_toolbar_preview_surface + 4,
         )
         control_payload.place(
             label="toolbar selected-item layout",

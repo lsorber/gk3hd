@@ -39,11 +39,15 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     LOAD_SAVE_SEGMENT,
     SIDNEY_ALPHA_CONSTRUCTOR_OFFSET,
     SIDNEY_PRESENTATION_SEGMENT,
+    SYSTEM_CLEAR_PENDING_OFFSET,
     SYSTEM_CONTROL_HD_FONT_ACTIVE_OFFSET,
     SYSTEM_CONTROL_HD_FONT_SOURCE_TRANSFORM_COUNT_OFFSET,
     SYSTEM_CONTROL_SEGMENT,
+    SYSTEM_INPUT_ACTIVE_OFFSET,
+    SYSTEM_RENDER_DEPTH_OFFSET,
     SYSTEM_ROOT_POINTER_OFFSET,
     SYSTEM_SEGMENT,
+    SYSTEM_TRANSFORM_MODE_OFFSET,
     install_runtime_segment,
 )
 from gk3hd.patch.definitions.runtime2d.ui_alpha import (
@@ -109,24 +113,25 @@ class InventoryFeatureCompiler:
     # safer than NULL: NULL suppresses Inventory's entire child traversal.
     _off_full_damage_region: ClassVar[int] = 0x90
     _off_full_damage_rect: ClassVar[int] = 0xA0
-    _off_draw_wrapper: ClassVar[int] = 0x100
-    _off_destructor_wrapper: ClassVar[int] = 0x240
-    _off_hide_wrapper: ClassVar[int] = 0x2A0
-    _off_clear_page_helper: ClassVar[int] = 0x300
-    _off_layout_wrapper: ClassVar[int] = 0x400
-    _off_selection_layout_wrapper: ClassVar[int] = 0x600
-    _off_selection_grid_wrapper: ClassVar[int] = 0x680
+    _off_draw_wrapper: ClassVar[int] = 0x1000
+    _off_destructor_wrapper: ClassVar[int] = 0x1140
+    _off_hide_wrapper: ClassVar[int] = 0x11A0
+    _off_clear_page_helper: ClassVar[int] = 0x1200
+    _off_layout_wrapper: ClassVar[int] = 0x1300
+    _off_selection_layout_wrapper: ClassVar[int] = 0x1500
+    _off_selection_grid_wrapper: ClassVar[int] = 0x1580
     _off_item_draw_count: ClassVar[int] = 0xB0
     _off_item_draw_active: ClassVar[int] = 0xB4
     _off_item_alpha_handle: ClassVar[int] = 0xB8
     _off_item_dense_source: ClassVar[int] = 0xBC
-    _off_item_draw_wrapper: ClassVar[int] = 0x700
+    _off_item_draw_wrapper: ClassVar[int] = 0x1600
     _off_effect_constructor_wrapper: ClassVar[int] = INVENTORY_ALPHA_CONSTRUCTOR_OFFSET
     # One constructor dispatches two exact effect owners. Inventory uses its
     # direct RGB565 scaler; fonts use a small coordinate mapper which delegates
     # every actual blend to GK3's stock callback. Keep code, vtables, and their
-    # synchronous geometry record in one measured tail partition.
-    _off_scaled_alpha_callback: ClassVar[int] = 0xC40
+    # synchronous geometry record on a data-only page. In particular, the
+    # font callback writes its trace once per pixel, never to its own code page.
+    _off_scaled_alpha_callback: ClassVar[int] = 0x1B40
     _off_scaled_alpha_vtable: ClassVar[int] = 0xE20
     _off_scaled_font_alpha_vtable: ClassVar[int] = INVENTORY_FONT_ALPHA_VTABLE_OFFSET
     # The alpha constructor and scaled pixel virtual share this synchronous
@@ -145,17 +150,18 @@ class InventoryFeatureCompiler:
     # exact callback inputs makes future format/driver regressions diagnosable
     # without injecting another hook into GK3's inner pixel loop.
     _off_font_alpha_trace: ClassVar[int] = 0xE70
-    _off_scaled_font_alpha_callback: ClassVar[int] = 0xEA0
+    _off_alpha_state_limit: ClassVar[int] = 0xEA0
+    _off_scaled_font_alpha_callback: ClassVar[int] = 0x1DA0
 
     # Shared system-segment state. Inventory owns its class-specific lifetime and
     # layout hooks, while the central runtime remains the sole owner of the
     # final blitter and pointer dispatcher. Publishing this draw scope lets
     # both paths consume one reference-canvas affine.
-    _system_render_depth_offset: ClassVar[int] = 0x0C
-    _system_input_active_offset: ClassVar[int] = 0x10
-    _system_clear_pending_offset: ClassVar[int] = 0x14
-    _system_root_ptr_offset: ClassVar[int] = 0x1C
-    _system_transform_mode_offset: ClassVar[int] = 0xE0
+    _system_render_depth_offset: ClassVar[int] = SYSTEM_RENDER_DEPTH_OFFSET
+    _system_input_active_offset: ClassVar[int] = SYSTEM_INPUT_ACTIVE_OFFSET
+    _system_clear_pending_offset: ClassVar[int] = SYSTEM_CLEAR_PENDING_OFFSET
+    _system_root_ptr_offset: ClassVar[int] = SYSTEM_ROOT_POINTER_OFFSET
+    _system_transform_mode_offset: ClassVar[int] = SYSTEM_TRANSFORM_MODE_OFFSET
     _system_reference_canvas_mode: ClassVar[int] = 6
 
     # The InventoryLayer constructor at 0x004C0A96 installs this class-specific
@@ -936,7 +942,7 @@ class InventoryFeatureCompiler:
                 "scaled alpha callback",
                 self._off_scaled_alpha_callback,
                 scaled_alpha_callback,
-                self._off_scaled_alpha_vtable,
+                self._off_scaled_font_alpha_callback,
             ),
             (
                 "scaled font alpha callback",
@@ -975,7 +981,7 @@ class InventoryFeatureCompiler:
         payload.reserve(
             label="alpha transaction state",
             offset=self._off_effect_output_rect,
-            size=self._off_scaled_font_alpha_callback - self._off_effect_output_rect,
+            size=self._off_alpha_state_limit - self._off_effect_output_rect,
         )
         pe.write_bytes(section_offset, payload.build())
 

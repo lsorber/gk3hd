@@ -1,0 +1,42 @@
+GK3HD standalone VR sources
+
+Download Source code (zip) from the GitHub release that supplied this
+component archive. That source contains the GK3HD changes, build scripts,
+and upstream pins for the binaries here. Use the tag of the release that
+supplied the archive if a newer GK3HD release reuses it.
+
+The same release includes a gk3hd-vr-source-*.zip attachment with the
+pinned Winlator, Vortek and OpenXR-WXR source snapshots, Wine and Wine
+Staging source archives, and the GK3HD Android build recipes and patches.
+The source snapshots omit upstream runtime and example binaries. The
+matching build record identifies the source revisions and signed APK.
+
+Source and build recipes in the tagged GK3HD tree
+
+* src/gk3hd/renderer/ contains the Windows VR renderer recipe, the
+  DXVK-Sarek pins in upstream.json, patches, and native VR code.
+* src/gk3hd/vr/android/ contains the Android build recipe. upstream.json
+  pins Winlator, the OpenXR loader, OpenXR-WXR, and Vortek. Build scripts
+  and patches are in the same directory. The Windows launcher is built
+  from WineLauncher.c.
+* The pinned Winlator source contains virglrenderer, gladiorenderer,
+  vortekrenderer, and libadrenotools under app/src/main/cpp. See
+  ANDROID-THIRD-PARTY-NOTICES.txt for their source notices.
+* src/gk3hd/vr/android/turnip/ pins the Mesa source and dependencies and
+  contains the Turnip driver patches and build scripts.
+* src/gk3hd/vr/android/wine/ pins Wine and Wine Staging and contains the
+  Wine registry server patches and build script. The APK also carries the
+  Wine build record and license.
+
+Building standalone components requires Windows, Python 3.14+, the
+Windows renderer toolchain, Android SDK, Java 17, and WSL with GCC 13.3.0
+and an ARM64 cross-compiler. From the source tree, run
+uv run gk3hd vr standalone build followed by
+uv run gk3hd vr standalone install --local.
+An in-place Android update requires the same signing key as the installed app.
+
+The component build record identifies the upstream revisions and checksums of
+the GK3HD build inputs and output binaries. The license files in this archive
+and in the APK describe the terms for the respective components. During setup
+the installer fetches the unmodified stock runtime archives directly from the
+pinned Winlator repository using winlator-runtime.json.

@@ -52,5 +52,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         items[:] = selected
 
 
-# Avoid importing Win32-only dependencies at all on portable CI workers.
-collect_ignore = ["windows"] if sys.platform != "win32" else []
+# Local research runs only when selected explicitly.
+collect_ignore = ["experiments"]
+if sys.platform != "win32":
+    collect_ignore.append("windows")

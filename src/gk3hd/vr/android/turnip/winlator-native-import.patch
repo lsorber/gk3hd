@@ -1,0 +1,372 @@
+--- a/src/vulkan/wsi/wsi_common.h
++++ b/src/vulkan/wsi/wsi_common.h
+@@ -156,6 +156,7 @@
+ 
+ 
+    bool sw;
++   bool winlator_native_mem_imported;
+ 
+    /* Set to true if the implementation is ok with linear WSI images. */
+    bool wants_linear;
+@@ -233,6 +234,7 @@
+    WSI_CB(GetImageMemoryRequirements);
+    WSI_CB(GetImageSubresourceLayout);
+    WSI_CB(GetMemoryFdKHR);
++   WSI_CB(GetMemoryFdPropertiesKHR);
+    WSI_CB(GetPhysicalDeviceCalibrateableTimeDomainsKHR);
+    WSI_CB(GetPhysicalDeviceProperties);
+    WSI_CB(GetPhysicalDeviceFormatProperties);
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -107,6 +107,8 @@
+    bool explicit_sync;
+ 
+    bool prime_use_linear_modifier;
++   int winlator_import_fd;
++   uint32_t winlator_row_pitch;
+ 
+    /* Not really part of VkImageCreateInfo but needed to figure out the
+     * number of planes we need to bind.
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -87,6 +87,8 @@
+    wsi->pdevice = pdevice;
+    wsi->supports_scanout = true;
+    wsi->sw = device_options->sw_device || (WSI_DEBUG & WSI_DEBUG_SW);
++   const char *native_import = os_get_option("MESA_VK_WSI_NATIVE_MEM_IMPORTED");
++   wsi->winlator_native_mem_imported = native_import && !strcmp(native_import, "1");
+    wsi->wants_linear = (WSI_DEBUG & WSI_DEBUG_LINEAR) != 0;
+    wsi->x11.extra_xwayland_image = device_options->extra_xwayland_image;
+    wsi->wayland.disable_timestamps = (WSI_DEBUG & WSI_DEBUG_NOWLTS) != 0;
+@@ -220,6 +222,7 @@
+    WSI_GET_CB(GetImageSubresourceLayout);
+    if (!wsi->sw)
+       WSI_GET_CB(GetMemoryFdKHR);
++   WSI_GET_CB(GetMemoryFdPropertiesKHR);
+    WSI_GET_CB(GetPhysicalDeviceCalibrateableTimeDomainsKHR);
+    WSI_GET_CB(GetPhysicalDeviceProperties);
+    WSI_GET_CB(GetPhysicalDeviceFormatProperties);
+@@ -573,7 +576,8 @@
+       goto fail;
+ 
+ #ifdef HAVE_LIBDRM
+-   result = wsi_drm_init_swapchain_implicit_sync(chain);
++   result = wsi->winlator_native_mem_imported ? VK_SUCCESS :
++      wsi_drm_init_swapchain_implicit_sync(chain);
+    if (result != VK_SUCCESS)
+       goto fail;
+ #endif
+@@ -2887,8 +2891,10 @@
+       }
+ 
+       if (wsi->sw) {
+-         wsi->WaitForFences(vk_device_to_handle(dev),
++         results[i] = wsi->WaitForFences(vk_device_to_handle(dev),
+                             1, &swapchain->fences[image_index], true, ~0ull);
++         if (results[i] != VK_SUCCESS)
++            continue;
+       }
+ 
+       const VkPresentRegionKHR *region = NULL;
+--- a/src/vulkan/wsi/wsi_common_drm.c
++++ b/src/vulkan/wsi/wsi_common_drm.c
+@@ -38,6 +38,7 @@
+ #include "util/libsync.h"
+ 
+ #include <errno.h>
++#include <sys/stat.h>
+ #include <time.h>
+ #include <unistd.h>
+ #include <stdlib.h>
+@@ -591,6 +592,8 @@
+       return result;
+ 
+    info->explicit_sync = params->explicit_sync;
++   info->winlator_import_fd = -1;
++   info->winlator_row_pitch = 0;
+ 
+    if (params->num_modifier_lists == 0) {
+       /* If we don't have modifiers, fall back to the legacy "scanout" flag */
+@@ -756,6 +759,85 @@
+                               &image->dma_buf_fd);
+ }
+ 
++/* Private Winlator contract: distinct server-owned DMA-BUF per pixmap. */
++static VkResult
++wsi_create_winlator_image_mem(const struct wsi_swapchain *chain,
++                              const struct wsi_image_info *info,
++                              struct wsi_image *image,
++                              const VkMemoryRequirements *reqs)
++{
++   const struct wsi_device *wsi = chain->wsi;
++   if (info->winlator_import_fd < 0 || !wsi->GetMemoryFdPropertiesKHR)
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   /* dma-buf documents SEEK_END/SEEK_SET for size discovery. Its
++    * anonymous inode need not expose that size through fstat(). */
++   const off_t backing_size = lseek(info->winlator_import_fd, 0, SEEK_END);
++   const int size_errno = errno;
++   const off_t reset = lseek(info->winlator_import_fd, 0, SEEK_SET);
++   if (backing_size <= 0 || reset != 0 ||
++       (uint64_t)backing_size < reqs->size) {
++      mesa_loge("gk3hd native backing seek size=%lld errno=%d reset=%lld required=%llu",
++         (long long)backing_size, size_errno, (long long)reset,
++         (unsigned long long)reqs->size);
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++   VkMemoryFdPropertiesKHR properties = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
++   };
++   VkResult result = wsi->GetMemoryFdPropertiesKHR(chain->device,
++      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++      info->winlator_import_fd, &properties);
++   if (result != VK_SUCCESS)
++      return result;
++   uint32_t bits = reqs->memoryTypeBits & properties.memoryTypeBits;
++   if (!bits)
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   const VkImageSubresource subresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT};
++   VkSubresourceLayout layout;
++   wsi->GetImageSubresourceLayout(chain->device, image->image, &subresource, &layout);
++   if (layout.rowPitch != info->winlator_row_pitch || layout.offset != 0 ||
++       layout.size > (uint64_t)backing_size) {
++      mesa_loge("gk3hd native layout pitch=%llu expected=%u offset=%llu size=%llu backing=%llu",
++         (unsigned long long)layout.rowPitch, info->winlator_row_pitch,
++         (unsigned long long)layout.offset, (unsigned long long)layout.size,
++         (unsigned long long)backing_size);
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++   int imported = os_dupfd_cloexec(info->winlator_import_fd);
++   if (imported < 0)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   const VkImportMemoryFdInfoKHR fd_info = {
++      .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
++      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++      .fd = imported,
++   };
++   const VkMemoryDedicatedAllocateInfo dedicated = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
++      .pNext = &fd_info,
++      .image = image->image,
++   };
++   const VkMemoryAllocateInfo allocation = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .pNext = &dedicated,
++      .allocationSize = reqs->size,
++      .memoryTypeIndex = wsi_select_device_memory_type(wsi, bits),
++   };
++   result = wsi->AllocateMemory(chain->device, &allocation, &chain->alloc, &image->memory);
++   if (result != VK_SUCCESS) {
++      close(imported); /* Vulkan takes this FD only on success. */
++      return result;
++   }
++   image->dma_buf_fd = os_dupfd_cloexec(info->winlator_import_fd);
++   if (image->dma_buf_fd < 0)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   image->drm_modifier = DRM_FORMAT_MOD_INVALID;
++   image->num_planes = 1;
++   image->sizes[0] = reqs->size;
++   image->row_pitches[0] = layout.rowPitch;
++   image->offsets[0] = 0;
++   return VK_SUCCESS;
++}
++
+ static VkResult
+ wsi_create_native_image_mem(const struct wsi_swapchain *chain,
+                             const struct wsi_image_info *info,
+@@ -766,6 +848,9 @@
+ 
+    VkMemoryRequirements reqs;
+    wsi->GetImageMemoryRequirements(chain->device, image->image, &reqs);
++
++   if (wsi->winlator_native_mem_imported)
++      return wsi_create_winlator_image_mem(chain, info, image, &reqs);
+ 
+    const struct wsi_memory_allocate_info memory_wsi_info = {
+       .sType = VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA,
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -1779,7 +1779,8 @@
+        !wsi_device->x11.ignore_suboptimal)
+       options |= XCB_PRESENT_OPTION_SUBOPTIMAL;
+ 
+-   xshmfence_reset(image->shm_fence);
++   if (image->shm_fence)
++      xshmfence_reset(image->shm_fence);
+ 
+    if (!chain->base.image_info.explicit_sync) {
+       ++chain->sent_image_count;
+@@ -2524,9 +2525,14 @@
+ 
+       VkPresentModeKHR present_mode = chain->images[image_index].present_mode;
+ 
+-      /* Not necessary to block when we have explicit sync */
++      /* Imported native images have no qualified implicit producer sync.
++       * Wait for this image's real submission here, before X publication,
++       * without blocking the application's rendering thread. Existing
++       * Present/Idle retirement keeps this image and fence from early reuse.
++       */
+       bool need_fence_wait =
+-            x11_needs_wait_for_fences(chain->base.wsi, wsi_conn, present_mode) &&
++            (chain->base.wsi->winlator_native_mem_imported ||
++             x11_needs_wait_for_fences(chain->base.wsi, wsi_conn, present_mode)) &&
+             !chain->base.image_info.explicit_sync;
+ 
+       bool need_timing_fence_wait = x11_swapchain_present_timing_is_out_of_order_completion(
+@@ -2537,8 +2543,11 @@
+          result = chain->base.wsi->WaitForFences(chain->base.device, 1,
+                                                  &chain->base.fences[image_index],
+                                                  true, UINT64_MAX);
+          if (result != VK_SUCCESS) {
+-            result = VK_ERROR_OUT_OF_DATE_KHR;
++            /* Preserve device loss so the standalone launcher can recover. */
++            if (!chain->base.wsi->winlator_native_mem_imported ||
++                result != VK_ERROR_DEVICE_LOST)
++               result = VK_ERROR_OUT_OF_DATE_KHR;
+             break;
+          }
+       }
+@@ -2617,6 +2626,81 @@
+ #endif
+ }
+ 
++#ifdef HAVE_X11_DRM
++static VkResult
++x11_winlator_image_init(struct x11_swapchain *chain,
++                        const VkSwapchainCreateInfoKHR *create,
++                        struct x11_image *image)
++{
++   if (create->imageArrayLayers != 1 || !create->imageExtent.width ||
++       !create->imageExtent.height || create->imageExtent.width > UINT16_MAX ||
++       create->imageExtent.height > UINT16_MAX ||
++       (create->imageFormat != VK_FORMAT_B8G8R8A8_UNORM &&
++        create->imageFormat != VK_FORMAT_B8G8R8A8_SRGB))
++   {
++      mesa_loge("gk3hd native unsupported format=%u layers=%u size=%ux%u",
++         create->imageFormat, create->imageArrayLayers,
++         create->imageExtent.width, create->imageExtent.height);
++      return VK_ERROR_FORMAT_NOT_SUPPORTED;
++   }
++   VkResult result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   image->pixmap = xcb_generate_id(chain->conn);
++   xcb_void_cookie_t cookie = xcb_create_pixmap_checked(chain->conn,
++      chain->depth, image->pixmap, chain->window,
++      create->imageExtent.width, create->imageExtent.height);
++   xcb_generic_error_t *error = xcb_request_check(chain->conn, cookie);
++   if (error) {
++      free(error);
++      image->pixmap = 0;
++      return VK_ERROR_SURFACE_LOST_KHR;
++   }
++   xcb_dri3_buffer_from_pixmap_cookie_t query =
++      xcb_dri3_buffer_from_pixmap(chain->conn, image->pixmap);
++   xcb_dri3_buffer_from_pixmap_reply_t *reply =
++      xcb_dri3_buffer_from_pixmap_reply(chain->conn, query, &error);
++   int fd = -1;
++   if (!error && reply && reply->nfd == 1) {
++      fd = xcb_dri3_buffer_from_pixmap_reply_fds(chain->conn, reply)[0];
++      /* This server's private protocol reports pixels, not DRI3 byte stride. */
++      uint64_t bytes = (uint64_t)reply->stride * reply->height * 4;
++      mesa_logi("gk3hd native reply pixmap=%u fd=%d nfd=%u bpp=%u width=%u height=%u stride=%u size=%u",
++         image->pixmap, fd, reply->nfd, reply->bpp, reply->width, reply->height,
++         reply->stride, reply->size);
++      if (fd >= 0 && reply->bpp == 32 &&
++          reply->width == create->imageExtent.width &&
++          reply->height == create->imageExtent.height &&
++          reply->stride >= reply->width && bytes <= reply->size) {
++         struct wsi_image_info info = chain->base.image_info;
++         info.create.extent.width = reply->stride;
++         info.create.tiling = VK_IMAGE_TILING_LINEAR;
++         info.winlator_import_fd = fd;
++         info.winlator_row_pitch = (uint32_t)reply->stride * 4;
++         result = wsi_create_image(&chain->base, &info, &image->base);
++         mesa_logi("gk3hd native image result=%d", result);
++         if (result == VK_SUCCESS)
++            mesa_logi("gk3hd native image pixmap=%u width=%u height=%u rowPitch=%u",
++               image->pixmap, reply->width, reply->height, info.winlator_row_pitch);
++      }
++   } else if (reply) {
++      mesa_loge("gk3hd native invalid reply nfd=%u error=%u", reply->nfd,
++         error ? error->error_code : 0);
++      int *fds = xcb_dri3_buffer_from_pixmap_reply_fds(chain->conn, reply);
++      for (uint32_t i = 0; i < reply->nfd; i++)
++         close(fds[i]);
++   }
++   if (fd >= 0)
++      close(fd);
++   free(error);
++   free(reply);
++   if (result == VK_SUCCESS)
++      return result;
++   cookie = xcb_free_pixmap(chain->conn, image->pixmap);
++   xcb_discard_reply(chain->conn, cookie.sequence);
++   image->pixmap = 0;
++   return result;
++}
++#endif
++
+ static VkResult
+ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
+                const VkSwapchainCreateInfoKHR *pCreateInfo,
+@@ -2625,6 +2709,10 @@
+ {
+    VkResult result;
+ 
++#ifdef HAVE_X11_DRM
++   if (chain->base.wsi->winlator_native_mem_imported)
++      return x11_winlator_image_init(chain, pCreateInfo, image);
++#endif
+    result = wsi_create_image(&chain->base, &chain->base.image_info,
+                              &image->base);
+    if (result != VK_SUCCESS)
+@@ -2786,16 +2874,20 @@
+    xcb_void_cookie_t cookie;
+    if (!chain->base.wsi->sw || chain->has_mit_shm) {
+ #ifdef HAVE_X11_DRM
+-      cookie = xcb_sync_destroy_fence(chain->conn, image->sync_fence);
+-      xcb_discard_reply(chain->conn, cookie.sequence);
+-      xshmfence_unmap_shm(image->shm_fence);
++      if (image->shm_fence) {
++         cookie = xcb_sync_destroy_fence(chain->conn, image->sync_fence);
++         xcb_discard_reply(chain->conn, cookie.sequence);
++         xshmfence_unmap_shm(image->shm_fence);
++      }
+ #endif
+ 
+       cookie = xcb_free_pixmap(chain->conn, image->pixmap);
+       xcb_discard_reply(chain->conn, cookie.sequence);
+ #ifdef HAVE_X11_DRM
+-      cookie = xcb_xfixes_destroy_region(chain->conn, image->update_region);
+-      xcb_discard_reply(chain->conn, cookie.sequence);
++      if (image->update_region) {
++         cookie = xcb_xfixes_destroy_region(chain->conn, image->update_region);
++         xcb_discard_reply(chain->conn, cookie.sequence);
++      }
+ #endif
+ #ifdef HAVE_DRI3_EXPLICIT_SYNC
+       if (chain->base.image_info.explicit_sync) {
+@@ -2908,7 +3000,8 @@
+ static bool
+ use_modifiers(const struct wsi_device *wsi_device)
+ {
+-   return wsi_device->supports_modifiers && !wsi_device->x11.ignore_suboptimal;
++   return !wsi_device->winlator_native_mem_imported &&
++      wsi_device->supports_modifiers && !wsi_device->x11.ignore_suboptimal;
+ }
+ 
+ #ifdef HAVE_X11_DRM
+@@ -3188,6 +3281,7 @@
+ 
+    uint32_t present_caps = 0;
+ #ifdef HAVE_X11_DRM
++   if (!wsi_device->winlator_native_mem_imported) {
+    xcb_present_query_capabilities_cookie_t present_query_cookie;
+    xcb_present_query_capabilities_reply_t *present_query_reply;
+    present_query_cookie = xcb_present_query_capabilities(conn, window);
+@@ -3195,6 +3289,7 @@
+    if (present_query_reply) {
+       present_caps = present_query_reply->capabilities;
+       free(present_query_reply);
++   }
+    }
+ #endif
+ 

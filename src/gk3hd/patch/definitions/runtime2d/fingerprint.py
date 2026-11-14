@@ -31,7 +31,11 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     RESOURCE_SEGMENT,
     SYSTEM_CONTROL_FULL_DAMAGE_REGION_OFFSET,
     SYSTEM_CONTROL_SEGMENT,
+    SYSTEM_INPUT_ACTIVE_OFFSET,
     SYSTEM_SEGMENT,
+    SYSTEM_SOURCE_RECT_OFFSET,
+    SYSTEM_TARGET_RECT_OFFSET,
+    SYSTEM_TRANSFORM_MODE_OFFSET,
     install_runtime_segment,
 )
 from gk3hd.patch.model import PatchError
@@ -142,10 +146,10 @@ class FingerprintFeatureCompiler:
     _drawable_rect_offset: ClassVar[int] = 0x1C
 
     _hd_2d_bitmap_entry_probe_offset: ClassVar[int] = 0xA00
-    _system_input_active_offset: ClassVar[int] = 0x10
-    _system_source_rect_offset: ClassVar[int] = 0x20
-    _system_target_rect_offset: ClassVar[int] = 0x30
-    _system_transform_mode_offset: ClassVar[int] = 0xE0
+    _system_input_active_offset: ClassVar[int] = SYSTEM_INPUT_ACTIVE_OFFSET
+    _system_source_rect_offset: ClassVar[int] = SYSTEM_SOURCE_RECT_OFFSET
+    _system_target_rect_offset: ClassVar[int] = SYSTEM_TARGET_RECT_OFFSET
+    _system_transform_mode_offset: ClassVar[int] = SYSTEM_TRANSFORM_MODE_OFFSET
     _system_popup_mode: ClassVar[int] = 2
 
     @property

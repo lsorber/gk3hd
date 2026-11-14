@@ -1,0 +1,53 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <application>
+        <receiver android:name="org.gk3hd.standalone.ThermalSnapshotReceiver"
+            android:exported="true" android:permission="android.permission.DUMP" />
+        <service android:name="org.gk3hd.standalone.ManagedSetupContextService"
+            android:exported="true" android:permission="android.permission.DUMP"
+            android:foregroundServiceType="dataSync" />
+        <!-- Off-head fixtures retain the app's VR declarations. Removing them
+             changes the Crystal's measured execution environment even without
+             compositor submission; explicit negative controls must record it. -->
+        <activity android:name="org.gk3hd.standalone.StandaloneInstallationActivity"
+            android:theme="@style/AppThemeDark" android:exported="true"
+            android:permission="android.permission.DUMP" />
+        <activity android:name="org.gk3hd.standalone.DurableFilesActivity"
+            android:theme="@style/AppThemeDark" android:exported="true"
+            android:permission="android.permission.DUMP" />
+        <activity android:name="org.gk3hd.standalone.NativeSessionProbeActivity"
+            android:theme="@style/AppThemeFullscreenDark" android:exported="true"
+            android:permission="android.permission.DUMP" android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
+        </activity>
+        <activity android:name="org.gk3hd.standalone.RetainedImageNativeActivity"
+            android:theme="@style/AppThemeFullscreenDark" android:exported="true"
+            android:permission="android.permission.DUMP" android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
+        </activity>
+        <service android:name="com.winlator.OffHeadDisplayService" android:exported="true"
+            android:permission="android.permission.DUMP" />
+        <activity android:name="org.gk3hd.standalone.FrameIdentityActivity"
+            android:theme="@style/AppThemeFullscreenDark" android:exported="true"
+            android:permission="android.permission.DUMP" android:screenOrientation="landscape" />
+        <activity android:name="com.winlator.SurfaceLifecycleActivity"
+            android:theme="@style/AppThemeFullscreenDark" android:exported="true"
+            android:permission="android.permission.DUMP" android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation" />
+        <activity android:name="com.winlator.OffHeadGameActivity"
+            android:theme="@style/AppThemeFullscreenDark" android:exported="true"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation" />
+    </application>
+</manifest>

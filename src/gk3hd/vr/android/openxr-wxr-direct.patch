@@ -1,0 +1,735 @@
+diff --git a/src/runtime.cpp b/src/runtime.cpp
+--- a/src/runtime.cpp
++++ b/src/runtime.cpp
+@@ -407,2 +407,3 @@ static VkInstance g_app_vk_instance = VK_NULL_HANDLE;
+ static VkDevice g_format_list_device = VK_NULL_HANDLE;
++static VkDevice g_direct_preview_device = VK_NULL_HANDLE;
+ static XrCompositionLayerProjection g_last_proj;
+@@ -475,2 +476,6 @@ struct Session {
+     std::vector<VkCommandBuffer> vkBlitCmds;
++    std::vector<VkCommandBuffer> vkPrepareCmds;
++    XrSwapchain directOwner = XR_NULL_HANDLE;
++    uint32_t directImage = UINT32_MAX;
++    bool directDeclined = false;
+     std::vector<VkSemaphore> vkBlitDone;
+@@ -528,2 +533,3 @@ struct Swapchain {
+     VkFormat vkFormat{VK_FORMAT_R8G8B8A8_UNORM};      // Vulkan format
++    bool directAlias = false;
+     uint32_t nextIndex{0};
+@@ -1257,2 +1263,10 @@ static XrResult XRAPI_PTR xrCreateVulkanInstanceKHR_runtime(
+ // enable2: xrCreateVulkanDeviceKHR — call vkCreateDevice via app's proc addr
++static bool DirectPreviewRequested() {
++    return standalone_renderer_setup_requested();
++}
++
++static void ensurePreviewSized(rt::Session&, UINT, UINT, int, bool = false);
++static bool InitializePreviewImages(rt::Session&, bool);
++static uint32_t AcquireDirectPreview(rt::Session&);
++
+ static XrResult XRAPI_PTR xrCreateVulkanDeviceKHR_runtime(
+@@ -1265,12 +1279,48 @@ static XrResult XRAPI_PTR xrCreateVulkanDeviceKHR_runtime(
+     if (!pfnCreateDevice) return XR_ERROR_RUNTIME_FAILURE;
+-    *vulkanResult = pfnCreateDevice(createInfo->vulkanPhysicalDevice, createInfo->vulkanCreateInfo,
+-                                    createInfo->vulkanAllocator, vulkanDevice);
++    auto info = *createInfo->vulkanCreateInfo;
++    bool direct = false;
++    std::vector<const char*> extensions;
++    if (DirectPreviewRequested()) {
++        auto enumerate = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
++            createInfo->pfnGetInstanceProcAddr(rt::g_app_vk_instance, "vkEnumerateDeviceExtensionProperties"));
++        uint32_t count = 0;
++        if (enumerate && enumerate(createInfo->vulkanPhysicalDevice, nullptr, &count, nullptr) == VK_SUCCESS &&
++            count > 0 && count <= 2048) {
++            std::vector<VkExtensionProperties> available(count);
++            if (enumerate(createInfo->vulkanPhysicalDevice, nullptr, &count, available.data()) == VK_SUCCESS) {
++                const char* required[] = {
++                    VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME
++                };
++                direct = std::all_of(std::begin(required), std::end(required), [&](const char* name) {
++                    return std::any_of(available.begin(), available.end(),
++                        [&](const auto& extension) { return !strcmp(extension.extensionName, name); });
++                });
++                if (direct) {
++                    for (uint32_t i = 0; i < info.enabledExtensionCount; ++i)
++                        extensions.push_back(info.ppEnabledExtensionNames[i]);
++                    for (const char* name : required)
++                        if (std::none_of(extensions.begin(), extensions.end(),
++                                [&](const char* entry) { return !strcmp(entry, name); }))
++                            extensions.push_back(name);
++                    info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
++                    info.ppEnabledExtensionNames = extensions.data();
++                }
++            }
++        }
++    }
++    *vulkanResult = pfnCreateDevice(createInfo->vulkanPhysicalDevice, &info, createInfo->vulkanAllocator, vulkanDevice);
++    if (direct && *vulkanResult == VK_ERROR_EXTENSION_NOT_PRESENT) {
++        direct = false;
++        info = *createInfo->vulkanCreateInfo;
++        *vulkanResult = pfnCreateDevice(createInfo->vulkanPhysicalDevice, &info, createInfo->vulkanAllocator, vulkanDevice);
++    }
+     if (*vulkanResult == VK_SUCCESS) {
+-        // Use optional image-format lists only on the device that enabled
+-        // them. Other clients/backends keep the ordinary mutable image path.
++        rt::g_direct_preview_device = direct ? *vulkanDevice : VK_NULL_HANDLE;
+         rt::g_format_list_device = VK_NULL_HANDLE;
+-        const auto& info=*createInfo->vulkanCreateInfo;
+-        for(uint32_t i=0;i<info.enabledExtensionCount;i++)
+-            if(info.ppEnabledExtensionNames[i] && !strcmp(info.ppEnabledExtensionNames[i],VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME))
++        for (uint32_t i = 0; i < info.enabledExtensionCount; ++i)
++            if (info.ppEnabledExtensionNames[i] &&
++                !strcmp(info.ppEnabledExtensionNames[i], VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME))
+                 rt::g_format_list_device = *vulkanDevice;
++        if (DirectPreviewRequested() && !direct)
++            Log("[GK3HD] Direct transport extensions unavailable; using ordinary projection");
+     }
+@@ -1575,2 +1625,3 @@ static XrResult XRAPI_PTR xrDestroyInstance_runtime(XrInstance instance) {
+     rt::g_format_list_device = VK_NULL_HANDLE;
++    rt::g_direct_preview_device = VK_NULL_HANDLE;
+     rt::g_app_vk_gipa = nullptr;
+@@ -1912,3 +1963,6 @@ static XrResult XRAPI_PTR xrDestroySession_runtime(XrSession s) {
+         vk.vkPreviewImages.clear();vk.vkBlitCmds.clear();vk.vkBlitDone.clear();
+-        vk.vkBlitFences.clear();vk.vkBlitSubmitted.clear();
++        vk.vkBlitFences.clear();vk.vkBlitSubmitted.clear();vk.vkPrepareCmds.clear();
++        vk.directOwner = XR_NULL_HANDLE;
++        vk.directImage = UINT32_MAX;
++        vk.directDeclined = false;
+         vk.vkProducerAdmission.reset(0);
+@@ -1989,2 +2043,6 @@ static XrResult XRAPI_PTR xrEnumerateSwapchainFormats_runtime(XrSession, uint32_
+     if (rt::g_session.usesVulkan) {
++        const bool preferDirect = rt::g_direct_preview_device != VK_NULL_HANDLE &&
++            rt::g_direct_preview_device == rt::g_session.vkDevice;
++        // The managed renderer prefers BGRA when available. For this opted-in
++        // session use RGBA throughout, including the dedicated-image fallback.
+         const int64_t supportedFormats[] = {
+@@ -1993,3 +2051,2 @@ static XrResult XRAPI_PTR xrEnumerateSwapchainFormats_runtime(XrSession, uint32_
+             VK_FORMAT_B8G8R8A8_UNORM,
+-            VK_FORMAT_B8G8R8A8_SRGB,
+             VK_FORMAT_R16G16B16A16_SFLOAT,
+@@ -1999,4 +2056,5 @@ static XrResult XRAPI_PTR xrEnumerateSwapchainFormats_runtime(XrSession, uint32_
+             VK_FORMAT_D16_UNORM,
++            VK_FORMAT_B8G8R8A8_SRGB, // Excluded when direct was negotiated.
+         };
+-        const uint32_t formatCount = sizeof(supportedFormats) / sizeof(supportedFormats[0]);
++        const uint32_t formatCount = std::size(supportedFormats) - (preferDirect ? 1u : 0u);
+         if (count) *count = formatCount;
+@@ -2216,2 +2274,40 @@ static XrResult XRAPI_PTR xrCreateSwapchain_runtime(XrSession, const XrSwapchain
+ 
++        if(rt::g_direct_preview_device == rt::g_session.vkDevice && !rt::g_session.directDeclined && !isDepthVK && rt::g_session.directOwner==XR_NULL_HANDLE &&
++           DirectEyeWidth>0 && DirectEyeHeight>0 && chain.width==uint32_t(DirectEyeWidth)*2 &&
++           chain.height==uint32_t(DirectEyeHeight) && chain.arraySize==1 &&
++           chain.vkFormat==VK_FORMAT_R8G8B8A8_SRGB && ci->sampleCount==1 && ci->mipCount==1 &&
++           !(ci->usageFlags & XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT) &&
++           (ci->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
++           (ci->usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) &&
++           (ci->usageFlags & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) &&
++           (ci->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT)) {
++            auto& session=rt::g_session;
++            if (StandaloneRendererSetup setup{15000}; setup) {
++                Log("[GK3HD] Starting compressed stereo setup");
++                try {
++                    ensurePreviewSized(session, chain.width, gk3hd::standalone::transportImageHeight(chain.height),
++                                       int(chain.vkFormat), true);
++                    if (session.vkPreviewSwapchain && InitializePreviewImages(session, true)) {
++                        chain.imagesVK = session.vkPreviewImages;
++                        chain.imageCount = static_cast<uint32_t>(chain.imagesVK.size());
++                        chain.directAlias = true;
++                        const auto handle = chain.handle;
++                        rt::g_swapchains.emplace(handle, std::move(chain));
++                        session.directOwner = handle;
++                        *sc = handle;
++                        Logf("[GK3HD] Compressed direct preview images=%u logical=%ux%u storage=%ux%u",
++                             static_cast<unsigned>(session.vkPreviewImages.size()), session.previewWidth,
++                             ci->height, session.previewWidth, session.previewHeight);
++                        return XR_SUCCESS;
++                    }
++                } catch (const std::exception& error) {
++                    Logf("[GK3HD] Direct preview setup failed: %s", error.what());
++                }
++            } else {
++                Log("[GK3HD] Compressed stereo setup deadline unavailable");
++            }
++            session.directDeclined = true;
++            Log("[GK3HD] Direct transport unavailable before acquire; using ordinary projection");
++        }
++
+         auto findMemoryType = [&](uint32_t typeBits, VkMemoryPropertyFlags props) -> uint32_t {
+@@ -2592,4 +2688,8 @@ static XrResult XRAPI_PTR xrAcquireSwapchainImage_runtime(XrSwapchain sc, const
+     auto& ch = it->second;
+-    uint32_t i = ch.nextIndex;
+-    ch.nextIndex = (ch.nextIndex + 1) % ch.imageCount;
++    if (ch.directAlias && ch.lastAcquired != UINT32_MAX && ch.lastReleased != ch.lastAcquired)
++        return XR_ERROR_CALL_ORDER_INVALID;
++    const uint32_t i = ch.directAlias ? AcquireDirectPreview(rt::g_session) : ch.nextIndex;
++    if (i >= ch.imageCount) return XR_ERROR_RUNTIME_FAILURE;
++    if (!ch.directAlias) ch.nextIndex = (ch.nextIndex + 1) % ch.imageCount;
++    else ch.lastReleased = UINT32_MAX;
+     ch.lastAcquired = i;  // Track what we just gave to the app
+@@ -2610,2 +2710,4 @@ static XrResult XRAPI_PTR xrReleaseSwapchainImage_runtime(XrSwapchain sc, const
+     // The app just released the image it acquired earlier
++    if (ch.directAlias && (ch.lastAcquired == UINT32_MAX || ch.lastReleased != UINT32_MAX))
++        return XR_ERROR_CALL_ORDER_INVALID;
+     ch.lastReleased = ch.lastAcquired;
+@@ -2803,2 +2905,9 @@ static uint64_t StandalonePreviewTimeoutNs() {
+ 
++static void FailDirectPreview(rt::Session& session, const char* stage) {
++    if (session.vkPreviewNeedsRebuild) return;
++    session.vkPreviewNeedsRebuild = true;
++    Logf("[GK3HD] Retiring direct stereo output: %s (image=%u)", stage, session.directImage);
++    standalone_report_renderer_failure();
++}
++
+ static void ReportPreviewWaitFailure(VkResult result) {
+@@ -3030,5 +3139,9 @@ static XrResult XRAPI_PTR xrGk3hdGetCpuFrameBeginSupportV1_runtime(XrInstance, X
+ 
+-static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int format) {
++static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int format, bool direct) {
+     if (s.usesVulkan) {
+         if (s.vkPreviewSwapchain && !s.vkPreviewNeedsRebuild && s.previewWidth == width && s.previewHeight == height && s.previewFormat == format) return;
++        if (s.directOwner != XR_NULL_HANDLE) {
++            FailDirectPreview(s, "resize or rebuild with a direct swapchain");
++            throw std::runtime_error("Cannot resize or rebuild a borrowed eye pool");
++        }
+         if(s.vkPreviewSwapchain) {
+@@ -3221,2 +3334,3 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+         // drawable at the exact stereo+metadata extent, even off-screen.
++        if (direct) Log("[GK3HD] Sizing compressed stereo transport window");
+         SetWindowTextW(s.hwnd,L"GK3HD XR stereo");
+@@ -3245,2 +3359,6 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+             }
++            if (!s.vkPrepareCmds.empty())
++                vkFreeCommandBuffers(s.vkDevice, s.vkCmdPool, static_cast<uint32_t>(s.vkPrepareCmds.size()), s.vkPrepareCmds.data());
++            s.vkPrepareCmds.clear();
++            s.directImage = UINT32_MAX;
+             s.vkPreviewImages.clear();
+@@ -3254,9 +3372,13 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+             s.vkPreviewSwapchain = VK_NULL_HANDLE;
+-            if(s.vkPreviewSurface) {
+-                auto destroy=reinterpret_cast<PFN_vkDestroySurfaceKHR>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkDestroySurfaceKHR"));
+-                if(destroy) destroy(s.vkInstance,s.vkPreviewSurface,nullptr);
+-                s.vkPreviewSurface=VK_NULL_HANDLE;
+-            }
++        }
++        // A failed startup attempt can leave a surface without a swapchain.
++        if (s.vkPreviewSurface) {
++            auto destroy = reinterpret_cast<PFN_vkDestroySurfaceKHR>(
++                GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"), "vkDestroySurfaceKHR"));
++            if (!destroy) throw std::runtime_error("Cannot retire the stereo transport surface");
++            destroy(s.vkInstance, s.vkPreviewSurface, nullptr);
++            s.vkPreviewSurface = VK_NULL_HANDLE;
+         }
+ 
++        if (direct) Log("[GK3HD] Querying compressed stereo transport surface");
+         VkWin32SurfaceCreateInfoKHR surfaceInfo{};
+@@ -3282,2 +3404,17 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+ 
++        if (direct) {
++            auto surfaceFormats = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(
++                get_gipa()(s.vkInstance, "vkGetPhysicalDeviceSurfaceFormatsKHR"));
++            uint32_t count = 0;
++            if (!surfaceFormats || surfaceFormats(s.vkPhysicalDevice, s.vkPreviewSurface, &count, nullptr) != VK_SUCCESS ||
++                count == 0 || count > 256)
++                throw std::runtime_error("Cannot query direct transport surface formats");
++            std::vector<VkSurfaceFormatKHR> available(count);
++            if (surfaceFormats(s.vkPhysicalDevice, s.vkPreviewSurface, &count, available.data()) != VK_SUCCESS ||
++                std::none_of(available.begin(), available.begin() + count, [&](const auto& entry) {
++                    return entry.format == format && entry.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++                }))
++                throw std::runtime_error("Surface does not offer direct RGBA transport");
++        }
++
+         VkSwapchainCreateInfoKHR createInfo{};
+@@ -3294,2 +3431,13 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++        const VkFormat viewFormats[]={VK_FORMAT_R8G8B8A8_SRGB,VK_FORMAT_R8G8B8A8_UNORM};
++        VkImageFormatListCreateInfo viewList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
++        if (direct) {
++            createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
++            if((caps.supportedUsageFlags&createInfo.imageUsage)!=createInfo.imageUsage)
++                throw std::runtime_error("Missing compressed preview image usage");
++            createInfo.flags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
++            viewList.viewFormatCount=2;
++            viewList.pViewFormats=viewFormats;
++            createInfo.pNext=&viewList;
++        }
+         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+@@ -3324,2 +3472,3 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+ 
++        if (direct) Log("[GK3HD] Allocating compressed stereo transport swapchain");
+         result = vkCreateSwapchainKHR(s.vkDevice, &createInfo, nullptr, &s.vkPreviewSwapchain);
+@@ -4011,2 +4160,143 @@ static bool initVulkanSyncBuffer(rt::Session& s)
+ 
++static bool InitializePreviewImages(rt::Session& s, bool direct) {
++    if (s.vkAcquireFence == VK_NULL_HANDLE) {
++        VkFenceCreateInfo fenceInfo{};
++        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
++        if (VK_SUCCESS != vkCreateFence(s.vkDevice, &fenceInfo, nullptr, &s.vkAcquireFence)) {
++            Logf("[SimXR] Failed to call vkCreateFence");
++            s.vkAcquireFence = VK_NULL_HANDLE;
++            return false;
++        }
++    }
++
++    // Get preview swapchain images. Enumerated once per swapchain rather than per frame, and the
++    // per-image command buffer, semaphore and fence are created alongside them.
++    VkResult result;
++    if (s.vkPreviewImages.empty()) {
++        uint32_t imageCount = 0;
++        result = vkGetSwapchainImagesKHR(s.vkDevice, s.vkPreviewSwapchain, &imageCount, nullptr);
++        if (result != VK_SUCCESS || imageCount == 0) {
++            Logf("[SimXR] vkGetSwapchainImagesKHR failed: %d", (int)result);
++            return false;
++        }
++
++        std::vector<VkImage> previewImages(imageCount);
++        result = vkGetSwapchainImagesKHR(s.vkDevice, s.vkPreviewSwapchain, &imageCount, previewImages.data());
++        if (result != VK_SUCCESS) {
++            Logf("[SimXR] vkGetSwapchainImagesKHR failed: %d", (int)result);
++            return false;
++        }
++
++        VkCommandBufferAllocateInfo cmdAlloc{};
++        cmdAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
++        cmdAlloc.commandPool = s.vkCmdPool;
++        cmdAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++        cmdAlloc.commandBufferCount = imageCount;
++
++        std::vector<VkCommandBuffer> cmds(imageCount, VK_NULL_HANDLE);
++        result = vkAllocateCommandBuffers(s.vkDevice, &cmdAlloc, cmds.data());
++        if (result != VK_SUCCESS) {
++            Logf("[SimXR] vkAllocateCommandBuffers failed: %d", (int)result);
++            return false;
++        }
++
++        std::vector<VkSemaphore> semaphores(imageCount, VK_NULL_HANDLE);
++        std::vector<VkFence> fences(imageCount, VK_NULL_HANDLE);
++        for (uint32_t i = 0; i < imageCount; ++i) {
++            VkSemaphoreCreateInfo semInfo{};
++            semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
++            VkFenceCreateInfo fenceInfo{};
++            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
++            if (vkCreateSemaphore(s.vkDevice, &semInfo, nullptr, &semaphores[i]) != VK_SUCCESS ||
++                vkCreateFence(s.vkDevice, &fenceInfo, nullptr, &fences[i]) != VK_SUCCESS) {
++                Logf("[SimXR] Failed to create preview blit sync objects");
++                for (uint32_t j = 0; j <= i; ++j) {
++                    if (semaphores[j] != VK_NULL_HANDLE) vkDestroySemaphore(s.vkDevice, semaphores[j], nullptr);
++                    if (fences[j] != VK_NULL_HANDLE) vkDestroyFence(s.vkDevice, fences[j], nullptr);
++                }
++                vkFreeCommandBuffers(s.vkDevice, s.vkCmdPool, imageCount, cmds.data());
++                return false;
++            }
++        }
++
++        if (direct) {
++            std::vector<VkCommandBuffer> prepares(imageCount,VK_NULL_HANDLE);
++            if(vkAllocateCommandBuffers(s.vkDevice,&cmdAlloc,prepares.data())!=VK_SUCCESS) {
++                for(auto sem:semaphores) vkDestroySemaphore(s.vkDevice,sem,nullptr);
++                for(auto fence:fences) vkDestroyFence(s.vkDevice,fence,nullptr);
++                vkFreeCommandBuffers(s.vkDevice,s.vkCmdPool,imageCount,cmds.data());
++                return false;
++            }
++            s.vkPrepareCmds=std::move(prepares);
++        }
++        s.vkPreviewImages = std::move(previewImages);
++        s.vkBlitCmds = std::move(cmds);
++        s.vkBlitDone = std::move(semaphores);
++        s.vkBlitFences = std::move(fences);
++        s.vkBlitSubmitted.assign(imageCount, false);
++        s.vkProducerAdmission.reset(imageCount);
++    }
++    return true;
++}
++
++static uint32_t AcquireDirectPreview(rt::Session& s) {
++    if (s.directImage != UINT32_MAX) {
++        FailDirectPreview(s, "acquire with an outstanding borrowed image");
++        return UINT32_MAX;
++    }
++    if(s.vkPreviewNeedsRebuild || s.vkPrepareCmds.empty()) return UINT32_MAX;
++    const uint64_t timeout=StandalonePreviewTimeoutNs();
++    uint32_t index=UINT32_MAX;
++    const VkResult reset = vkResetFences(s.vkDevice, 1, &s.vkAcquireFence);
++    if (reset != VK_SUCCESS) {
++        Logf("[GK3HD] Direct acquire fence reset failed: %d", int(reset));
++        FailDirectPreview(s, "reset direct acquire fence");
++        return UINT32_MAX;
++    }
++    auto result=vkAcquireNextImageKHR(s.vkDevice,s.vkPreviewSwapchain,timeout,VK_NULL_HANDLE,s.vkAcquireFence,&index);
++    if(result!=VK_SUCCESS && result!=VK_SUBOPTIMAL_KHR) {
++        Logf("[GK3HD] Direct acquire failed result=%d",int(result));
++        if(result!=VK_TIMEOUT && result!=VK_NOT_READY) {
++            FailDirectPreview(s, "acquire direct image");
++        }
++        return UINT32_MAX;
++    }
++    auto fail=[&](VkResult error) {
++        Logf("[GK3HD] Direct prepare failed result=%d index=%u",int(error),index);
++        FailDirectPreview(s, "prepare direct image");
++        return UINT32_MAX;
++    };
++    result=vkWaitForFences(s.vkDevice,1,&s.vkAcquireFence,VK_TRUE,timeout);
++    if(result!=VK_SUCCESS || index>=s.vkPreviewImages.size()) return fail(result);
++    if(s.vkBlitSubmitted[index]) {
++        result=vkWaitForFences(s.vkDevice,1,&s.vkBlitFences[index],VK_TRUE,timeout);
++        if(result!=VK_SUCCESS) return fail(result);
++    }
++    s.vkProducerAdmission.retired(index);
++    VkCommandBuffer command=s.vkPrepareCmds[index];
++    result=vkResetCommandBuffer(command,0);
++    if(result!=VK_SUCCESS) return fail(result);
++    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++    begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++    result=vkBeginCommandBuffer(command,&begin);
++    if(result!=VK_SUCCESS) return fail(result);
++    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++    barrier.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;
++    barrier.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++    barrier.dstAccessMask=VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++    barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
++    barrier.image=s.vkPreviewImages[index];
++    barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
++    vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
++        0,0,nullptr,0,nullptr,1,&barrier);
++    result=vkEndCommandBuffer(command);
++    if(result!=VK_SUCCESS) return fail(result);
++    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
++    submit.commandBufferCount=1;
++    submit.pCommandBuffers=&command;
++    result=vkQueueSubmit(s.vkQueue,1,&submit,VK_NULL_HANDLE);
++    if(result!=VK_SUCCESS) return fail(result);
++    return s.directImage=index;
++}
++
+ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProjection* projection,
+@@ -4047,6 +4337,8 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     }
+-    if(!hasProjection&&quads.empty()&&!movie) return;
++    const bool held = s.directImage != UINT32_MAX;
++    if (!held && !hasProjection && quads.empty() && !movie) return;
+     if(hasProjection) CaptureProjectionInputs(s,*projection);
+-    VkFormat displayFmt = VK_FORMAT_B8G8R8A8_SRGB;
+-    ensurePreviewSized(s, eyeWidth * 2, gk3hd::standalone::transportImageHeight(eyeHeight), displayFmt);
++    const bool compressed = s.directOwner != XR_NULL_HANDLE;
++    VkFormat displayFmt = compressed ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_B8G8R8A8_SRGB;
++    ensurePreviewSized(s, eyeWidth * 2, gk3hd::standalone::transportImageHeight(eyeHeight), displayFmt, compressed);
+     if (!s.vkPreviewSwapchain) { Log("[SimXR] VK PREVIEW: No preview swapchain"); return; }
+@@ -4076,27 +4368,14 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+ 
+-    if (s.vkAcquireFence == VK_NULL_HANDLE) {
+-        VkFenceCreateInfo fenceInfo{};
+-        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+-        if (VK_SUCCESS != vkCreateFence(s.vkDevice, &fenceInfo, nullptr, &s.vkAcquireFence)) {
+-            Logf("[SimXR] Failed to call vkCreateFence");
+-            s.vkAcquireFence = VK_NULL_HANDLE;
+-            return;
+-        }
+-    }
+-
+-    // Get preview swapchain images. Enumerated once per swapchain rather than per frame, and the
+-    // per-image command buffer, semaphore and fence are created alongside them.
++    if(!InitializePreviewImages(s, compressed)) return;
+     VkResult result;
+-    if (s.vkPreviewImages.empty()) {
+-        uint32_t imageCount = 0;
+-        result = vkGetSwapchainImagesKHR(s.vkDevice, s.vkPreviewSwapchain, &imageCount, nullptr);
+-        if (result != VK_SUCCESS || imageCount == 0) {
+-            Logf("[SimXR] vkGetSwapchainImagesKHR failed: %d", (int)result);
+-            return;
+-        }
++    const std::vector<VkImage>& previewImages = s.vkPreviewImages;
+ 
+-        std::vector<VkImage> previewImages(imageCount);
+-        result = vkGetSwapchainImagesKHR(s.vkDevice, s.vkPreviewSwapchain, &imageCount, previewImages.data());
++    const auto timeout=StandalonePreviewTimeoutNs();
++    uint32_t imageIndex=held?s.directImage:0;
++    if(!held) {
++        // Acquire preview swapchain image
++        result = vkResetFences(s.vkDevice, 1, &s.vkAcquireFence);
+         if (result != VK_SUCCESS) {
+-            Logf("[SimXR] vkGetSwapchainImagesKHR failed: %d", (int)result);
++            Logf("[SimXR] vkResetFences failed: %d", (int)result);
++            if (compressed) FailDirectPreview(s, "reset preview acquire fence");
+             return;
+@@ -4104,12 +4383,12 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+ 
+-        VkCommandBufferAllocateInfo cmdAlloc{};
+-        cmdAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+-        cmdAlloc.commandPool = s.vkCmdPool;
+-        cmdAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+-        cmdAlloc.commandBufferCount = imageCount;
+-
+-        std::vector<VkCommandBuffer> cmds(imageCount, VK_NULL_HANDLE);
+-        result = vkAllocateCommandBuffers(s.vkDevice, &cmdAlloc, cmds.data());
+-        if (result != VK_SUCCESS) {
+-            Logf("[SimXR] vkAllocateCommandBuffers failed: %d", (int)result);
++        result = vkAcquireNextImageKHR(s.vkDevice, s.vkPreviewSwapchain, timeout, VK_NULL_HANDLE, s.vkAcquireFence, &imageIndex);
++        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR) {
++            Logf("[SimXR] vkAcquireNextImageKHR: swapchain is out of date (%d)", int(result));
++            if (compressed) FailDirectPreview(s, "acquire preview surface");
++            else s.vkPreviewNeedsRebuild=true;
++            return;
++        } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
++            // A timed-out acquire owns no image. Try again on the next frame.
++            if (result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
++            Logf("[SimXR] vkAcquireNextImageKHR failed: %d", (int)result);
+             return;
+@@ -4117,63 +4396,49 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+ 
+-        std::vector<VkSemaphore> semaphores(imageCount, VK_NULL_HANDLE);
+-        std::vector<VkFence> fences(imageCount, VK_NULL_HANDLE);
+-        for (uint32_t i = 0; i < imageCount; ++i) {
+-            VkSemaphoreCreateInfo semInfo{};
+-            semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+-            VkFenceCreateInfo fenceInfo{};
+-            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+-            if (vkCreateSemaphore(s.vkDevice, &semInfo, nullptr, &semaphores[i]) != VK_SUCCESS ||
+-                vkCreateFence(s.vkDevice, &fenceInfo, nullptr, &fences[i]) != VK_SUCCESS) {
+-                Logf("[SimXR] Failed to create preview blit sync objects");
+-                for (uint32_t j = 0; j <= i; ++j) {
+-                    if (semaphores[j] != VK_NULL_HANDLE) vkDestroySemaphore(s.vkDevice, semaphores[j], nullptr);
+-                    if (fences[j] != VK_NULL_HANDLE) vkDestroyFence(s.vkDevice, fences[j], nullptr);
+-                }
+-                vkFreeCommandBuffers(s.vkDevice, s.vkCmdPool, imageCount, cmds.data());
+-                return;
+-            }
++        result = vkWaitForFences(s.vkDevice, 1, &s.vkAcquireFence, VK_TRUE, timeout);
++        if (result != VK_SUCCESS) {
++            Logf("[SimXR] vkWaitForFences failed: %d", (int)result);
++            if (compressed) FailDirectPreview(s, "wait for preview acquire fence");
++            else ReportPreviewWaitFailure(result);
++            return;
++        } else if (imageIndex >= previewImages.size()) {
++            Logf("[SimXR] Invalid preview image index: %u", imageIndex);
++            if (compressed) FailDirectPreview(s, "invalid preview image index");
++            return;
+         }
+ 
+-        s.vkPreviewImages = std::move(previewImages);
+-        s.vkBlitCmds = std::move(cmds);
+-        s.vkBlitDone = std::move(semaphores);
+-        s.vkBlitFences = std::move(fences);
+-        s.vkBlitSubmitted.assign(imageCount, false);
+-        s.vkProducerAdmission.reset(imageCount);
+-    }
+-    const std::vector<VkImage>& previewImages = s.vkPreviewImages;
+-
+-    // Acquire preview swapchain image
+-    result = vkResetFences(s.vkDevice, 1, &s.vkAcquireFence);
+-    if (result != VK_SUCCESS) {
+-        Logf("[SimXR] vkResetFences failed: %d", (int)result);
+-        return;
+-    }
+-
+-    uint32_t imageIndex = 0;
+-    const auto timeout=StandalonePreviewTimeoutNs();
+-    result = vkAcquireNextImageKHR(s.vkDevice, s.vkPreviewSwapchain, timeout, VK_NULL_HANDLE, s.vkAcquireFence, &imageIndex);
+-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR) {
+-        s.vkPreviewNeedsRebuild=true;
+-        Logf("[SimXR] vkAcquireNextImageKHR: swapchain is out of date.");
+-        return;
+-    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+-        // A timed-out acquire owns no image. Try again on the next frame.
+-        if (result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
+-        Logf("[SimXR] vkAcquireNextImageKHR failed: %d", (int)result);
+-        return;
+-    }
+-
+-    result = vkWaitForFences(s.vkDevice, 1, &s.vkAcquireFence, VK_TRUE, timeout);
+-    if (result != VK_SUCCESS) {
+-        ReportPreviewWaitFailure(result);
+-        Logf("[SimXR] vkWaitForFences failed: %d", (int)result);
+-        return;
+-    } else if (imageIndex >= previewImages.size()) {
+-        Logf("[SimXR] Invalid preview image index: %u", imageIndex);
+-        return;
+     }
+ 
++    struct PresentGuard {
++        rt::Session& session;
++        bool pending;
++        ~PresentGuard() {
++            if (pending) FailDirectPreview(session, "present direct swapchain image");
++        }
++    } guard{s, compressed};
+     VkImage previewImage = previewImages[imageIndex];
+ 
++    bool directProjection=false;
++    if(hasProjection) {
++        const auto& a=projection->views[0].subImage;
++        const auto& b=projection->views[1].subImage;
++        const bool alias = compressed && (a.swapchain == s.directOwner || b.swapchain == s.directOwner);
++        if(alias) {
++            directProjection=held && a.swapchain==s.directOwner && b.swapchain==s.directOwner &&
++                leftImage == previewImage && rightImage == previewImage &&
++                rt::g_swapchains.at(s.directOwner).lastReleased == imageIndex &&
++                a.imageArrayIndex==0 && b.imageArrayIndex==0 &&
++                a.imageRect.offset.x==0 && a.imageRect.offset.y==0 &&
++                b.imageRect.offset.x==int32_t(eyeWidth) && b.imageRect.offset.y==0 &&
++                b.imageRect.extent.width==int32_t(eyeWidth) && b.imageRect.extent.height==int32_t(eyeHeight);
++            if(!directProjection) throw std::runtime_error("Direct projection identity or rectangle mismatch");
++        }
++    }
++
++    // A scene load can end a frame after the renderer has flushed and
++    // released its eyes, but before it submits a world layer. The clear/quad
++    // path overwrites any partial eye draws before returning the WSI image.
++    if (held && !directProjection &&
++        (hasProjection || rt::g_swapchains.at(s.directOwner).lastReleased != imageIndex))
++        throw std::runtime_error("Borrowed eye image was not released as the matching projection or discard");
++
+     // This image's command buffer is reused, so wait for its previous submission to retire before
+@@ -4184,4 +4449,4 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+         if (result != VK_SUCCESS) {
+-            ReportPreviewWaitFailure(result);
+             Logf("[GK3HD] Preview reuse completion failed result=%d timeoutNs=%llu", int(result), (unsigned long long)timeout);
++            if (!compressed) ReportPreviewWaitFailure(result);
+             return;
+@@ -4217,5 +4482,5 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     previewBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+-    previewBarrier.srcAccessMask = 0;
++    previewBarrier.srcAccessMask = held ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0;
+     previewBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+-    previewBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    previewBarrier.oldLayout = held ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+     previewBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+@@ -4230,7 +4495,8 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+ 
+-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                         0, 0, nullptr, 0, nullptr, 1, &previewBarrier);
++    if(!directProjection)
++        vkCmdPipelineBarrier(cmd,held?VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
++            VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&previewBarrier);
+ 
+     std::vector<gk3hd::standalone::QuadDraw> composed;
+-    if(hasProjection) {
++    if(hasProjection && !directProjection) {
+         // Sample and write sRGB through the same tested shader path as quads.
+@@ -4250,3 +4516,3 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+             }();
+-            if(directCopy&&source.vkFormat==displayFmt&&uint32_t(rect.extent.width)==eyeWidth&&uint32_t(rect.extent.height)==eyeHeight) {
++            if(!compressed&&directCopy&&source.vkFormat==displayFmt&&uint32_t(rect.extent.width)==eyeWidth&&uint32_t(rect.extent.height)==eyeHeight) {
+                 VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+@@ -4283,3 +4549,3 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+         }
+-    } else {
++    } else if(!hasProjection) {
+         auto clear=reinterpret_cast<PFN_vkCmdClearColorImage>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkCmdClearColorImage"));
+@@ -4290,2 +4556,10 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     }
++    if(compressed && !directProjection) {
++        previewBarrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
++        previewBarrier.dstAccessMask=VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++        previewBarrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++        previewBarrier.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++        vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
++            0,0,nullptr,0,nullptr,1,&previewBarrier);
++    }
+     static gk3hd::frame_metadata::Publisher metadataPublisher;
+@@ -4298,3 +4572,3 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+             auto resolve=reinterpret_cast<PFN_vkGetDeviceProcAddr>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkGetDeviceProcAddr"));
+-            s.quadComposer=std::make_unique<gk3hd::standalone::QuadComposer>(s.vkDevice,resolve);
++            s.quadComposer=std::make_unique<gk3hd::standalone::QuadComposer>(s.vkDevice,resolve,displayFmt,compressed);
+         }
+@@ -4302,3 +4576,3 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+         composed.insert(composed.end(),quads.begin(),quads.end());
+-        s.quadComposer->record(cmd,previewImage,{eyeWidth*2,gk3hd::standalone::transportImageHeight(eyeHeight)},composed,&id,bootstrap ? &*bootstrap : nullptr);
++        s.quadComposer->record(cmd,previewImage,{eyeWidth*2,gk3hd::standalone::transportImageHeight(eyeHeight)},composed,&id,bootstrap ? &*bootstrap : nullptr,directProjection);
+     }
+@@ -4308,5 +4582,5 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     presentBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+-    presentBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    presentBarrier.srcAccessMask = compressed ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
+     presentBarrier.dstAccessMask = 0;
+-    presentBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    presentBarrier.oldLayout = compressed ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+     presentBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+@@ -4321,4 +4595,4 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+ 
+-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+-                         0, 0, nullptr, 0, nullptr, 1, &presentBarrier);
++    vkCmdPipelineBarrier(cmd,compressed?VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT:VK_PIPELINE_STAGE_TRANSFER_BIT,
++                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,0,nullptr,1,&presentBarrier);
+ 
+@@ -4344,3 +4618,3 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+         if(bootstrap)metadataPublisher.cancel();
+-        if (result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
++        if (!compressed && result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
+         return;
+@@ -4366,8 +4640,12 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     result = vkQueuePresentKHR(s.vkQueue, &presentInfo);
++    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
++        guard.pending = false;
++        if (held) s.directImage = UINT32_MAX;
++    }
+     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR) {
+-        s.vkPreviewNeedsRebuild=true;
+-        Logf("[SimXR] vkQueuePresentKHR: swapchain is out of date.");
++        if (!compressed) s.vkPreviewNeedsRebuild=true;
++        Logf("[SimXR] vkQueuePresentKHR: swapchain is out of date (%d)", int(result));
+     } else if ((result != VK_SUCCESS) && (result != VK_SUBOPTIMAL_KHR)) {
+-        if (result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
+         Logf("[SimXR] vkQueuePresentKHR failed: %d", (int)result);
++        if (!compressed && result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
+     }
+@@ -5515,2 +5793,10 @@ static bool SubmitProjectionToBridge(const XrFrameEndInfo* info, int frameCount,
+ static XrResult composeVulkanFrame(const XrFrameEndInfo& info) {
++    // Validation failures can occur before the presenter takes over. Once an
++    // image is borrowed, only a successful present releases it for reuse.
++    struct BorrowedFrameGuard {
++        rt::Session& session;
++        ~BorrowedFrameGuard() {
++            if (session.directImage != UINT32_MAX) FailDirectPreview(session, "end frame left a borrowed image outstanding");
++        }
++    } guard{rt::g_session};
+     using namespace gk3hd::standalone;
+@@ -5531,3 +5817,4 @@ static XrResult composeVulkanFrame(const XrFrameEndInfo& info) {
+     }
+-    if(!projection&&!g_vulkanFrameViewsValid) return XR_SUCCESS;
++    const bool located = projection || g_vulkanFrameViewsValid;
++    if (!located && rt::g_session.directImage == UINT32_MAX) return XR_SUCCESS;
+     uint32_t width=projection ? projection->views[0].subImage.imageRect.extent.width : DirectEyeWidth;
+@@ -5536,6 +5823,6 @@ static XrResult composeVulkanFrame(const XrFrameEndInfo& info) {
+     XrSpace space=projection ? projection->space : g_vulkanFrameSpace;
+-    const uint32_t movie=projection ? 0 : gk3hd::standalone::externalMovieOwner();
++    const uint32_t movie=projection || !located ? 0 : gk3hd::standalone::externalMovieOwner();
+     std::vector<QuadDraw> draws;
+     try {
+-        for(uint32_t i=0;i<info.layerCount;i++) {
++        for(uint32_t i=0;located&&i<info.layerCount;i++) {
+             if(info.layers[i]->type!=XR_TYPE_COMPOSITION_LAYER_QUAD) continue;
+@@ -5545,3 +5832,3 @@ static XrResult composeVulkanFrame(const XrFrameEndInfo& info) {
+             auto& source=found->second;
+-            if(source.backend!=rt::Swapchain::Backend::Vulkan||source.lastReleased>=source.imagesVK.size()||
++            if(source.directAlias||source.backend!=rt::Swapchain::Backend::Vulkan||source.lastReleased>=source.imagesVK.size()||
+                quad.subImage.imageArrayIndex>=source.arraySize) return XR_ERROR_LAYER_INVALID;
+@@ -6752,4 +7039,9 @@ static XrResult XRAPI_PTR xrDestroySwapchain_runtime(XrSwapchain sc) {
+         }
++        if (it->second.directAlias) {
++            rt::g_session.directOwner = XR_NULL_HANDLE;
++            // Retire a pool with an unpresented image before any subsequent use.
++            rt::g_session.vkPreviewNeedsRebuild = true;
++        }
+         for (size_t i = 0; i < it->second.imagesVK.size(); ++i) {
+-            if (it->second.imagesVK[i] != VK_NULL_HANDLE)
++            if (!it->second.directAlias && it->second.imagesVK[i] != VK_NULL_HANDLE)
+                 vkDestroyImage(rt::g_session.vkDevice, it->second.imagesVK[i], nullptr);
+@@ -6869,4 +7161,17 @@ static XrResult XRAPI_PTR xrGk3hdGetSwapchainStorageExtentV1_runtime(XrSwapchain
+     if (target.backend != rt::Swapchain::Backend::Vulkan) return XR_ERROR_FEATURE_UNSUPPORTED;
+-    if (target.width > INT32_MAX || target.height > INT32_MAX) return XR_ERROR_RUNTIME_FAILURE;
+-    *extent = {static_cast<int32_t>(target.width), static_cast<int32_t>(target.height)};
++    uint32_t width = target.width;
++    uint32_t height = target.height;
++    if (target.directAlias) {
++        const auto& session = rt::g_session;
++        if (session.directOwner != chain || !session.vkPreviewSwapchain ||
++            session.previewWidth != target.width ||
++            session.previewHeight != gk3hd::standalone::transportImageHeight(target.height))
++            return XR_ERROR_RUNTIME_FAILURE;
++        width = session.previewWidth;
++        height = session.previewHeight;
++        Logf("[GK3HD] Direct swapchain storage query logical=%ux%u storage=%ux%u",
++             target.width, target.height, width, height);
++    }
++    if (width > INT32_MAX || height > INT32_MAX) return XR_ERROR_RUNTIME_FAILURE;
++    *extent = {static_cast<int32_t>(width), static_cast<int32_t>(height)};
+     return XR_SUCCESS;

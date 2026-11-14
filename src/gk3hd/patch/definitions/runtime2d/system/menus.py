@@ -22,10 +22,16 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_CONTROL_MODAL_DAMAGE_REGION_OFFSET,
     SYSTEM_CONTROL_MODAL_DAMAGE_STATE_END_OFFSET,
     SYSTEM_CONTROL_RETAINED_OVERLAY_STATE_END_OFFSET,
+    SYSTEM_CONTROL_SEGMENT,
     SYSTEM_CONTROL_TOOLBAR_INPUT_STATE_END_OFFSET,
     SYSTEM_CONTROL_TOOLBAR_INPUT_VALID_OFFSET,
     SYSTEM_CONTROL_TOOLBAR_SEED_BUDGET_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_CACHE_ABI_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_CACHE_MAGIC,
+    SYSTEM_CONTROL_TOOLTIP_CACHE_VERSION,
     SYSTEM_CONTROL_TOOLTIP_DRAW_DEPTH_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_LOCAL_WRAPPER_OFFSET,
+    SYSTEM_CONTROL_TOOLTIP_LOCAL_WRAPPER_SIZE,
     SYSTEM_CONTROL_TOOLTIP_OBJECT_PTR_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_OUTER_RECT_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_PANEL_DESCRIPTOR_OFFSET,
@@ -33,15 +39,23 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_CONTROL_TOOLTIP_RENDER_DAMAGE_REGION_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_STATE_END_OFFSET,
     SYSTEM_CONTROL_TOOLTIP_TEXT_POINTER_OFFSET,
+    RuntimeImage,
 )
 from gk3hd.patch.definitions.runtime2d.system.menu_action import ActionMenuFeatureCompiler
 from gk3hd.patch.definitions.runtime2d.system.menu_dropdown import DropdownFeatureCompiler
+from gk3hd.patch.definitions.runtime2d.system.menu_exports import (
+    NativeMenuHooksABI,
+    NativeMenuRootABI,
+)
 from gk3hd.patch.definitions.runtime2d.system.menu_tooltip import TooltipFeatureCompiler
 from gk3hd.patch.definitions.runtime2d.system.shared import SystemCompilerContext
+from gk3hd.patch.model import PatchError
 
 if TYPE_CHECKING:
+    from gk3hd.patch.binary.image import PEFile
     from gk3hd.patch.binary.mutations import ExecutableMutationPlan
     from gk3hd.patch.binary.payload import SegmentPayloadBuilder
+    from gk3hd.patch.builds import BuildProfile
     from gk3hd.patch.definitions.runtime2d.system.fixed_screens import FixedScreenFeatureCompiler
     from gk3hd.patch.definitions.runtime2d.system.menu_exports import (
         ActionMenuRuntimeExports,
@@ -71,6 +85,35 @@ class MenuFeatureCompiler(SystemCompilerContext):
         its plan. Cursor composition and 3D presentation retain independent
         runtime owners.
     """
+
+    @classmethod
+    def native_hooks_abi(cls, image: PEFile, profile: BuildProfile) -> NativeMenuHooksABI:
+        """Locate installed native entries for separately verified extensions.
+
+        This exports addresses, not proof of arbitrary wrapper bytes. Consumers
+        must verify the complete Runtime2D payload before redirecting them.
+        """
+        section = RuntimeImage(image).get_section(SYSTEM_CONTROL_SEGMENT.logical_name)
+        if section is None:
+            msg = "native menu runtime dependency is missing"
+            raise PatchError(msg)
+        base = image.rva_to_va(section.virtual_address)
+        return NativeMenuHooksABI(
+            NativeMenuRootABI(
+                profile.address("action_menu.vtable"),
+                base + cls._off_control_action_root_draw_wrapper,
+                base + cls._off_control_action_destructor_wrapper,
+            ),
+            NativeMenuRootABI(
+                profile.address("ingame_toolbar.vtable"),
+                base + cls._off_control_ingame_toolbar_draw_wrapper,
+                base + cls._off_ingame_toolbar_destructor_wrapper,
+            ),
+            base + cls._off_control_dropdown_pending_ptr,
+            base + cls._off_control_cursor_frame_presenter,
+            base + cls._off_control_dropdown_saved_root_bottom,
+            base + cls._off_control_dropdown_root_bottom_valid,
+        )
 
     def dropdown_feature(self) -> DropdownFeatureCompiler:
         """Bind the dropdown compiler to this immutable runtime context."""
@@ -193,6 +236,17 @@ class MenuFeatureCompiler(SystemCompilerContext):
             label="retained tooltip state",
             offset=SYSTEM_CONTROL_TOOLTIP_TEXT_POINTER_OFFSET,
             payload=bytes(retained_state),
+        )
+        control_payload.reserve(
+            label="isolated tooltip destination wrapper",
+            offset=SYSTEM_CONTROL_TOOLTIP_LOCAL_WRAPPER_OFFSET,
+            size=SYSTEM_CONTROL_TOOLTIP_LOCAL_WRAPPER_SIZE,
+        )
+        control_payload.place(
+            label="isolated tooltip cache ABI",
+            offset=SYSTEM_CONTROL_TOOLTIP_CACHE_ABI_OFFSET,
+            payload=SYSTEM_CONTROL_TOOLTIP_CACHE_MAGIC
+            + struct.pack("<3I", SYSTEM_CONTROL_TOOLTIP_CACHE_VERSION, 0, 0),
         )
         control_payload.reserve(
             label="ActionMenu tooltip trace",

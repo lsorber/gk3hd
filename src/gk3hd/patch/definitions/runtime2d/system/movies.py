@@ -29,7 +29,12 @@ from gk3hd.patch.definitions.runtime2d.system.movie_overrides import (
 from gk3hd.patch.definitions.runtime2d.system.movie_player import (
     PLAYER_EXPORT,
     PLAYER_PATH,
+    PLAYER_STATE_EXPORT,
     MoviePlayerABI,
+    MovieStateABI,
+    build_avi_state,
+    build_movie_state_call,
+    build_native_movie_attach,
     build_open_movie,
 )
 from gk3hd.patch.definitions.runtime2d.system.shared import SystemCompilerContext
@@ -49,7 +54,9 @@ class MovieFeatureCompiler(SystemCompilerContext):
     frame timing remain responsible for playback.
     """
 
-    def build_layout(self, *, wrapper_va: int, replacement_vtable_va: int = 0) -> bytes:
+    def build_layout(
+        self, *, wrapper_va: int, replacement_vtable_va: int = 0, player_module_va: int = 0
+    ) -> bytes:
         """Build an idempotent, call-local extent adapter for MovieLayer."""
         code = X86Emitter(base_va=wrapper_va)
         code.raw(bytes.fromhex("9c60 83ec10 89ce"))
@@ -111,6 +118,18 @@ class MovieFeatureCompiler(SystemCompilerContext):
         code.call_absolute(self.profile.address("movies.set_rect"))
         code.jump("native")
         code.label("avi")
+        if player_module_va and replacement_vtable_va:
+            code.raw(b"\x81\x3f" + struct.pack("<I", replacement_vtable_va))
+            code.jump_if(Condition.NOT_EQUAL, "avi_extent")
+            code.raw(
+                build_native_movie_attach(
+                    entry_va=wrapper_va + code.offset,
+                    module_va=player_module_va,
+                    get_proc_address=self.profile.address("win32.GetProcAddress"),
+                    complete_va=self.profile.address("movies.complete"),
+                )
+            )
+        code.label("avi_extent")
         # AVI draw uses the decoded backing size independently of this virtual
         # logical extent. Do not let MovieLayer's stretch-to-screen flag bypass
         # the fitted rectangle, including at the original display resolution.
@@ -147,7 +166,11 @@ class MovieFeatureCompiler(SystemCompilerContext):
         payload.place(
             label="movie extent",
             offset=0x100,
-            payload=self.build_layout(wrapper_va=base + 0x100, replacement_vtable_va=base + 0xA04),
+            payload=self.build_layout(
+                wrapper_va=base + 0x100,
+                replacement_vtable_va=base + 0xA04,
+                player_module_va=base + 0xC8,
+            ),
         )
         plan = ExecutableMutationPlan(owner=self.id)
         self._place_overrides(image=image, payload=payload, base=base, plan=plan)
@@ -256,6 +279,40 @@ class MovieFeatureCompiler(SystemCompilerContext):
         payload.place(label="private player path", offset=0x40, payload=PLAYER_PATH)
         payload.place(label="private player export", offset=0x80, payload=PLAYER_EXPORT)
         payload.place(label="private player cache", offset=0xC0, payload=bytes(4))
+        payload.place(label="private player module cache", offset=0xC8, payload=bytes(4))
+        payload.place(label="private movie state export", offset=0xA0, payload=PLAYER_STATE_EXPORT)
+        payload.place(label="private movie state cache", offset=0xC4, payload=bytes(4))
+        payload.place(
+            label="private movie state",
+            offset=0xC98,
+            payload=build_movie_state_call(
+                wrapper_va=base + 0xC98,
+                abi=MovieStateABI(imports["GetProcAddress"], base + 0xC8, base + 0xA0, base + 0xC4),
+            ),
+        )
+        for running, offset in ((True, 0xCD8), (False, 0xCE8)):
+            payload.place(
+                label=f"movie {'run' if running else 'stop'}",
+                offset=offset,
+                payload=build_avi_state(
+                    wrapper_va=base + offset, state_call_va=base + 0xC98, running=running
+                ),
+            )
+        for name, offset in (
+            ("start", 0xCD8),
+            ("stop", 0xCE8),
+            ("pause", 0xCE8),
+            ("resume", 0xCD8),
+        ):
+            state = self.profile.site(f"movies.avi_{name}")
+            plan.branch(
+                label=f"movie {name}",
+                opcode=BranchOpcode.JUMP,
+                site_va=state.va,
+                expected=state.original,
+                target_va=base + offset,
+                size=len(state.original),
+            )
         payload.place(
             label="private movie player",
             offset=0xF00,
@@ -268,6 +325,7 @@ class MovieFeatureCompiler(SystemCompilerContext):
                     base + 0x40,
                     base + 0x80,
                     base + 0xC0,
+                    base + 0xC8,
                 ),
             ),
         )
@@ -276,7 +334,7 @@ class MovieFeatureCompiler(SystemCompilerContext):
         call.raw(b"\x50")
         call.call_absolute(base + 0xF00)
         plan.replace(
-            label="private AV1 movie player",
+            label="private movie player",
             va=opened.va,
             expected=opened.original,
             payload=call.build(),

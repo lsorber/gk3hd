@@ -10,6 +10,8 @@ from gk3hd.patch.definitions.runtime2d.geometry import AUTHORED_FRAME_HEIGHT, AU
 from gk3hd.patch.definitions.runtime2d.layout import (
     BINOCULAR_SEGMENT,
     BINOCULAR_SOURCE_HELPER_OFFSET,
+    CAPTION_GLYPH_RECORDER_OFFSET,
+    CAPTION_SEGMENT,
     CONSOLE_SEGMENT,
     CONSOLE_TRANSFER_OFFSET,
     FINGERPRINT_LAYOUT_ACTIVE_OFFSET,
@@ -21,6 +23,7 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     GPS_TRANSFER_OFFSET,
     INVENTORY_NAVIGATION_SEGMENT,
     INVENTORY_NAVIGATION_SOURCE_OFFSET,
+    SIDNEY_DRAW_DEPTH_OFFSET,
     SIDNEY_NATIVE_BLT_TRAMPOLINE_OFFSET,
     SIDNEY_PRESENTATION_SEGMENT,
     UI_FRAMES_SEGMENT,
@@ -150,7 +153,7 @@ class BlitDispatchCompiler(SystemCompilerContext):
         code += b"\x8b\x74\x24\x2c\x85\xf6"
         code.jump_if(Condition.EQUAL, "after_hd_font_source")
         code += b"\xbf" + struct.pack("<I", hd_font_source_rect_va)
-        code += b"\xb9\x04\x00\x00\x00\xf3\xa5"
+        code += b"\x6a\x04\x59\xf3\xa5"
         for offset in range(0, 16, 4):
             code += b"\xc1\x25" + struct.pack("<I", hd_font_source_rect_va + offset) + b"\x02"
         code += b"\xc7\x44\x24\x2c" + struct.pack("<I", hd_font_source_rect_va)
@@ -182,6 +185,22 @@ class BlitDispatchCompiler(SystemCompilerContext):
         # coherent without moving the tooltip or naming an output resolution.
         code += b"\x83\x3d" + struct.pack("<I", tooltip_draw_depth_va) + b"\x00"
         code.jump_if(Condition.NOT_EQUAL, "tooltip_transform")
+
+        # A synchronous SIDNEY traversal owns its authored canvas even when
+        # a retained modal is the input owner. Quit can redraw the underlying
+        # laptop while its centered dialog remains published. Applying that
+        # dialog's affine here, then SIDNEY's fit downstream, double-transforms
+        # the frame and sends its top/bottom outside the display. Keep source
+        # density helpers above, but leave destination fitting to SIDNEY.
+        code.raw(
+            b"\x83\x3d"
+            + struct.pack(
+                "<I",
+                self.symbols.va(SIDNEY_PRESENTATION_SEGMENT.logical_name, SIDNEY_DRAW_DEPTH_OFFSET),
+            )
+            + b"\x00"
+        )
+        code.jump_if(Condition.NOT_EQUAL, "native")
 
         # ActionMenu's class-specific Draw wrapper publishes final physical
         # top-left anchors and contiguous hit rectangles. Its four/five icon
@@ -216,7 +235,7 @@ class BlitDispatchCompiler(SystemCompilerContext):
 
         code.label("scale_scoped_extent")
         code += b"\xbf" + struct.pack("<I", dest_rect_va)
-        code += b"\xb9\x04\x00\x00\x00\xf3\xa5"
+        code += b"\x6a\x04\x59\xf3\xa5"
         for first, second in ((0, 8), (4, 12)):
             code += b"\xa1" + struct.pack("<I", dest_rect_va + second)
             code += b"\x2b\x05" + struct.pack("<I", dest_rect_va + first)
@@ -364,7 +383,7 @@ class BlitDispatchCompiler(SystemCompilerContext):
         code += b"\x8b\x1d" + struct.pack("<I", self._physical_width_va + 4)
         code += b"\x89\x1d" + struct.pack("<I", source_rect_va + 12)
         code += b"\x8b\x74\x24\x28\xbf" + struct.pack("<I", dest_rect_va)
-        code += b"\xb9\x04\x00\x00\x00\xf3\xa5"
+        code += b"\x6a\x04\x59\xf3\xa5"
 
         # Compare W/H with 4/3 and construct the largest centered 4:3 target.
         # REP MOVSD consumes ECX, so reload both live dimensions from the
@@ -598,7 +617,7 @@ class BlitDispatchCompiler(SystemCompilerContext):
         code.jump_if(Condition.NOT_EQUAL, "native")
         code.label("reference_canvas_small")
         code += b"\xbf" + struct.pack("<I", dest_rect_va)
-        code += b"\xb9\x04\x00\x00\x00\xf3\xa5"
+        code += b"\x6a\x04\x59\xf3\xa5"
         for index, axis, denominator in (
             (0, 0, AUTHORED_FRAME_WIDTH),
             (1, 1, AUTHORED_FRAME_HEIGHT),
@@ -639,7 +658,7 @@ class BlitDispatchCompiler(SystemCompilerContext):
                 code += b"\xa3" + struct.pack("<I", target_rect_va + displacement)
 
         code += b"\x8b\x74\x24\x28\xbf" + struct.pack("<I", dest_rect_va)
-        code += b"\xb9\x04\x00\x00\x00\xf3\xa5"
+        code += b"\x6a\x04\x59\xf3\xa5"
         for displacement, first, second in (
             (0, 0, 8),
             (8, 0, 8),
@@ -688,7 +707,7 @@ class BlitDispatchCompiler(SystemCompilerContext):
         code += b"\x8b\x74\x24\x28\x85\xf6"
         code.jump_if(Condition.EQUAL, "native")
         code += b"\xbf" + struct.pack("<I", dest_rect_va)
-        code += b"\xb9\x04\x00\x00\x00\xf3\xa5"
+        code += b"\x6a\x04\x59\xf3\xa5"
         code += b"\x8b\x1d" + struct.pack("<I", self._physical_width_va + 4)
         code += b"\xbd\x00\x03\x00\x00"
         for axis, first, second in ((0, 0, 8), (4, 4, 12)):
@@ -712,7 +731,7 @@ class BlitDispatchCompiler(SystemCompilerContext):
         code += b"\x8b\x74\x24\x28\x85\xf6"
         code.jump_if(Condition.EQUAL, "native")
         code += b"\xbf" + struct.pack("<I", dest_rect_va)
-        code += b"\xb9\x04\x00\x00\x00\xf3\xa5"
+        code += b"\x6a\x04\x59\xf3\xa5"
         for axis, first, second in ((0, 0, 8), (4, 4, 12)):
             code += b"\xa1" + struct.pack("<I", dest_rect_va + second)
             code += b"\x2b\x05" + struct.pack("<I", dest_rect_va + first)
@@ -729,13 +748,20 @@ class BlitDispatchCompiler(SystemCompilerContext):
         # presentation fault without tracing the shared DirectDraw sink.
         code += b"\xbe" + struct.pack("<I", dest_rect_va)
         code += b"\xbf" + struct.pack("<I", hud_last_rect_va)
-        code += b"\xb9\x04\x00\x00\x00\xf3\xa5"
+        code += b"\x6a\x04\x59\xf3\xa5"
         code += b"\xff\x05" + struct.pack("<I", hud_transform_count_va)
         code.jump("transformed")
 
         code.label("transformed")
         code += b"\xc7\x44\x24\x28" + struct.pack("<I", dest_rect_va)
         code += b"\xff\x05" + struct.pack("<I", transform_count_va)
+        # Only scoped glyph submissions can contribute to the isolated caption
+        # surface. Cursor/save-under traffic jumps straight to native below,
+        # bypassing recording even inside a live font call. The recorder also
+        # requires a live Caption owner and preserves registers.
+        code.call_absolute(
+            self.symbols.va(CAPTION_SEGMENT.logical_name, CAPTION_GLYPH_RECORDER_OFFSET)
+        )
 
         code.label("native")
         code += b"\x61"

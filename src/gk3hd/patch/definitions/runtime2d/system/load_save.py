@@ -14,11 +14,14 @@ from gk3hd.patch.definitions.runtime2d.geometry import (
 )
 from gk3hd.patch.definitions.runtime2d.inventory_navigation import LOADSAVE_CONTROL_PREDICATE_OFFSET
 from gk3hd.patch.definitions.runtime2d.layout import (
+    CAPTION_FONT_POINT_OFFSET,
+    CAPTION_SEGMENT,
     INVENTORY_NAVIGATION_INPUT_OFFSET,
     INVENTORY_NAVIGATION_INPUT_STRIDE,
     INVENTORY_NAVIGATION_SEGMENT,
     LOAD_SAVE_BUTTON_INITIAL_BOUNDS_OFFSET,
     LOAD_SAVE_BUTTON_SEGMENT,
+    LOAD_SAVE_STATE_OFFSET,
     RESOURCE_PROGRESS_DRAW_DEPTH_OFFSET,
     RESOURCE_SEGMENT,
     SIDNEY_BUTTON_DISPATCH_ADAPTER_OFFSET,
@@ -124,7 +127,7 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
         payload.reserve(
             label="layout and font state",
             offset=self._off_loadsave_layout_root,
-            size=self._off_loadsave_layout_wrapper - self._off_loadsave_layout_root,
+            size=LOAD_SAVE_STATE_OFFSET + 0x100 - self._off_loadsave_layout_root,
         )
         payload.reserve(
             label="dynamic Load/Save geometry state",
@@ -136,7 +139,7 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
         struct.pack_into("<I", cache_descriptor, 4, self._ddsd_caps_height_width)
         struct.pack_into("<I", cache_descriptor, 0x68, self._tooltip_panel_caps)
         cache_state = bytearray(
-            self._off_loadsave_cache_update_helper - self._off_loadsave_destination_handle
+            self._off_loadsave_cache_state_end - self._off_loadsave_destination_handle
         )
         descriptor_offset = (
             self._off_loadsave_cache_descriptor - self._off_loadsave_destination_handle
@@ -148,6 +151,11 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
             label="cache state",
             offset=self._off_loadsave_destination_handle,
             payload=bytes(cache_state),
+        )
+        payload.reserve(
+            label="scrollbar input state",
+            offset=self._off_loadsave_scroll_input_mapped_point,
+            size=12,
         )
         layout_wrapper_va = loadsave_va + self._off_loadsave_layout_wrapper
         rect_transform_va = loadsave_va + self._off_loadsave_rect_transform
@@ -389,7 +397,7 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
                 "font RECT helper",
                 self._off_loadsave_font_rect_helper,
                 font_rect_helper,
-                self._off_loadsave_destination_handle,
+                self._off_loadsave_font_rect_helper_limit,
             ),
             (
                 "cache update helper",
@@ -480,7 +488,7 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
             label="Load/Save captured arrow release",
             offset=self._off_loadsave_scroll_arrow_release_dispatch,
             payload=scrollbar_arrow_release,
-            limit=self._off_loadsave_scroll_input_mapped_point,
+            limit=self._off_loadsave_scroll_arrow_release_limit,
         )
         payload.place(
             label="Load/Save ScrollBar outer hit-test adapter",
@@ -621,6 +629,9 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
             hd_font_handle_count_va=(control_va + self._off_control_hd_font_handle_count),
             hd_font_handles_va=control_va + self._off_control_hd_font_handles,
             room_status_present_depth_va=(control_va + self._off_room_status_present_depth),
+            caption_point_helper_va=self.symbols.va(
+                CAPTION_SEGMENT.logical_name, CAPTION_FONT_POINT_OFFSET
+            ),
         )
         font_entry = encode_rel32_branch(
             opcode=BranchOpcode.JUMP,
@@ -1213,6 +1224,7 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
         hd_font_handle_count_va: int,
         hd_font_handles_va: int,
         room_status_present_depth_va: int,
+        caption_point_helper_va: int = 0,
     ) -> bytes:
         """Scale Load/Save and room-status glyph destinations.
 
@@ -1267,6 +1279,18 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
         code.raw(b"\xa3" + struct.pack("<I", hd_font_active_va))
 
         code.label("font_owner")
+        if caption_point_helper_va:
+            # Work on this frame's private point, not the caller's coordinates.
+            # The caption owner accepts only its synchronous native draw.
+            code.raw(b"\x8b\x74\x24\x44\x85\xf6")
+            code.jump_if(Condition.EQUAL, "after_caption")
+            code.raw(b"\x8d\x7c\x24\x20\xfc\xb9\x02\x00\x00\x00\xf3\xa5")
+            code.raw(b"\x8d\x4c\x24\x20")
+            code.call_absolute(caption_point_helper_va)
+            code.raw(b"\x85\xc0")
+            code.jump_if(Condition.EQUAL, "after_caption")
+            code.jump("mapped_font_point")
+            code.label("after_caption")
         # RoomLayer's status TextBox publishes this exact synchronous depth.
         # Its logical point must be mapped before GK3 clips and damages the
         # glyph; the final blitter then reconstructs the scaled far edge.
@@ -1350,6 +1374,7 @@ class LoadSaveFeatureCompiler(SystemCompilerContext):
         code.call_absolute(font_rect_helper_va)
         code.raw(b"\x85\xc0")
         code.jump_if(Condition.EQUAL, "classification_done")
+        code.label("mapped_font_point")
         for displacement in (0, 4):
             code.raw(b"\x8b\x44\x24" + bytes([0x20 + displacement]))
             code.raw(b"\xa3" + struct.pack("<I", hud_font_last_point_va + displacement))

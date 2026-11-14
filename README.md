@@ -29,6 +29,7 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 - 🚀 Faster high-resolution rendering with fewer readbacks and less overhead
 - 🧩 Support for the Steam and GOG editions
 - 🐧 Experimental Linux and Steam Deck support through Proton
+- 🥽 Experimental VR on Windows, Meta Quest 3, and Pimax Crystal
 
 ## Install and use
 
@@ -53,6 +54,34 @@ and patch selection. Steam libraries are found automatically.
 Windows requires Vulkan-capable graphics drivers.
 Nonstandard game locations can use `--game-dir PATH` (protected Windows folders
 may require an elevated terminal).
+
+### Play in VR
+
+**Windows PC VR.** Start a compatible 32-bit OpenXR runtime, such as SteamVR,
+with your headset connected. Install GK3HD as a tool so it can add a Start menu shortcut.
+
+```sh
+uv tool install gk3hd
+gk3hd vr install
+```
+
+Open **GK3HD VR** from Start. To update, run `uv tool upgrade gk3hd` and
+`gk3hd vr install` again.
+
+**Standalone Quest 3 or Pimax Crystal.** On your PC, install
+[Android Platform Tools](https://developer.android.com/tools/releases/platform-tools)
+and add `adb` to PATH. Enable USB debugging on the headset, connect it with a
+USB data cable, and accept the debugging prompt. Stay in Quest Home with
+[Developer Mode enabled](https://developers.meta.com/vr/documentation/android-apps/enable-developer-mode/)
+or use AIO mode on Crystal.
+
+```sh
+uvx gk3hd@latest vr standalone install  # Install or update over USB
+uvx gk3hd@latest vr standalone doctor   # Check the USB connection and install
+```
+
+Open **GK3HD VR** from the headset’s app library. On Quest, select **Unknown Sources**.
+You can also start it over USB with `uvx gk3hd@latest vr standalone launch`.
 
 ## Advanced use
 
@@ -149,8 +178,7 @@ folder exists. Use `--video intro.bik` to process one video, or repeat
 `--video` for a selection. Verified outputs are reused when resuming.
 
 > [!NOTE]
-> Cinematics use SeedVR2 3B, without original-image blending, and AV1 CRF 24
-> (10-bit 4:4:4) with lossless FLAC audio in MKV files. Scene cuts separate
+> Cinematics use SeedVR2 3B without original-image blending. Scene cuts separate
 > temporal inference. Sources at 16 fps or less use independent-frame restoration
 > to avoid motion trails. Approximately 15 fps cinematics, including the Sierra
 > logo, additionally use RIFE to reach 60 fps. Other frame rates and audio timing
@@ -201,7 +229,8 @@ uv run gk3hd package draft             # New package reusing published assets
 uv run gk3hd package draft --textures  # Also pack/upload the local upscaled PNGs
 uv run gk3hd package draft --renderer  # Also upload the last verified local renderer build
 uv run gk3hd package draft --videos    # Also pack/upload local videos and the verified player
-# Combine --textures, --renderer and --videos as needed
+uv run gk3hd package draft --vr        # Also upload the verified VR components and sources
+# Combine asset flags as needed
 ```
 
 Generate/review changed textures with `textures analyze` and `textures upscale`,

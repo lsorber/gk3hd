@@ -34,6 +34,7 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     INVENTORY_FONT_ALPHA_VTABLE_OFFSET,
     INVENTORY_SEGMENT,
     RUNTIME_SEGMENTS,
+    RuntimeLayout,
     RuntimeSegmentAddress,
     RuntimeSymbols,
 )
@@ -369,7 +370,7 @@ def check_paint(*, styled: bool = False) -> None:
 
 def styled_fixture() -> tuple[Uc, StyledTextCacheRuntime]:
     cpu, _ = fixture()
-    cpu.mem_map(0x800000, 0x40000)
+    cpu.mem_map(0x800000, RuntimeLayout.section_size)
     symbols = RuntimeSymbols(
         tuple(
             RuntimeSegmentAddress(
@@ -511,13 +512,14 @@ def check_styled_alpha() -> None:
 
 @pytest.mark.slow
 def test_executed_sprite_cache() -> None:
-    subprocess.run(  # noqa: S603 - fixed interpreter and this test module.
+    result = subprocess.run(  # noqa: S603 - fixed interpreter and this test module.
         [sys.executable, str(Path(__file__).resolve())],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=20,
     )
+    assert result.returncode == 0, result.stderr
 
 
 if __name__ == "__main__":
