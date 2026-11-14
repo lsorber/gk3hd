@@ -1,4 +1,4 @@
-"""Versioned video packs containing AV1 replacements and their private player."""
+"""Versioned video packs containing verified replacements and their private player."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from gk3hd.system.files import (
     json_bytes,
     sha256_file,
 )
-from gk3hd.videos.catalog import movie_format, movie_workspace
+from gk3hd.videos.catalog import DELIVERY_CODEC, DELIVERY_ENCODING, movie_format, movie_workspace
 from gk3hd.videos.manifest import read_json, validate_generation
 from gk3hd.videos.runtime import (
     PLAYER_DLL,
@@ -48,6 +48,7 @@ MAX_ARCHIVE_BYTES = 1900 * 1024 * 1024
 _BLOCK = 1024 * 1024
 _MANIFEST_LIMIT = 1024 * 1024
 _ROOT = "gk3hd/videos/"
+_PUBLISHED_LOCK = Path(__file__).parents[1] / "assets" / LOCK_FILENAME
 _MEMBER_COMPONENTS = 4
 _RELEASE = "https://github.com/lsorber/gk3hd/releases/download"
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){1,2}")
@@ -78,8 +79,10 @@ class Archive:
         return cls(value["filename"], value["sha256"], value["size"])
 
 
-def release_archives(lock: object) -> tuple[str, tuple[Archive, ...]]:
-    """Validate the tag and all parts without network access."""
+def release_archives(
+    lock: object, *, require_player_pin: bool = True, require_standalone: bool = False
+) -> tuple[str, tuple[Archive, ...]]:
+    """Validate the tag, parts and playback compatibility without downloading."""
     if isinstance(lock, dict) and lock.get("archives") == []:
         msg = "no video pack is configured; prepare the first release with package draft --videos"
         raise ValueError(msg)
@@ -97,7 +100,25 @@ def release_archives(lock: object) -> tuple[str, tuple[Archive, ...]]:
     if not archives or len({item.filename.casefold() for item in archives}) != len(archives):
         msg = "no video pack is configured; prepare the first release with package draft --videos"
         raise ValueError(msg)
+    if require_player_pin or "player_recipe_sha256" in lock:
+        if not is_sha256(lock.get("player_recipe_sha256")):
+            msg = "video pack is missing its player recipe pin; rebuild it with gk3hd videos pack"
+            raise ValueError(msg)
+        if lock["player_recipe_sha256"] != recipe_digest():
+            msg = (
+                f"video pack {lock['tag']} uses a different playback build. "
+                "This GK3HD version needs a compatible video pack"
+            )
+            raise ValueError(msg)
+    if require_standalone and lock.get("standalone_compatible") is not True:
+        msg = f"video pack {lock['tag']} needs HEVC Main10 movies for standalone VR"
+        raise ValueError(msg)
     return lock["tag"], archives
+
+
+def check_standalone_pack() -> None:
+    """Fail before downloads or other component changes if the pinned pack cannot run."""
+    release_archives(read_json(_PUBLISHED_LOCK), require_standalone=True)
 
 
 def pack_filename(version: str) -> str:
@@ -108,20 +129,24 @@ def pack_filename(version: str) -> str:
     return f"gk3hd-video-pack-v{version}.zip"
 
 
-def _inputs(source: Path, player: Path) -> tuple[tuple[str, Path], ...]:
+def _inputs(source: Path, player: Path) -> tuple[list[tuple[str, Path]], bool]:
     inputs: list[tuple[str, Path]] = []
+    standalone_compatible = True
     for receipt in sorted(source.glob("*.mkv.json")):
         record = validate_generation(read_json(receipt))
         video = receipt.with_suffix("")
         if (
             record.get("pipeline") != "seedvr2"
-            or record.get("codec") != "libaom-av1"
+            or record.get("codec") not in {"libaom-av1", DELIVERY_CODEC}
             or movie_format(video) != "Matroska"
             or sha256_file(video) != record.get("output_sha256")
             or video.stem.casefold() != Path(str(record.get("source_name"))).stem.casefold()
         ):
             msg = f"unverified video output: {video.name}"
             raise ValueError(msg)
+        standalone_compatible &= (
+            record.get("codec") == DELIVERY_CODEC and record.get("encoding") == DELIVERY_ENCODING
+        )
         inputs.extend((_ROOT + "upscaled/" + path.name, path) for path in (video, receipt))
     if not inputs:
         msg = f"no verified videos in {source}; run gk3hd videos upscale first"
@@ -131,7 +156,7 @@ def _inputs(source: Path, player: Path) -> tuple[tuple[str, Path], ...]:
     if len({name.casefold() for name, _ in inputs}) != len(inputs):
         msg = "duplicate video-pack filename"
         raise ValueError(msg)
-    return tuple(inputs)
+    return inputs, standalone_compatible
 
 
 def _groups(inputs: Sequence[tuple[str, Path]]) -> list[list[tuple[str, Path]]]:
@@ -151,19 +176,24 @@ def _groups(inputs: Sequence[tuple[str, Path]]) -> list[list[tuple[str, Path]]]:
     return groups
 
 
-def build_pack(
+def build_pack(  # noqa: PLR0913 - Standalone release validation is independent of output paths.
     game_dir: Path,
     *,
     version: str,
     source: Path | None = None,
     output: Path | None = None,
     progress: MovieProgress | None = None,
+    require_standalone: bool = False,
 ) -> tuple[Path, ...]:
     """Write independently readable ZIP parts below GitHub's 2 GiB asset limit."""
     root = movie_workspace(game_dir)
     output = output or root / pack_filename(version)
     pack_filename(version)
-    inputs = _inputs(source or root / "upscaled", local_player(game_dir))
+    player_recipe = recipe_digest()
+    inputs, standalone_compatible = _inputs(source or root / "upscaled", local_player(game_dir))
+    if require_standalone and not standalone_compatible:
+        msg = "standalone VR releases require all HD movies in the HEVC Main10 delivery format"
+        raise ValueError(msg)
     groups = _groups(inputs)
     output.parent.mkdir(parents=True, exist_ok=True)
     total = sum(path.stat().st_size for _name, path in inputs)
@@ -223,6 +253,8 @@ def build_pack(
             {
                 "schema_version": 1,
                 "tag": f"v{version}",
+                "player_recipe_sha256": player_recipe,
+                "standalone_compatible": standalone_compatible,
                 "archives": [
                     asdict(Archive(path.name, sha256_file(path), path.stat().st_size))
                     for path in archives
@@ -263,8 +295,9 @@ def obtain_pack(
     """Resolve a complete local set or download every pinned release part."""
     request = request or PackRequest()
     lock = _local_lock(game_dir, request.selection) if request.local or request.selection else None
-    payload = read_json(lock or Path(__file__).parents[1] / "assets" / LOCK_FILENAME)
-    tag, archives = release_archives(payload)
+    tag, archives = release_archives(
+        read_json(lock or _PUBLISHED_LOCK), require_player_pin=lock is None
+    )
     results = []
     total = sum(item.size for item in archives)
     completed = 0
@@ -306,7 +339,7 @@ def _identity(game_dir: Path, request: PackRequest) -> str:
     """Identify the required pack and player without downloading video archives."""
     lock = _local_lock(game_dir, request.selection) if request.local or request.selection else None
     tag, archives = release_archives(
-        read_json(lock or Path(__file__).parents[1] / "assets" / LOCK_FILENAME)
+        read_json(lock or _PUBLISHED_LOCK), require_player_pin=lock is None
     )
     return hashlib.sha256(
         json_bytes(

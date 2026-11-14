@@ -15,7 +15,7 @@ from gk3hd.videos.interpolation import INTERPOLATION_RECIPE, cinematic_rate, out
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-GENERATION_RECIPE = "seedvr2-temporal-4x-lab-av1-v10"
+GENERATION_RECIPE = "seedvr2-temporal-4x-lab-hevc-v11"
 GENERATION_SCHEMA = 1
 STATE_FILENAME = ".gk3hd-videos.json"
 JOURNAL_FILENAME = ".gk3hd-videos-install.json"
@@ -230,7 +230,6 @@ def _validate_cadence(
             interpolation == {"recipe": INTERPOLATION_RECIPE, "rate": [60, 1]}
             and target_rate == cinematic_rate(source_rate)
             and target_rate != source_rate
-            and record.get("codec") == "libaom-av1"
             and isinstance(original_frames, int)
             and frames == output_frames(original_frames, source_rate, target_rate)
         )

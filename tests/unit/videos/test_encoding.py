@@ -20,7 +20,7 @@ from tests.unit.videos.test_video import _make_movie
 
 @pytest.mark.parametrize("audio", [False, True])
 @pytest.mark.parametrize("rate", [Fraction(30000, 1001), Fraction(1000000, 66667)])
-def test_av1_round_trip_preserves_cadence_audio_and_color(
+def test_hardware_compatible_movie_preserves_cadence_audio_and_color(
     tmp_path: Path, audio: bool, rate: Fraction, interpolator: LinearInterpolator
 ) -> None:
     source, destination = tmp_path / "original.avi", tmp_path / "upscaled.mkv"
@@ -32,10 +32,17 @@ def test_av1_round_trip_preserves_cadence_audio_and_color(
     assert all(0 < time < 1 for time in interpolator.calls)
     with av.open(str(destination)) as container:
         video = container.streams.video[0]
-        assert video.codec_context.name in {"av1", "libdav1d"}
+        assert video.codec_context.name == "hevc"
         assert video.codec_context.format is not None
-        assert video.codec_context.format.name == "yuv444p10le"
+        assert video.codec_context.format.name == "yuv420p10le"
+        assert video.codec_context.profile == "Main 10"
+        # Parse the HEVC sequence before checking its SDR colour declaration.
+        # Demuxers can expose dimensions/profile before the decoder reads VUI.
         frames = list(container.decode(video=0))
+        assert video.codec_context.color_range == 1  # Limited-range SDR, never HDR.
+        assert video.codec_context.colorspace == 1
+        assert video.codec_context.color_primaries == 1
+        assert video.codec_context.color_trc == 1
     with av.open(str(source)) as container:
         originals = list(container.decode(video=0))
     anchors = frames[::4] if report.rate != rate else frames
@@ -44,7 +51,8 @@ def test_av1_round_trip_preserves_cadence_audio_and_color(
         delta = np.abs(
             np.asarray(expected, dtype=float) - np.asarray(after.to_image(), dtype=float)
         )
-        assert delta.mean() < 2
+        assert delta.mean() <= 2
+        assert delta.max() <= 4
         assert abs(after.time - index / rate) <= 0.001
     if audio:
         with av.open(str(source)) as container:

@@ -1,4 +1,4 @@
-// Registration-free AV1/FLAC playback through the game's existing DirectDraw player.
+// Registration-free Matroska/FLAC playback through the game's DirectDraw player.
 // LAV's public COM settings interfaces are supplied by the pinned upstream archive.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -78,7 +78,7 @@ static HRESULT createVideo(IBaseFilter** result) {
     // LAV snapshots the converter's worker count in its constructor. Its PPL
     // RGB worker pool crashes intermittently under Proton/WoW64. Restrict only
     // that construction-time count, then restore FFmpeg's automatic count.
-    // AV1 decoding still uses the explicit four threads configured below.
+    // Video decoding still uses the explicit four threads configured below.
     HMODULE utility = LoadLibraryExW((directory() + L"avutil-lav-61.dll").c_str(), nullptr,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!utility) return HRESULT_FROM_WIN32(GetLastError());
@@ -98,10 +98,14 @@ static HRESULT connectVideo(IGraphBuilder* graph, IPin* output, IAMMultiMediaStr
     // another lossy colorspace conversion or an image-resizing operation.
     ComPtr<IBaseFilter> bridge;
     HRESULT hr = CoCreateInstance(CLSID_Colour, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&bridge));
-    if (SUCCEEDED(hr)) hr = graph->AddFilter(bridge.Get(), L"GK3HD sample bridge");
+    // Older Wine builds have no converter. Their RGB32 stream can connect
+    // directly; explicit stream flushing below also makes early Stop safe.
+    const bool direct = hr == REGDB_E_CLASSNOTREG;
+    if (direct) hr = S_OK;
+    else if (SUCCEEDED(hr)) hr = graph->AddFilter(bridge.Get(), L"GK3HD sample bridge");
     ComPtr<IPin> bridgeInput, bridgeOutput;
-    if (SUCCEEDED(hr)) hr = freePin(bridge.Get(), PINDIR_INPUT, &bridgeInput);
-    if (SUCCEEDED(hr)) hr = freePin(bridge.Get(), PINDIR_OUTPUT, &bridgeOutput);
+    if (!direct && SUCCEEDED(hr)) hr = freePin(bridge.Get(), PINDIR_INPUT, &bridgeInput);
+    if (!direct && SUCCEEDED(hr)) hr = freePin(bridge.Get(), PINDIR_OUTPUT, &bridgeOutput);
     if (FAILED(hr)) return hr;
     ComPtr<IMediaStreamFilter> sink;
     hr = stream->GetFilter(&sink);
@@ -117,8 +121,9 @@ static HRESULT connectVideo(IGraphBuilder* graph, IPin* output, IAMMultiMediaStr
             type->formattype == FORMAT_VideoInfo && type->cbFormat >= sizeof(VIDEOINFOHEADER)) {
             auto format = reinterpret_cast<VIDEOINFOHEADER*>(type->pbFormat);
             format->bmiHeader.biHeight = -abs(format->bmiHeader.biHeight);
-            hr = graph->ConnectDirect(output, bridgeInput.Get(), type);
-            if (SUCCEEDED(hr)) hr = graph->ConnectDirect(bridgeOutput.Get(), input.Get(), type);
+            hr = graph->ConnectDirect(output, direct ? input.Get() : bridgeInput.Get(), type);
+            if (!direct && SUCCEEDED(hr))
+                hr = graph->ConnectDirect(bridgeOutput.Get(), input.Get(), type);
         }
         if (type->cbFormat) CoTaskMemFree(type->pbFormat);
         if (type->pUnk) type->pUnk->Release();
@@ -126,6 +131,47 @@ static HRESULT connectVideo(IGraphBuilder* graph, IPin* output, IAMMultiMediaStr
         if (SUCCEEDED(hr)) break;
     }
     return hr;
+}
+
+extern "C" __declspec(dllexport) HRESULT WINAPI Gk3hdSetMovieState(
+    IAMMultiMediaStream* stream, STREAM_STATE state) {
+    if (!stream) return E_POINTER;
+    if (state != STREAMSTATE_STOP && state != STREAMSTATE_RUN) return E_INVALIDARG;
+    ComPtr<IMediaStreamFilter> sink;
+    ComPtr<IEnumPins> pins;
+    HRESULT hr = stream->GetFilter(&sink);
+    if (SUCCEEDED(hr)) hr = sink->EnumPins(&pins);
+    if (FAILED(hr)) return hr;
+
+    // A decoder may be waiting for the next game-owned output sample. Stop
+    // must wake that receiver and buffer wait before joining upstream workers.
+    // Run restores the allocator and receiver for native pause/resume/replay.
+    ComPtr<IPin> pin;
+    while ((hr = pins->Next(1, pin.ReleaseAndGetAddressOf(), nullptr)) == S_OK) {
+        PIN_DIRECTION direction;
+        hr = pin->QueryDirection(&direction);
+        if (FAILED(hr)) return hr;
+        if (direction != PINDIR_INPUT) continue;
+        ComPtr<IPin> peer;
+        hr = pin->ConnectedTo(&peer);
+        if (hr == VFW_E_NOT_CONNECTED) continue;
+        if (FAILED(hr)) return hr;
+        ComPtr<IMemInputPin> input;
+        ComPtr<IMemAllocator> allocator;
+        hr = pin.As(&input);
+        if (SUCCEEDED(hr)) hr = input->GetAllocator(&allocator);
+        if (FAILED(hr)) return hr;
+        if (state == STREAMSTATE_STOP) {
+            hr = pin->BeginFlush();
+            if (SUCCEEDED(hr)) hr = allocator->Decommit();
+        } else {
+            hr = allocator->Commit();
+            if (SUCCEEDED(hr)) hr = pin->EndFlush();
+        }
+        if (FAILED(hr)) return hr;
+    }
+    if (FAILED(hr)) return hr;
+    return stream->SetState(state);
 }
 
 extern "C" __declspec(dllexport) HRESULT WINAPI Gk3hdOpenMovie(
@@ -190,7 +236,7 @@ extern "C" __declspec(dllexport) HRESULT WINAPI Gk3hdOpenMovie(
     for (int pixel = 0; SUCCEEDED(hr) && pixel < LAVOutPixFmt_NB; ++pixel)
         hr = settings->SetPixelFormat(static_cast<LAVOutPixFmts>(pixel), pixel == LAVOutPixFmt_RGB32);
     if (SUCCEEDED(hr)) hr = settings->SetRGBOutputRange(2); // Full range, no gamma adjustment.
-    if (SUCCEEDED(hr)) hr = graph->AddFilter(video.Get(), L"GK3HD AV1");
+    if (SUCCEEDED(hr)) hr = graph->AddFilter(video.Get(), L"GK3HD Video");
     if (FAILED(hr)) return hr;
 
     hr = createFilter(L"LAVAudio.ax", L"{E8E73B6B-4CB3-44A4-BE99-4F7BCB96E491}", &audio);
@@ -241,5 +287,5 @@ extern "C" __declspec(dllexport) HRESULT WINAPI Gk3hdOpenMovie(
         hr = CoCreateInstance(CLSID_SystemClock, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&clock));
     if (SUCCEEDED(hr)) hr = timing->SetSyncSource(clock.Get());
     if (FAILED(hr)) return hr;
-    return flags & AMMSF_RUN ? stream->SetState(STREAMSTATE_RUN) : S_OK;
+    return flags & AMMSF_RUN ? Gk3hdSetMovieState(stream, STREAMSTATE_RUN) : S_OK;
 }

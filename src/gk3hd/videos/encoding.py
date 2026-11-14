@@ -1,22 +1,23 @@
-"""Bounded-memory AV1 generation, independent of platform codec registrations.
+"""Bounded-memory HEVC Main10 generation for desktop and headset playback.
 
-PyAV's wheels do not all include a 4:4:4 AV1 encoder. Feed restored RGB
-frames directly to FFmpeg instead of staging an enormous intermediate movie.
-The optional upscale extra supplies a portable FFmpeg executable as a fallback.
-This encoder does not imply that GK3's legacy native movie player supports AV1.
+Feed restored RGB frames directly to FFmpeg, without staging a raw movie.
+The optional upscale extra supplies a portable FFmpeg executable.
+Ten-bit 4:2:0 permits native Android hardware decoding; the registration-free
+desktop player handles the same SDR BT.709/FLAC Matroska files.
 """
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import tempfile
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import av
+from imageio_ffmpeg import get_ffmpeg_exe
 
 from gk3hd.videos.backend import create_interpolator
+from gk3hd.videos.catalog import DELIVERY_CODEC
 from gk3hd.videos.interpolation import cinematic_rate, interpolate_frames, output_frames
 from gk3hd.videos.temporal import restore_frames
 from gk3hd.videos.video import MovieInfo, probe, restoration_pipeline
@@ -30,25 +31,21 @@ if TYPE_CHECKING:
     from gk3hd.videos.options import MovieUpscaleOptions
     from gk3hd.videos.temporal import ClipUpscaler
 
-CRF = 24
+CRF = 16
 _ERROR_LIMIT = 8192
 
 
 def encoder_executable() -> str:
     """Find a capable local encoder without importing AI or changing the system."""
-    executable = shutil.which("ffmpeg")
-    if executable is None:
-        from imageio_ffmpeg import get_ffmpeg_exe  # noqa: PLC0415 - optional bundled encoder.
-
-        executable = get_ffmpeg_exe()
+    executable = get_ffmpeg_exe()
     result = subprocess.run(  # noqa: S603 - resolved executable, no shell.
-        [executable, "-hide_banner", "-h", "encoder=libaom-av1"],
+        [executable, "-hide_banner", "-h", f"encoder={DELIVERY_CODEC}"],
         capture_output=True,
         check=False,
         timeout=15,
     )
-    if result.returncode or b"yuv444p10le" not in result.stdout:
-        msg = "FFmpeg must include libaom-av1 with yuv444p10le support"
+    if result.returncode or b"yuv420p10le" not in result.stdout:
+        msg = "FFmpeg must include libx265 with yuv420p10le support"
         raise ValueError(msg)
     return executable
 
@@ -79,17 +76,18 @@ def _arguments(executable: str, source: Path, destination: Path, info: MovieInfo
         "-map_metadata",
         "-1",
         "-c:v",
-        "libaom-av1",
-        "-b:v",
-        "0",
-        "-cpu-used",
-        "4",
-        "-row-mt",
-        "1",
-        "-threads",
-        "8",
-        "-lag-in-frames",
-        "0",
+        DELIVERY_CODEC,
+        "-preset",
+        "medium",
+        "-profile:v",
+        "main10",
+        # Set bitstream VUI as well as container colour metadata. Some FFmpeg/
+        # libx265 builds otherwise omit the SDR primaries and transfer function.
+        "-x265-params",
+        (
+            "pools=4:frame-threads=2:log-level=error:"
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=limited"
+        ),
         "-enc_time_base",
         str(1 / info.rate),
         # Matroska/FFmpeg may advertise a nearby conventional frame rate (e.g.
@@ -102,7 +100,7 @@ def _arguments(executable: str, source: Path, destination: Path, info: MovieInfo
         "-crf",
         str(CRF),
         "-vf",
-        "scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv444p10le",
+        "scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv420p10le",
         "-colorspace",
         "bt709",
         "-color_range",
@@ -111,8 +109,6 @@ def _arguments(executable: str, source: Path, destination: Path, info: MovieInfo
         "bt709",
         "-color_trc",
         "bt709",
-        "-aom-params",
-        "enable-dnl-denoising=0",
     ]
     return [
         *arguments,
@@ -141,7 +137,7 @@ def _frames(
             yield from restored
 
 
-def convert_av1(
+def convert_movie(
     source: Path,
     destination: Path,
     backend: ClipUpscaler | None,
@@ -184,7 +180,11 @@ def convert_av1(
                 if progress is not None:
                     progress(count, output_info.frames)
             process.stdin.close()
-            returncode = process.wait(timeout=120)
+            try:
+                returncode = process.wait(timeout=120)
+            except subprocess.TimeoutExpired as error:
+                msg = f"FFmpeg timed out finalizing {source.name}"
+                raise RuntimeError(msg) from error
         except BaseException:
             process.kill()
             process.wait()
@@ -193,7 +193,7 @@ def convert_av1(
             errors.seek(0, 2)
             errors.seek(max(0, errors.tell() - _ERROR_LIMIT))
             detail = errors.read().decode("utf-8", errors="replace").strip()
-            msg = f"AV1 encoding failed (exit {returncode}): {detail}"
+            msg = f"HEVC encoding failed (exit {returncode}): {detail}"
             raise ValueError(msg)
     if not count or count != output_info.frames:
         msg = f"incomplete movie conversion: expected {output_info.frames} frames, got {count}"

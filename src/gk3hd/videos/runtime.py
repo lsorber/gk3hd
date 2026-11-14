@@ -1,4 +1,4 @@
-"""Build and verify the private, registration-free AV1 playback resources."""
+"""Build and verify the private, registration-free movie playback resources."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def local_player(game_dir: Path) -> Path:
     """Resolve only the current recipe's verified build, not an arbitrary DLL."""
     directory = movie_workspace(game_dir) / "player" / recipe_digest()[:16] / "runtime"
     if not directory.is_dir():
-        msg = "AV1 playback needs its player build; run gk3hd videos build first"
+        msg = "Movie playback needs its player build; run gk3hd videos build first"
         raise ValueError(msg)
     inspect_player(directory)
     return directory

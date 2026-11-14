@@ -196,7 +196,7 @@ def _generated_movies(source: Path, target: GameTarget) -> tuple[_MovieSource, .
             msg = "technical animations must use original game files, not generated replacements"
             raise ValueError(msg)
         path = record.with_suffix("")
-        if payload.get("codec") != "libaom-av1":
+        if payload.get("codec") not in {"libaom-av1", "libx265"}:
             msg = (
                 f"movie encoding is incompatible or unspecified: {path.name}; "
                 "regenerate with gk3hd videos upscale"

@@ -1,6 +1,6 @@
 """Portable movie IO and verification, independent of system codec registrations.
 
-AV1/Matroska replacements use the private player, without changing original media.
+HEVC/Matroska replacements use the private player, without changing original media.
 """
 
 from __future__ import annotations
@@ -131,6 +131,6 @@ def convert(
     if restoration_pipeline(source) == "retain":
         msg = "technical animations are retained at their original size, without conversion"
         raise ValueError(msg)
-    from gk3hd.videos.av1 import convert_av1  # noqa: PLC0415 - optional encoder process.
+    from gk3hd.videos.encoding import convert_movie  # noqa: PLC0415 - optional encoder process.
 
-    return convert_av1(source, destination, backend, options=options, progress=progress)
+    return convert_movie(source, destination, backend, options=options, progress=progress)

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gk3hd.system.files import sha256_file
 from gk3hd.system.locking import ExclusiveFileLock, executable_lock_path
+from gk3hd.videos.catalog import DELIVERY_CODEC, DELIVERY_ENCODING
 from gk3hd.videos.interpolation import INTERPOLATION_RECIPE, cinematic_rate
 from gk3hd.videos.manifest import GENERATION_RECIPE, GENERATION_SCHEMA, read_json
 from gk3hd.videos.options import MovieUpscaleOptions
@@ -80,9 +82,9 @@ def _upscale_unlocked(
             "schema_version": GENERATION_SCHEMA,
             "recipe": GENERATION_RECIPE,
             "pipeline": pipeline,
-            "codec": "libaom-av1",
+            "codec": DELIVERY_CODEC,
             "model": "3b",
-            "encoding": "av1-444-10bit-crf24-rgb-lossless-flac-v2",
+            "encoding": DELIVERY_ENCODING,
             **asdict(options),
             "clip_frames": clip_frames,
             "source_name": source.name,
@@ -170,4 +172,7 @@ def _generate(  # noqa: PLR0913 - bind one complete per-movie generation transac
         publish(destination, temporary, payload, before)
     finally:
         if not pending_path(destination).exists():
-            temporary.unlink(missing_ok=True)
+            # A process or scanner can still hold the staging file on Windows.
+            # Keep the conversion or validation error visible in that case.
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)

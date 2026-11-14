@@ -47,9 +47,22 @@ def test_recipe_update_regenerates_owned_outputs_instead_of_rejecting_them(tmp_p
     assert json.loads(receipt.read_bytes())["recipe"] != previous["recipe"]
 
 
-def test_mid_movie_failure_does_not_publish_a_partial_video(tmp_path: Path) -> None:
+@pytest.mark.parametrize("staging_locked", [False, True])
+def test_mid_movie_failure_does_not_publish_a_partial_video(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staging_locked: bool
+) -> None:
     source, output = tmp_path / "original.avi", tmp_path / "upscaled"
     _make_movie(source, audio=False)
+    unlink = Path.unlink
+
+    def unlink_with_locked_movie(path: Path, *, missing_ok: bool = False) -> None:
+        if path.parent == output and path.suffix == ".mkv":
+            message = "staged movie still open"
+            raise PermissionError(message)
+        unlink(path, missing_ok=missing_ok)
+
+    if staging_locked:
+        monkeypatch.setattr(Path, "unlink", unlink_with_locked_movie)
 
     def fail(_name: str, _done: int, _total: int) -> None:
         message = "interrupted"
@@ -57,7 +70,9 @@ def test_mid_movie_failure_does_not_publish_a_partial_video(tmp_path: Path) -> N
 
     with pytest.raises(RuntimeError, match="interrupted"):
         upscale_movies([source], output, RecordingBackend(), progress=fail)
-    assert not list(output.iterdir())
+    assert not (output / "original.mkv").exists()
+    assert not (output / "original.mkv.json").exists()
+    assert bool(list(output.iterdir())) == staging_locked
 
 
 def test_changed_restoration_strength_regenerates_owned_outputs(tmp_path: Path) -> None:

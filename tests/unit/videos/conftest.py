@@ -21,10 +21,10 @@ from tests.unit.videos.test_video import _make_movie
 
 @pytest.fixture
 def interpolator(monkeypatch: pytest.MonkeyPatch) -> LinearInterpolator:
-    from gk3hd.videos import av1  # noqa: PLC0415 - replace only the inference boundary.
+    from gk3hd.videos import encoding  # noqa: PLC0415 - replace only the inference boundary.
 
     backend = LinearInterpolator()
-    monkeypatch.setattr(av1, "create_interpolator", lambda _backend: backend)
+    monkeypatch.setattr(encoding, "create_interpolator", lambda _backend: backend)
     return backend
 
 

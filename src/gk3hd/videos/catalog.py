@@ -19,6 +19,8 @@ from gk3hd.system.files import sha256_file
 MOVIE_EXTENSIONS = frozenset({".bik", ".avi"})
 MOVIE_INSTALL_PATH = "gk3hd/videos/installed"
 MOVIE_ASSET_PREFIX = "GK3HD-"
+DELIVERY_CODEC = "libx265"
+DELIVERY_ENCODING = "hevc-main10-420-crf16-rgb-lossless-flac-v1"
 # Asset::SetName (0x0056CA50) always terminates its 32-byte record at byte 30.
 MAX_MOVIE_ASSET_NAME = 30
 

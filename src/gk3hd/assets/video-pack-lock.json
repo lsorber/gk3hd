@@ -1,16 +1,13 @@
 {
   "archives": [
     {
-      "filename": "gk3hd-video-pack-v1.2.0-part01-of-02.zip",
-      "sha256": "68111775718f9f1e55d51bd091295eb399998ed7e7dfe404f5c57d64563fa867",
-      "size": 1921896075
-    },
-    {
-      "filename": "gk3hd-video-pack-v1.2.0-part02-of-02.zip",
-      "sha256": "6f6e366413655e27b114feaf97fc29f235643409425c73a1c817332d71662855",
-      "size": 238058247
+      "filename": "gk3hd-video-pack-v1.3.0.zip",
+      "sha256": "5dac58bfa3cd8af37da5f22a2ae553e0c22dbfc06bd81e986dc84cb1300b4e4c",
+      "size": 1567316084
     }
   ],
+  "player_recipe_sha256": "50b5672c6e043d5586e57b3b2ec23880d79d2ab1a9e774d2a4bd899d5f787805",
   "schema_version": 1,
-  "tag": "v1.2.0"
+  "standalone_compatible": true,
+  "tag": "v1.3.0"
 }

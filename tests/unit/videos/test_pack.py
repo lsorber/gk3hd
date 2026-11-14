@@ -79,6 +79,7 @@ def test_default_install_downloads_pinned_pack_and_reuses_it_offline(
     monkeypatch.setattr(install, "is_gk3_running", lambda: False)
     archives = build_pack(game, version="2.0.0")
     lock = json.loads((movie_workspace(game) / LOCK_FILENAME).read_bytes())
+    assert lock["player_recipe_sha256"] == video_runtime.recipe_digest()
     real_read = pack.read_json
     monkeypatch.setattr(
         pack,
@@ -122,6 +123,49 @@ def test_default_install_downloads_pinned_pack_and_reuses_it_offline(
     with pytest.raises(ValueError, match="missing or changed"):
         install_pack(game, PackRequest(cache=request.cache, offline=True))
     assert not (game / STATE_FILENAME).exists()
+
+
+@pytest.mark.parametrize("operation", [pack.prefetch, install_pack])
+def test_incompatible_published_pack_is_rejected_before_download(
+    game: Path, monkeypatch: pytest.MonkeyPatch, operation: Callable[..., object]
+) -> None:
+    build_pack(game, version="2.0.0")
+    lock = json.loads((movie_workspace(game) / LOCK_FILENAME).read_bytes())
+    lock["player_recipe_sha256"] = "0" * 64
+    monkeypatch.setattr(pack, "read_json", lambda _path: lock)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("incompatible playback must be detected before download")
+
+    monkeypatch.setattr(pack, "download_verified", forbidden)
+    monkeypatch.setattr(pack, "download_codecs", forbidden)
+    with pytest.raises(ValueError, match="different playback build"):
+        operation(game, PackRequest())
+    assert not (game / STATE_FILENAME).exists()
+
+
+def test_standalone_requires_the_headset_movie_encoding(
+    game: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = movie_workspace(game)
+    lock_path = workspace / LOCK_FILENAME
+    monkeypatch.setattr(pack, "_PUBLISHED_LOCK", lock_path)
+    build_pack(game, version="2.0.0", require_standalone=True)
+    pack.check_standalone_pack()
+
+    receipt = workspace / "upscaled/intro.mkv.json"
+    record = json.loads(receipt.read_bytes())
+    record.update(codec="libaom-av1", encoding="av1-444-10bit-crf24-rgb-lossless-flac-v2")
+    receipt.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="require all HD movies"):
+        build_pack(game, version="2.1.0", require_standalone=True)
+    assert not (workspace / pack.pack_filename("2.1.0")).exists()
+    pack.check_standalone_pack()
+
+    # Older desktop inputs can still be packed locally.
+    build_pack(game, version="2.1.0")
+    with pytest.raises(ValueError, match="HEVC Main10"):
+        pack.check_standalone_pack()
 
 
 @pytest.mark.parametrize("defect", ["traversal", "extra", "hash", "duplicate", "mixed"])
