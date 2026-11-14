@@ -1,0 +1,27 @@
+--- a/src/freedreno/vulkan/tu_shader.cc
++++ b/src/freedreno/vulkan/tu_shader.cc
+@@ -1518,6 +1518,15 @@
+ {
+    struct tu_device *dev = (struct tu_device *)cb_data;
+ 
++   /* Private route discriminator: preserve storage semantics, but use the
++    * existing storage-load path for vertex SSBOs before descriptor lowering.
++    */
++   bool storage_only = b->shader->info.stage == MESA_SHADER_VERTEX &&
++                       intrin->intrinsic == nir_intrinsic_load_ssbo &&
++                       (nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER);
++   if (storage_only)
++      nir_intrinsic_set_access(intrin, gl_access_qualifier(nir_intrinsic_access(intrin) & ~ACCESS_CAN_REORDER));
++
+    /* Descriptor index has to be adjusted in the following cases:
+     *  - isam loads, when the 16-bit descriptor cannot also be used for 32-bit
+     *    loads -- next-index descriptor will be able to do that;
+@@ -1556,7 +1565,7 @@
+       return true;
+    }
+ 
+-   return false;
++   return storage_only;
+ }
+ 
+ static bool

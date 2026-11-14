@@ -1,0 +1,66 @@
+{
+  "commit": "9ac85c0e7ec11e8b076e179db01372476c653bca",
+  "hosts": {
+    "windows": {
+      "adb.exe": {
+        "size": 7797804,
+        "sha256": "d3f52e6fdfbc1c626a5134196b2314c628088029f69f3fc04985759ab01a6051",
+        "decoded_sha256": "997324a38d89e3b282306bf25ccaa167c49a35850ac0ab4a169e7a15afa82fc8"
+      },
+      "AdbWinApi.dll": {
+        "size": 144428,
+        "sha256": "b9427cf446ab380acdff2e5669ccff9752e082e2ec48274d66ec8c344b51426c",
+        "decoded_sha256": "1ad523231de449af3ba0e8664d3af332f0c5cc4f09141691ca05e35368fa811a"
+      },
+      "AdbWinUsbApi.dll": {
+        "size": 98008,
+        "sha256": "7ea7dc46ae94f66b565c4d1f007fc77402397ca637daabe16e48a5595185b163",
+        "decoded_sha256": "51a61758a6f1f13dd36530199c0d65e227cd9d43765372b2942944cc3296ca2c"
+      },
+      "libwinpthread-1.dll": {
+        "size": 322840,
+        "sha256": "830388a3b65a3e1a810e692eeaacf7d0bf2981e2b531251d415f3901578a6298",
+        "decoded_sha256": "8e20f1e118135bb70350e529ed03e4ce32b2d570eaa9fd98d9decf6afcaf6fbf"
+      },
+      "NOTICE.txt": {
+        "size": 1480708,
+        "sha256": "80b0bb2488f5760669dc254a5b7035232d5a75cd86110f7c9da8d0be217ed961",
+        "decoded_sha256": "d25faffb58d73fef75d10b7d9b49d8d9872cbb33018f23232d04e8c3ea9dc4db"
+      }
+    },
+    "linux": {
+      "adb": {
+        "size": 10418860,
+        "sha256": "2258ebbd768904a59e1e47b6e78139b2af41166ad2f3af6ca91bdd8f0a8cec80",
+        "decoded_sha256": "7076a8ecb2422365252fd390f3e38eeebd68d0f21e783508bb9b13432399ac11"
+      },
+      "lib64/libc++.so": {
+        "size": 1424576,
+        "sha256": "84a1bec2f4e4ff70d45b488d8839ee47142770bd18dfa66a6f0b8702bb8c233d",
+        "decoded_sha256": "466155a6be96748592687c7acfa5f47bab572c8429e752bbe76bdf5e3f370e1f"
+      },
+      "NOTICE.txt": {
+        "size": 1504892,
+        "sha256": "5304cbeeaf27ee0e351690390580dcce77b22b97cd5e45f02c09869f7c777141",
+        "decoded_sha256": "115fc51c38e791803198f4ed67916827a023f5cdb338e6dd45959b718f484de3"
+      }
+    },
+    "darwin": {
+      "adb": {
+        "size": 18102060,
+        "sha256": "d6af21672545c715485c111ccb6051c7080c0de8fc983168ce63215ae89c8035",
+        "decoded_sha256": "0e0e583af03e544f5557ca72afc677343ee0eab1b1e088327bd989a716cfcdc1"
+      },
+      "lib64/libc++.dylib": {
+        "size": 2279808,
+        "sha256": "36027a15ed55533339030b3c6535b112ff89b0f7fcce2929b4127fb04fdefd1e",
+        "decoded_sha256": "0fb936608fb0d03a1c0254c1a77e36e1b12ff9cc552e765e5582b9f75"
+      },
+      "NOTICE.txt": {
+        "size": 1476756,
+        "sha256": "fbad5d4b6aab5d853b0e5c0955e7fce8412b734e4f5e924f28e27a0f662fa2c8",
+        "decoded_sha256": "9f90e80db72bb731c42e5e6ecf7de7d83bf06f41cd5620c3974647e5382b9f75"
+      }
+    }
+  }
+}

@@ -21,6 +21,7 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     RESOURCE_PROGRESS_DRAW_DEPTH_OFFSET,
     RESOURCE_PROGRESS_TRANSFORM_COUNT_OFFSET,
     RESOURCE_SEGMENT,
+    RESOURCE_STATE_OFFSET,
     SIDNEY_NATIVE_BLT_TRAMPOLINE_OFFSET,
     SIDNEY_PRESENTATION_SEGMENT,
     SYSTEM_CONTROL_CURSOR_STATE_OFFSET,
@@ -125,25 +126,25 @@ class ResourceDispatchCompiler:
     _timeblock_section_name: ClassVar[str] = TIMEBLOCK_SEGMENT.logical_name
     _timeblock_layout_version: ClassVar[int] = 10
     _off_layout_version: ClassVar[int] = 0x08
-    _off_dest_rect: ClassVar[int] = 0x10
-    _off_source_rect: ClassVar[int] = 0x20
-    _off_slider_trace_count: ClassVar[int] = 0x60
-    _off_slider_last_record: ClassVar[int] = 0x64
-    _off_slider_transform_count: ClassVar[int] = 0x94
-    _off_closeup_transform_count: ClassVar[int] = 0xA0
-    _off_closeup_raw_width: ClassVar[int] = 0xA4
-    _off_closeup_raw_height: ClassVar[int] = 0xA8
-    _off_closeup_target_width: ClassVar[int] = 0xAC
-    _off_closeup_target_height: ClassVar[int] = 0xB0
-    _off_closeup_rect: ClassVar[int] = 0xB4
-    _off_closeup_active_handle: ClassVar[int] = 0xD0
-    _off_closeup_observed_source: ClassVar[int] = 0xD4
-    _off_closeup_observed_drawable: ClassVar[int] = 0xD8
-    _off_closeup_observed_resource: ClassVar[int] = 0xDC
-    _off_resource_lookup_active: ClassVar[int] = 0xE0
-    _off_closeup_active_surface: ClassVar[int] = 0xE4
-    _off_museum_surface: ClassVar[int] = 0xE8
-    _off_closeup_sprite: ClassVar[int] = 0xEC
+    _off_dest_rect: ClassVar[int] = RESOURCE_STATE_OFFSET + 0x10
+    _off_source_rect: ClassVar[int] = RESOURCE_STATE_OFFSET + 0x20
+    _off_slider_trace_count: ClassVar[int] = RESOURCE_STATE_OFFSET + 0x60
+    _off_slider_last_record: ClassVar[int] = RESOURCE_STATE_OFFSET + 0x64
+    _off_slider_transform_count: ClassVar[int] = RESOURCE_STATE_OFFSET + 0x94
+    _off_closeup_transform_count: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xA0
+    _off_closeup_raw_width: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xA4
+    _off_closeup_raw_height: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xA8
+    _off_closeup_target_width: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xAC
+    _off_closeup_target_height: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xB0
+    _off_closeup_rect: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xB4
+    _off_closeup_active_handle: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xD0
+    _off_closeup_observed_source: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xD4
+    _off_closeup_observed_drawable: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xD8
+    _off_closeup_observed_resource: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xDC
+    _off_resource_lookup_active: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE0
+    _off_closeup_active_surface: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE4
+    _off_museum_surface: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE8
+    _off_closeup_sprite: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xEC
     _off_wrapper: ClassVar[int] = 0x100
     # Keep the unrelated close-up resolver in a disjoint tail page instead of
     # compressing either policy into a fragile branch-distance budget.
@@ -151,13 +152,13 @@ class ResourceDispatchCompiler:
     _off_closeup_tag_wrapper_limit: ClassVar[int] = 0x2000
     _off_bitmap_entry_probe: ClassVar[int] = 0xA00
     _off_bitmap_entry_probe_limit: ClassVar[int] = 0xC00
-    _off_bitmap_probe_resource: ClassVar[int] = 0xE00
-    _off_bitmap_probe_child: ClassVar[int] = 0xE04
-    _off_bitmap_probe_handle: ClassVar[int] = 0xE08
-    _off_bitmap_probe_surface: ClassVar[int] = 0xE0C
-    _off_driving_map_transform_count: ClassVar[int] = 0xE10
-    _off_driving_map_rect: ClassVar[int] = 0xE14
-    _off_driving_map_scope_active: ClassVar[int] = 0xE24
+    _off_bitmap_probe_resource: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE00
+    _off_bitmap_probe_child: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE04
+    _off_bitmap_probe_handle: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE08
+    _off_bitmap_probe_surface: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE0C
+    _off_driving_map_transform_count: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE10
+    _off_driving_map_rect: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE14
+    _off_driving_map_scope_active: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xE24
     _off_driving_map_seen: ClassVar[int] = RESOURCE_DRIVING_MAP_SEEN_OFFSET
     _off_driving_map_input_active: ClassVar[int] = RESOURCE_DRIVING_MAP_INPUT_ACTIVE_OFFSET
     # TimeBlock owns a separate runtime page. Its final blitter has the largest
@@ -196,13 +197,13 @@ class ResourceDispatchCompiler:
     # GK3 owns the map root. Retain its draw counter and formerly published
     # generation fields as one stable diagnostic ABI; the exact vtable wrapper
     # now supplies complete damage synchronously on every live map draw.
-    _off_driving_map_children_scaled: ClassVar[int] = 0xEB4
-    _off_driving_map_ellipse_count: ClassVar[int] = 0xEB8
-    _off_driving_map_full_draw_count: ClassVar[int] = 0xEBC
-    _off_driving_map_root_this: ClassVar[int] = 0xEC0
-    _off_driving_map_root_this_candidate: ClassVar[int] = 0xEC4
-    _off_driving_map_child_rect_count: ClassVar[int] = 0xEC8
-    _off_driving_map_child_rects: ClassVar[int] = 0x1000
+    _off_driving_map_children_scaled: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xEB4
+    _off_driving_map_ellipse_count: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xEB8
+    _off_driving_map_full_draw_count: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xEBC
+    _off_driving_map_root_this: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xEC0
+    _off_driving_map_root_this_candidate: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xEC4
+    _off_driving_map_child_rect_count: ClassVar[int] = RESOURCE_STATE_OFFSET + 0xEC8
+    _off_driving_map_child_rects: ClassVar[int] = RESOURCE_STATE_OFFSET + 0x1000
     _off_driving_map_source_grid_rect: ClassVar[int] = 0x1100
     _off_progress_draw_depth: ClassVar[int] = RESOURCE_PROGRESS_DRAW_DEPTH_OFFSET
     _off_progress_transform_count: ClassVar[int] = RESOURCE_PROGRESS_TRANSFORM_COUNT_OFFSET

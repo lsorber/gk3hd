@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import ntpath
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from uuid import UUID
 
 
 def sha256_file(
@@ -66,6 +68,19 @@ def cache_directory() -> Path:
     if xdg_cache := os.environ.get("XDG_CACHE_HOME"):
         return Path(xdg_cache) / "gk3hd"
     return Path.home() / ".cache" / "gk3hd"
+
+
+def windows_known_folder(folder: UUID) -> Path | None:
+    """Look up a per-user Windows shell folder, including redirected folders."""
+    shell = ctypes.WinDLL("shell32")
+    ole = ctypes.WinDLL("ole32")
+    identifier = (ctypes.c_ubyte * 16).from_buffer_copy(folder.bytes_le)
+    result = ctypes.c_wchar_p()
+    try:
+        status = shell.SHGetKnownFolderPath(ctypes.byref(identifier), 0, None, ctypes.byref(result))
+        return Path(result.value) if status == 0 and result.value else None
+    finally:
+        ole.CoTaskMemFree(ctypes.cast(result, ctypes.c_void_p))
 
 
 def json_bytes(payload: object) -> bytes:

@@ -1,0 +1,19 @@
+{
+  "wine": {
+    "url": "https://codeload.github.com/wine-mirror/wine/tar.gz/refs/tags/wine-10.10",
+    "sha256": "6b4cbcee77703fbd594cbf96a6d5a58eb93478e0ecc1c36bedbc133eea4c9853",
+    "commit": "885446556ce443b496e368b8f2c68807dcc7df0f",
+    "directory": "wine-wine-10.10"
+  },
+  "staging": {
+    "url": "https://codeload.github.com/wine-staging/wine-staging/tar.gz/refs/tags/v10.10",
+    "sha256": "17a636a76d5775bc7eb25a4a908d1ff5d40ecbcee46fefca10ae292a0a83f6e1",
+    "commit": "c37f9f50912bd801e217ba81d2512feb7386f0d1",
+    "directory": "wine-staging-10.10",
+    "patchset": "eventfd_synchronization"
+  },
+  "registry_base_sha256": "e93ff69f176746f7e359d2ece974598379fecd90921d788e04458b0ff7457bd5",
+  "protocol_sha256": "61a805d027f81ac1b66576817ce79709a46669e6581db6fa2ec0753d2aa34911",
+  "stock_server_sha256": "7a9729c87858ae93e31f77c4e10afa5164087a4eca603c32045209e4c2bf0bd2",
+  "gcc": "13.3.0"
+}

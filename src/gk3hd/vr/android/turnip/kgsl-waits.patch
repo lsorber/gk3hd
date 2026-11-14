@@ -1,0 +1,127 @@
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -782,11 +782,12 @@
+  * which could lead to waiting substantially longer than requested
+  */
+ static VkResult
+-wait_timestamp_safe(int fd,
++wait_timestamp_safe(struct tu_device *device,
+                     unsigned int context_id,
+                     unsigned int timestamp,
+                     uint64_t abs_timeout_ns)
+ {
++   const int fd = device->fd;
+    struct kgsl_device_waittimestamp_ctxtid wait = {
+       .context_id = context_id,
+       .timestamp = timestamp,
+@@ -805,8 +806,13 @@
+ 
+          wait.timeout = timeout_ms;
+       } else if (ret == -1) {
+-         assert(errno == ETIMEDOUT);
+-         return VK_TIMEOUT;
++         const int error = errno;
++         if (error == ETIMEDOUT)
++            return VK_TIMEOUT;
++         VkResult result = vk_device_set_lost(&device->vk,
++            "KGSL timestamp wait failed: %s", strerror(error));
++         errno = error;
++         return result;
+       } else {
+          return VK_SUCCESS;
+       }
+@@ -817,9 +823,9 @@
+ kgsl_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
+                       uint64_t timeout_ns)
+ {
+-   uint64_t abs_timeout_ns = os_time_get_nano() + timeout_ns;
+-
+-   return wait_timestamp_safe(queue->device->fd, queue->msm_queue_id,
++   uint64_t abs_timeout_ns = os_time_get_absolute_timeout(timeout_ns);
++
++   return wait_timestamp_safe(queue->device, queue->msm_queue_id,
+                               fence, abs_timeout_ns);
+ }
+ 
+@@ -868,15 +874,20 @@
+       return VK_TIMEOUT;
+ 
+    case KGSL_SYNCOBJ_STATE_TS: {
+-      return wait_timestamp_safe(device->fd, s->queue->msm_queue_id,
++      return wait_timestamp_safe(device, s->queue->msm_queue_id,
+                                  s->timestamp, abs_timeout_ns);
+    }
+ 
+    case KGSL_SYNCOBJ_STATE_FD: {
+       int ret = sync_wait(s->fd, get_relative_ms(abs_timeout_ns));
+       if (ret) {
+-         assert(errno == ETIME);
+-         return VK_TIMEOUT;
++         const int error = errno;
++         if (error == ETIME || error == ETIMEDOUT)
++            return VK_TIMEOUT;
++         VkResult result = vk_device_set_lost(&device->vk,
++            "KGSL sync FD wait failed: %s", strerror(error));
++         errno = error;
++         return result;
+       } else {
+          return VK_SUCCESS;
+       }
+@@ -888,8 +899,8 @@
+ }
+ 
+ #define kgsl_syncobj_foreach_state(syncobjs, filter) \
+-   for (uint32_t i = 0; sync = syncobjs[i], i < count; i++) \
+-      if (sync->state == filter)
++   for (uint32_t i = 0; i < count; i++) \
++      if ((sync = syncobjs[i])->state == filter)
+ 
+ static VkResult
+ kgsl_syncobj_wait_any(struct tu_device* device, struct kgsl_syncobj **syncobjs, uint32_t count, uint64_t abs_timeout_ns)
+@@ -944,13 +955,13 @@
+       /* TSs could be merged by finding the one with the lowest timestamp */
+       bool first_ts = true;
+       kgsl_syncobj_foreach_state(syncobjs, KGSL_SYNCOBJ_STATE_TS) {
+-         if (first_ts || timestamp_cmp(sync->timestamp, lowest_timestamp)) {
++         if (first_ts || timestamp_cmp(lowest_timestamp, sync->timestamp)) {
+             first_ts = false;
+             lowest_timestamp = sync->timestamp;
+          }
+       }
+ 
+-      if (num_fds) {
++      if (num_fds && queue) {
+          struct pollfd *poll_fd = (struct pollfd *) u_vector_add(&poll_fds);
+          poll_fd->fd = timestamp_to_fd(queue, lowest_timestamp);
+          poll_fd->events = POLLIN;
+@@ -966,7 +977,7 @@
+    }
+ 
+    if (u_vector_length(&poll_fds) == 0) {
+-      result = wait_timestamp_safe(device->fd, queue->msm_queue_id,
++      result = wait_timestamp_safe(device, queue->msm_queue_id,
+                                    lowest_timestamp, MIN2(abs_timeout_ns, INT64_MAX));
+    } else {
+       int ret, i;
+@@ -990,14 +1001,18 @@
+          }
+       } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+ 
++      const int wait_error = ret < 0 ? errno : 0;
+       for (uint32_t i = 0; i < fds_count - num_fds; i++)
+          close(fds[i].fd);
+ 
+-      if (ret != 0) {
+-         assert(errno == ETIME);
++      if (ret > 0) {
++         result = VK_SUCCESS;
++      } else if (ret == 0) {
+          result = VK_TIMEOUT;
+       } else {
+-         result = VK_SUCCESS;
++         result = vk_device_set_lost(&device->vk,
++            "KGSL wait-any poll failed: %s", strerror(wait_error));
++         errno = wait_error;
+       }
+    }
+ 

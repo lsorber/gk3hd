@@ -63,6 +63,12 @@ public:
     std::cout<<label<<": injected="<<fired<<" result=0x"<<std::hex<<uint32_t(hr)<<std::dec<<'\n';
     if (!ok) ++failures;
   }
+  void expectNoTransfer(const char* label) {
+    const bool ok=!fired && armed && !unlockTarget;
+    armed=false;unlockTarget=nullptr;
+    std::cout<<label<<": unnecessary readback="<<!ok<<'\n';
+    if (!ok) ++failures;
+  }
 };
 
 template<typename T,typename D>
@@ -89,6 +95,23 @@ void failReadbacks(T* target,IDirect3DViewport3* viewport,LONG height,NativeTran
 }
 
 using CreateDDraw = HRESULT(WINAPI*)(GUID*,IDirectDraw**,IUnknown*);
+
+template<typename T,typename D>
+void replaceWithoutReadback(T* target,IUnknown* sprite,REFIID iid,IDirect3DViewport3* viewport,
+                           LONG height,NativeTransferFault& fault) {
+  auto source=query<T>(sprite,iid);
+  D3DRECT full{0,0,96,height};
+  check("invalidate destination before replacement",viewport->Clear2(1,&full,D3DCLEAR_TARGET,0xffff0000,1.f,0));
+  // The source is CPU-authored. Its full opaque copy must not depend on being
+  // able to download GPU pixels which the successful copy entirely replaces.
+  // Having a source key configured does not activate it without the copy flag.
+  fault.arm(DDLOCK_WRITEONLY,false);
+  HRESULT hr=target->BltFast(0,0,source.Get(),nullptr,DDBLTFAST_WAIT);
+  fault.expectNoTransfer("full opaque fast replacement");
+  check("replace GPU page without destination readback",hr);
+  expectPixels<T,D>("opaque fast replacement draws foreground",target,0x07e0);
+  expectPixels<T,D>("opaque fast replacement also copies key-colour pixels",target,0xf81f,{32,8,48,24});
+}
 
 template<typename T,typename D>
 void failFullOverwrite(T* target,IDirect3DViewport3* viewport,LONG height) {
@@ -175,6 +198,11 @@ void checkTransferFailures(CreateDDraw create,HWND window) {
     checkKeyedDestination<IDirectDrawSurface3,DDSURFACEDESC>(surface3.Get(),keyedSource.Get(),IID_IDirectDrawSurface3,viewport.Get(),height);
     checkKeyedDestination<IDirectDrawSurface4,DDSURFACEDESC2>(target.Get(),keyedSource.Get(),IID_IDirectDrawSurface4,viewport.Get(),height);
     checkKeyedDestination<IDirectDrawSurface7,DDSURFACEDESC2>(surface7.Get(),keyedSource.Get(),IID_IDirectDrawSurface7,viewport.Get(),height);
+    replaceWithoutReadback<IDirectDrawSurface,DDSURFACEDESC>(surface1.Get(),keyedSource.Get(),IID_IDirectDrawSurface,viewport.Get(),height,fault);
+    replaceWithoutReadback<IDirectDrawSurface2,DDSURFACEDESC>(surface2.Get(),keyedSource.Get(),IID_IDirectDrawSurface2,viewport.Get(),height,fault);
+    replaceWithoutReadback<IDirectDrawSurface3,DDSURFACEDESC>(surface3.Get(),keyedSource.Get(),IID_IDirectDrawSurface3,viewport.Get(),height,fault);
+    replaceWithoutReadback<IDirectDrawSurface4,DDSURFACEDESC2>(target.Get(),keyedSource.Get(),IID_IDirectDrawSurface4,viewport.Get(),height,fault);
+    replaceWithoutReadback<IDirectDrawSurface7,DDSURFACEDESC2>(surface7.Get(),keyedSource.Get(),IID_IDirectDrawSurface7,viewport.Get(),height,fault);
     failReadbacks<IDirectDrawSurface,DDSURFACEDESC>(surface1.Get(),viewport.Get(),height,fault);
     failReadbacks<IDirectDrawSurface2,DDSURFACEDESC>(surface2.Get(),viewport.Get(),height,fault);
     failReadbacks<IDirectDrawSurface3,DDSURFACEDESC>(surface3.Get(),viewport.Get(),height,fault);

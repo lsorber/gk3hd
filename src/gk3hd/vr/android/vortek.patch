@@ -1,0 +1,150 @@
+diff --git a/include/vortek_serializer.h b/include/vortek_serializer.h
+index fc8882b..f85d9f8 100644
+--- a/include/vortek_serializer.h
++++ b/include/vortek_serializer.h
+@@ -6307,7 +6307,12 @@ static inline void vt_serialize_VkPhysicalDeviceMemoryProperties(VkPhysicalDevic
+     bufferOffset += val->memoryTypeCount * vt_sizeof_VkMemoryType(&val->memoryTypes[0]);
+     *(uint32_t*)(outputBuffer + bufferOffset) = val->memoryHeapCount;
+     bufferOffset += 4;
+-    if (val->memoryHeapCount <= VK_MAX_MEMORY_HEAPS) memcpy(outputBuffer + bufferOffset, val->memoryHeaps, val->memoryHeapCount * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[0]));
++    // Wire elements contain size+flags (12 bytes), not the native tail padding.
++    if (val->memoryHeapCount <= VK_MAX_MEMORY_HEAPS) {
++        for (uint32_t i = 0; i < val->memoryHeapCount; ++i)
++            vt_serialize_VkMemoryHeap(&val->memoryHeaps[i],
++                outputBuffer + bufferOffset + i * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[i]));
++    }
+     bufferOffset += val->memoryHeapCount * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[0]);
+ }
+ 
+@@ -6319,7 +6324,11 @@ static inline void vt_unserialize_VkPhysicalDeviceMemoryProperties(VkPhysicalDev
+     bufferOffset += val->memoryTypeCount * vt_sizeof_VkMemoryType(&val->memoryTypes[0]);
+     val->memoryHeapCount = *(uint32_t*)(inputBuffer + bufferOffset);
+     bufferOffset += 4;
+-    if (val->memoryHeapCount <= VK_MAX_MEMORY_HEAPS) memcpy(val->memoryHeaps, inputBuffer + bufferOffset, val->memoryHeapCount * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[0]));
++    if (val->memoryHeapCount <= VK_MAX_MEMORY_HEAPS) {
++        for (uint32_t i = 0; i < val->memoryHeapCount; ++i)
++            vt_unserialize_VkMemoryHeap(&val->memoryHeaps[i],
++                inputBuffer + bufferOffset + i * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[i]), memoryPool);
++    }
+     bufferOffset += val->memoryHeapCount * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[0]);
+ }
+ 
+@@ -46402,4 +46411,4 @@ static inline void vt_unserialize_vkGetShaderModuleCreateInfoIdentifierEXT(VkDev
+     else if (pIdentifier) pIdentifier = NULL;
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/vulkan_calls.c b/src/vulkan_calls.c
+index 0e7cab7..ef602e1 100644
+--- a/src/vulkan_calls.c
++++ b/src/vulkan_calls.c
+@@ -7,6 +7,7 @@
+ #include "vk_object_pool.h"
+ #include "vulkan/vk_icd.h"
+ #include "vulkan/vk_layer.h"
++#include "FenceWait.h"
+ 
+ #define MSG_DEBUG_UNIMPLEMENTED_VKCALL "vortek: unimplemented call %s\n"
+ 
+@@ -584,31 +585,35 @@ VkResult vt_call_vkGetFenceStatus(VkDevice device, VkFence fence) {
+     return (VkResult)result;    
+ }
+ 
+-VkResult vt_call_vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence* pFences, VkBool32 waitAll, uint64_t timeout) {
++typedef struct Gk3hdFenceQuery {
++    VkDevice device;uint32_t count;const VkFence* fences;VkBool32 all;
++} Gk3hdFenceQuery;
++
++static VkResult gk3hdQueryFences(void* opaque) {
++    Gk3hdFenceQuery* state=opaque;
+     VT_CALL_LOCK();
+-    VkObject* deviceObject = VkObject_fromHandle(device);
++    VkObject* deviceObject=VkObject_fromHandle(state->device);
++    VT_SERIALIZE_CMD(vkWaitForFences,(VkDevice)&deviceObject->id,state->count,state->fences,state->all,0);
++    VT_SEND_CHECKED(REQUEST_CODE_VK_WAIT_FOR_FENCES,VT_RETURN);
++    VT_RECV_CHECKED(VT_RETURN);
++    VT_CALL_UNLOCK();
++    return (VkResult)result;
++}
+ 
+-    VT_SERIALIZE_CMD(vkWaitForFences, (VkDevice)&deviceObject->id, fenceCount, pFences, waitAll, timeout);
+-    VT_SEND_CHECKED(REQUEST_CODE_VK_WAIT_FOR_FENCES, VT_RETURN);
+-    
+-    if (timeout == 0) {
+-        VT_RECV_CHECKED(VT_RETURN);
+-        
+-        VT_CALL_UNLOCK();
+-        return (VkResult)result;   
+-    }
+-    else {
+-        int fds[fenceCount];
+-        int result, numFds;
+-        recv_fds(serverFd, fds, &numFds, &result, sizeof(VkResult));
+-        VT_CALL_UNLOCK();
+-        
+-        if (numFds == 0 || result != VK_SUCCESS) return VK_ERROR_DEVICE_LOST;
+-        int timeoutMs = timeout != UINT64_MAX ? timeout / 1000000 : 0;
+-        result = waitForEvents(fds, numFds, waitAll ? true : false, timeoutMs);
+-        for (int i = 0; i < numFds; i++) CLOSEFD(fds[i]);
+-        return result == EVENT_RESULT_TIMEOUT ? VK_TIMEOUT : (result == EVENT_RESULT_SUCCESS ? VK_SUCCESS : VK_ERROR_DEVICE_LOST);
+-    } 
++static uint64_t gk3hdFenceClock(void* unused) {
++    (void)unused;struct timespec time;
++    if(clock_gettime(CLOCK_MONOTONIC,&time))return UINT64_MAX;
++    return (uint64_t)time.tv_sec*1000000000ull+(uint64_t)time.tv_nsec;
++}
++
++static void gk3hdFencePause(void* unused,uint64_t duration) {
++    (void)unused;struct timespec time={duration/1000000000ull,duration%1000000000ull};
++    nanosleep(&time,NULL);
++}
++
++VkResult vt_call_vkWaitForFences(VkDevice device,uint32_t fenceCount,const VkFence* fences,VkBool32 waitAll,uint64_t timeout) {
++    Gk3hdFenceQuery state={device,fenceCount,fences,waitAll};
++    return gk3hdWaitFences(&state,timeout,gk3hdQueryFences,gk3hdFenceClock,gk3hdFencePause);
+ }
+ 
+ VkResult vt_call_vkCreateSemaphore(VkDevice device, const VkSemaphoreCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSemaphore* pSemaphore) {
+@@ -1882,8 +1887,8 @@ VkResult vt_call_vkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain
+ 
+ VkResult vt_call_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) {
+     VT_CALL_LOCK();
+-    
+-    VT_SERIALIZE_CMD(VkPresentInfoKHR, pPresentInfo);
++    VkObject* queueObject = VkObject_fromHandle(queue);
++    VT_SERIALIZE_CMD(vkQueuePresentKHR, (VkQueue)&queueObject->id, pPresentInfo);
+     VT_SEND_CHECKED(REQUEST_CODE_VK_QUEUE_PRESENT_KHR, VT_RETURN);
+     
+     if (pPresentInfo->pResults) {
+@@ -3494,4 +3499,4 @@ PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char* pN
+ VkResult vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion) {
+     *pSupportedVersion = 3;
+     return VK_SUCCESS;
+-}
+\ No newline at end of file
++}
+diff --git a/include/vortek.h b/include/vortek.h
+--- a/include/vortek.h
++++ b/include/vortek.h
+@@ -10,6 +10,7 @@
+ #define THREAD_POOL_NUM_THREADS 8
+ 
+ #include "winlator.h"
++#include "PacketWriter.h"
+ 
+ #ifdef __ANDROID__
+ #define VT_SERVER 1
+@@ -235,6 +236,11 @@
+     *(int*)(header + 0) = requestCode;
+     *(int*)(header + 4) = size;
+ 
++    if (size >= 0 && ring->bufferSize >= HEADER_SIZE &&
++        (uint32_t)size <= ring->bufferSize - HEADER_SIZE) {
++        return gk3hdWritePacket(ring, header, data, (uint32_t)size) ? size : 0;
++    }
++
+     bool result = RingBuffer_write(ring, header, HEADER_SIZE);
+     if (!result) return 0;
+ 

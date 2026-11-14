@@ -1,0 +1,2287 @@
+diff --git a/app/build.gradle b/app/build.gradle
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -1,20 +1,59 @@
+ apply plugin: 'com.android.application'
+ 
++def gk3hdRevision = 8
++def gk3hdClient = new groovy.json.JsonSlurper().parse(file('gk3hd-vortek.json'))
++assert gk3hdClient.archive_sha256 ==~ /[a-f0-9]{64}/
++assert gk3hdClient.client_sha256 ==~ /[a-f0-9]{64}/
++assert gk3hdClient.client_bytes > 0 && gk3hdClient.client_bytes <= 1048576
++assert gk3hdClient.allocation_sha256 ==~ /[a-f0-9]{64}/
++assert gk3hdClient.allocation_bytes > 0 && gk3hdClient.allocation_bytes <= 1048576
+ android {
++    buildFeatures {buildConfig true}
++    // Runtime archives are already compressed with Zstandard.
++    androidResources {noCompress.add('tzst')}
++    packaging {
++        resources {
++            excludes -= ['/META-INF/LICENSE.txt', '/META-INF/NOTICE.txt']
++            merges += ['/META-INF/LICENSE.txt', '/META-INF/NOTICE.txt']
++        }
++    }
++    sourceSets.main.java.srcDirs += project.property('gk3hdAndroidSource')
++    sourceSets.main.java.exclude 'tests/**'
++    if (project.hasProperty('gk3hdAndroidTests')) {
++        sourceSets.debug.java.srcDirs += project.property('gk3hdAndroidTests')
++        sourceSets.debug.manifest.srcFile file("${project.property('gk3hdAndroidTests')}/AndroidManifest.xml")
++    }
+     namespace 'com.winlator'
+     compileSdk 35
+ 
+     defaultConfig {
+-        applicationId 'com.winlator'
++        buildConfigField 'String', 'GK3HD_VORTEK_ARCHIVE_SHA', "\"${gk3hdClient.archive_sha256}\""
++        buildConfigField 'String', 'GK3HD_VORTEK_CLIENT_SHA', "\"${gk3hdClient.client_sha256}\""
++        buildConfigField 'int', 'GK3HD_VORTEK_CLIENT_BYTES', "${gk3hdClient.client_bytes}"
++        buildConfigField 'String', 'GK3HD_KGSL_SHA', "\"${gk3hdClient.allocation_sha256}\""
++        buildConfigField 'int', 'GK3HD_KGSL_BYTES', "${gk3hdClient.allocation_bytes}"
++        applicationId 'org.gk3hd.standalone'
+         minSdkVersion 26
+         targetSdkVersion 28
+-        versionCode 33
+-        versionName "11.2"
++        versionCode gk3hdRevision
++        versionName "${gk3hdRevision}"
++        manifestPlaceholders.gk3hdWorkbenchExported = "false"
++        externalNativeBuild {
++            cmake {arguments "-DGK3HD_ANDROID_SOURCE=${project.property('gk3hdAndroidSource')}"}
++        }
+     }
+ 
+     buildTypes {
++        release {
++            externalNativeBuild {
++                cmake {arguments "-DGK3HD_ALSA_ONLY=ON"}
++            }
++            ndk {abiFilters 'arm64-v8a'}
++        }
+         debug {
+-            minifyEnabled true
++            versionNameSuffix '-dev'
++            manifestPlaceholders.gk3hdWorkbenchExported = "true"
++            minifyEnabled false
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+ 
+             ndk {
+@@ -38,4 +77,12 @@
+ }
+
++androidComponents {
++    onVariants(selector().withBuildType('release')) { variant ->
++        def exclusions = new groovy.json.JsonSlurper().parse(
++            file("${project.property('gk3hdAndroidSource')}/release-audio-exclusions.json"))
++        variant.packaging.jniLibs.excludes.addAll(exclusions.collect { "**/${it}".toString() })
++    }
++}
++
+ dependencies {
+     implementation 'androidx.appcompat:appcompat:1.4.0'
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -4,7 +4,18 @@
+         android:glEsVersion="0x00020000"
+         android:required="true" />
+ 
++    <uses-feature android:name="android.hardware.vr.headtracking" android:required="false" android:version="1" />
++    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
++    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
++    <queries>
++        <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
++        <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService" /></intent>
++        <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService" /></intent>
++    </queries>
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+     <uses-permission android:name="android.permission.INTERNET"/>
++    <uses-permission android:name="android.permission.CAMERA"/>
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+@@ -17,22 +28,51 @@
+     <uses-permission android:name="android.permission.WAKE_LOCK" />
+ 
+     <application
+-        android:icon="@mipmap/ic_launcher"
++        android:icon="@drawable/gk3hd_icon"
+         android:appCategory="game"
+         android:isGame="true"
+         android:extractNativeLibs="true"
+         android:allowAudioPlaybackCapture="true"
+-        android:label="@string/app_name">
++        android:label="GK3HD VR">
++        <meta-data android:name="com.pimax.vr.application.mode" android:value="vr" />
++        <meta-data android:name="com.oculus.supportedDevices" android:value="quest3" />
++        <activity android:name="com.winlator.OpenXrActivity" android:label="GK3HD VR"
++            android:theme="@style/AppThemeFullscreenDark" android:exported="true"
++            android:launchMode="singleTask" android:screenOrientation="landscape" android:resizeableActivity="false"
++            android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.DEFAULT" />
++                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
++                <category android:name="com.oculus.intent.category.VR" />
++            </intent-filter>
++        </activity>
++        <service android:name="com.winlator.ManagedSetupService" android:exported="true"
++            android:permission="android.permission.DUMP" android:foregroundServiceType="dataSync" />
++        <provider android:name="org.gk3hd.standalone.SetupMetadataProvider"
++            android:authorities="${applicationId}.setup" android:exported="true"
++            android:permission="android.permission.DUMP" />
++        <activity android:name="com.winlator.StandaloneActivity" android:label="GK3HD VR"
++            android:theme="@style/AppThemeFullscreenDark" android:exported="true"
++            android:screenOrientation="landscape">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
++                <category android:name="com.oculus.intent.category.VR" />
++            </intent-filter>
++        </activity>
++        <activity android:name="com.winlator.CrystalActivity" android:label="GK3HD VR"
++            android:theme="@style/AppThemeFullscreenDark" android:exported="true"
++            android:launchMode="singleTask"
++            android:screenOrientation="landscape"
++            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation" />
+ 
+         <activity android:name="com.winlator.MainActivity"
+             android:theme="@style/AppThemeDark"
+-            android:exported="true"
++            android:exported="${gk3hdWorkbenchExported}"
+             android:screenOrientation="sensor"
+             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation">
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN"/>
+-                <category android:name="android.intent.category.LAUNCHER"/>
+-            </intent-filter>
+         </activity>
+ 
+         <activity android:name="com.winlator.XServerDisplayActivity"
+@@ -64,7 +103,7 @@
+ 
+         <provider
+             android:name="androidx.core.content.FileProvider"
+-            android:authorities="com.winlator.FileProvider"
++            android:authorities="${applicationId}.FileProvider"
+             android:exported="false"
+             android:grantUriPermissions="true">
+ 
+diff --git a/app/src/main/res/drawable/gk3hd_icon.xml b/app/src/main/res/drawable/gk3hd_icon.xml
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/res/drawable/gk3hd_icon.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="108dp" android:height="108dp"
++    android:viewportWidth="128" android:viewportHeight="128">
++    <path android:fillColor="#111C29" android:pathData="M0,0H128V128H0Z" />
++    <path android:fillColor="#00000000" android:strokeColor="#DDBB78"
++        android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round"
++        android:pathData="M41,43L36,38H24L19,43V65L24,70H38V56H31 M51,38V70 M69,38L52,54L70,70 M82,38H101V52L92,55L101,58V70H82" />
++    <path android:fillColor="#00000000" android:strokeColor="#E8EDF4"
++        android:strokeWidth="3" android:strokeLineCap="round" android:strokeLineJoin="round"
++        android:pathData="M46,86L52,99L58,86 M68,99V86H78V92H68 M73,92L80,99" />
++</vector>
+diff --git a/app/src/main/cpp/CMakeLists.txt b/app/src/main/cpp/CMakeLists.txt
+--- a/app/src/main/cpp/CMakeLists.txt
++++ b/app/src/main/cpp/CMakeLists.txt
+@@ -1,8 +1,16 @@
+ cmake_minimum_required(VERSION 3.22.1)
+ 
++if(DEFINED GK3HD_ANDROID_SOURCE)
++    set(GK3HD_KGSL_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/libadrenotools/src/hook")
++    add_subdirectory("${GK3HD_ANDROID_SOURCE}/native" gk3hd-pimax)
++endif()
++
+ add_subdirectory(winlator)
++target_include_directories(winlator PRIVATE "${GK3HD_ANDROID_SOURCE}/native")
+ add_subdirectory(vortekrenderer)
+ add_subdirectory(virglrenderer)
+-add_subdirectory(midihandler)
++if(NOT GK3HD_ALSA_ONLY)
++    add_subdirectory(midihandler)
++endif()
+ add_subdirectory(libadrenotools)
+-add_subdirectory(gladiorenderer)
+\ No newline at end of file
++add_subdirectory(gladiorenderer)
+diff --git a/app/src/main/cpp/gladiorenderer/src/gl_context.c b/app/src/main/cpp/gladiorenderer/src/gl_context.c
+index 3df5852..b198544 100644
+--- a/app/src/main/cpp/gladiorenderer/src/gl_context.c
++++ b/app/src/main/cpp/gladiorenderer/src/gl_context.c
+@@ -545,4 +545,4 @@ const char* getGLExtensions(int* outNumExtensions) {
+ 
+     if (outNumExtensions) *outNumExtensions = numExtensions;
+     return extensionNames;
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/cpp/gladiorenderer/src/request_handler.c b/app/src/main/cpp/gladiorenderer/src/request_handler.c
+index ea08d7a..aff50f2 100644
+--- a/app/src/main/cpp/gladiorenderer/src/request_handler.c
++++ b/app/src/main/cpp/gladiorenderer/src/request_handler.c
+@@ -1608,6 +1608,14 @@ void gd_handle_glGetString(GLContext* context) {
+             break;
+     }
+ 
++    if (!string) {
++        // GL queries can fail during context setup/retirement. Preserve that
++        // failure as an empty response, never invent a vendor or dereference
++        // its null result. The context lifecycle must still be diagnosed.
++        println("GK3HD glGetString unavailable name=%x context=%p display=%p eglError=%x",
++            name, eglGetCurrentContext(), eglGetCurrentDisplay(), eglGetError());
++        string = "";
++    }
+     ArrayBuffer_rewind(&context->outputBuffer);
+     ArrayBuffer_putBytes(&context->outputBuffer, string, strlen(string));
+     gl_send(context->clientRing, REQUEST_CODE_GL_GET_STRING, context->outputBuffer.buffer, context->outputBuffer.size);
+diff --git a/app/src/main/cpp/vortekrenderer/CMakeLists.txt b/app/src/main/cpp/vortekrenderer/CMakeLists.txt
+index 0e7920d..c98c26b 100644
+--- a/app/src/main/cpp/vortekrenderer/CMakeLists.txt
++++ b/app/src/main/cpp/vortekrenderer/CMakeLists.txt
+@@ -21,8 +21,10 @@ add_library(vortekrenderer SHARED
+             src/async_pipeline_creator.c
+             src/timeline_semaphore.c)
+ 
++target_include_directories(vortekrenderer PRIVATE "${GK3HD_ANDROID_SOURCE}/native")
++
+ target_link_libraries(vortekrenderer
+                       adrenotools
+                       winlator
+                       log
+-                      android)
+\ No newline at end of file
++                      android)
+diff --git a/app/src/main/cpp/vortekrenderer/include/vortek.h b/app/src/main/cpp/vortekrenderer/include/vortek.h
+--- a/app/src/main/cpp/vortekrenderer/include/vortek.h
++++ b/app/src/main/cpp/vortekrenderer/include/vortek.h
+@@ -10,6 +10,7 @@
+ #define THREAD_POOL_NUM_THREADS 8
+ 
+ #include "winlator.h"
++#include "PacketWriter.h"
+ 
+ #ifdef __ANDROID__
+ #define VT_SERVER 1
+@@ -115,6 +116,8 @@
+     jmethodID getWindowHeight;
+     jmethodID getWindowHardwareBuffer;
+     jmethodID updateWindowContent;
++    jmethodID orderedPublication;
++    jmethodID retirePublication;
+ } JMethods;
+ 
+ #else // VT_SERVER
+@@ -235,6 +238,11 @@
+     *(int*)(header + 0) = requestCode;
+     *(int*)(header + 4) = size;
+ 
++    if (size >= 0 && ring->bufferSize >= HEADER_SIZE &&
++        (uint32_t)size <= ring->bufferSize - HEADER_SIZE) {
++        return gk3hdWritePacket(ring, header, data, (uint32_t)size) ? size : 0;
++    }
++
+     bool result = RingBuffer_write(ring, header, HEADER_SIZE);
+     if (!result) return 0;
+ 
+@@ -264,4 +272,4 @@
+     return requestCode;
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/app/src/main/cpp/vortekrenderer/include/vortek_serializer.h b/app/src/main/cpp/vortekrenderer/include/vortek_serializer.h
+index fc8882b..f85d9f8 100644
+--- a/app/src/main/cpp/vortekrenderer/include/vortek_serializer.h
++++ b/app/src/main/cpp/vortekrenderer/include/vortek_serializer.h
+@@ -6307,7 +6307,12 @@ static inline void vt_serialize_VkPhysicalDeviceMemoryProperties(VkPhysicalDevic
+     bufferOffset += val->memoryTypeCount * vt_sizeof_VkMemoryType(&val->memoryTypes[0]);
+     *(uint32_t*)(outputBuffer + bufferOffset) = val->memoryHeapCount;
+     bufferOffset += 4;
+-    if (val->memoryHeapCount <= VK_MAX_MEMORY_HEAPS) memcpy(outputBuffer + bufferOffset, val->memoryHeaps, val->memoryHeapCount * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[0]));
++    // Wire elements contain size+flags (12 bytes), not the native tail padding.
++    if (val->memoryHeapCount <= VK_MAX_MEMORY_HEAPS) {
++        for (uint32_t i = 0; i < val->memoryHeapCount; ++i)
++            vt_serialize_VkMemoryHeap(&val->memoryHeaps[i],
++                outputBuffer + bufferOffset + i * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[i]));
++    }
+     bufferOffset += val->memoryHeapCount * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[0]);
+ }
+ 
+@@ -6319,7 +6324,11 @@ static inline void vt_unserialize_VkPhysicalDeviceMemoryProperties(VkPhysicalDev
+     bufferOffset += val->memoryTypeCount * vt_sizeof_VkMemoryType(&val->memoryTypes[0]);
+     val->memoryHeapCount = *(uint32_t*)(inputBuffer + bufferOffset);
+     bufferOffset += 4;
+-    if (val->memoryHeapCount <= VK_MAX_MEMORY_HEAPS) memcpy(val->memoryHeaps, inputBuffer + bufferOffset, val->memoryHeapCount * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[0]));
++    if (val->memoryHeapCount <= VK_MAX_MEMORY_HEAPS) {
++        for (uint32_t i = 0; i < val->memoryHeapCount; ++i)
++            vt_unserialize_VkMemoryHeap(&val->memoryHeaps[i],
++                inputBuffer + bufferOffset + i * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[i]), memoryPool);
++    }
+     bufferOffset += val->memoryHeapCount * vt_sizeof_VkMemoryHeap(&val->memoryHeaps[0]);
+ }
+ 
+@@ -46402,4 +46411,4 @@ static inline void vt_unserialize_vkGetShaderModuleCreateInfoIdentifierEXT(VkDev
+     else if (pIdentifier) pIdentifier = NULL;
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/app/src/main/cpp/vortekrenderer/include/xwindow_swapchain.h b/app/src/main/cpp/vortekrenderer/include/xwindow_swapchain.h
+index eefa64d..392fab4 100644
+--- a/app/src/main/cpp/vortekrenderer/include/xwindow_swapchain.h
++++ b/app/src/main/cpp/vortekrenderer/include/xwindow_swapchain.h
+@@ -18,6 +18,7 @@ typedef struct XWindowSwapchain {
+     VkExtent2D imageExtent;
+     VkImageUsageFlags imageUsage;
+     VkQueue queue;
++    bool publicationFailed;
+     JMethods* jmethods;
+ } XWindowSwapchain;
+ 
+@@ -28,6 +29,6 @@ extern VkSurfaceFormatKHR* getSurfaceFormats(uint32_t* formatCount);
+ extern XWindowSwapchain* XWindowSwapchain_create(VkDevice device, uint32_t graphicsQueueIndex, VkSwapchainCreateInfoKHR* swapchainInfo, JMethods* jmethods, int windowId);
+ extern void XWindowSwapchain_destroy(VkDevice device, XWindowSwapchain* swapchain);
+ extern VkResult XWindowSwapchain_acquireNextImage(XWindowSwapchain* swapchain, uint64_t timeout, VkSemaphore signalSemaphore, VkFence fence, uint32_t* imageIndex);
+-extern void XWindowSwapchain_presentImage(XWindowSwapchain* swapchain);
++extern void XWindowSwapchain_presentImage(XWindowSwapchain* swapchain, VkQueue queue);
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/app/src/main/cpp/vortekrenderer/src/request_handler.c b/app/src/main/cpp/vortekrenderer/src/request_handler.c
+index 0e4b6e5..d4cefed 100644
+--- a/app/src/main/cpp/vortekrenderer/src/request_handler.c
++++ b/app/src/main/cpp/vortekrenderer/src/request_handler.c
+@@ -1,7 +1,10 @@
+ #include "request_handler.h"
++#include "FenceWait.h"
++#include "DeviceFeatures.h"
+ #include "vk_context.h"
+ #include "vulkan_helper.h"
+ #include "sysvshared_memory.h"
++#include "PresentWaits.h"
+ 
+ #define MSG_DEBUG_UNIMPLEMENTED_FUNC "%s not implemented yet\n"
+ 
+@@ -160,1 +163,2 @@ void vt_handle_vkCreateDevice(VkContext* context) {
++    gk3hdNativeDeviceFeatures(&createInfo);
+     disableUnsupportedDeviceFeatures(physicalDevice, &createInfo);
+@@ -491,12 +493,6 @@ void vt_handle_vkCreateFence(VkContext* context) {
+     vt_unserialize_vkCreateFence((VkDevice)&deviceId, &createInfo, NULL, NULL, context->inputBuffer, &context->memoryPool);
+     VkDevice device = VkObject_fromId(deviceId);
+ 
+-    VkExportFenceCreateInfo exportFenceInfo = {0};
+-    exportFenceInfo.sType = VK_STRUCTURE_TYPE_EXPORT_FENCE_CREATE_INFO;
+-    exportFenceInfo.handleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+-    exportFenceInfo.pNext = createInfo.pNext;
+-    createInfo.pNext = &exportFenceInfo;
+-
+     VkFence fence;
+     VkResult result = vulkanWrapper.vkCreateFence(device, &createInfo, NULL, &fence);
+ 
+@@ -552,26 +548,16 @@ void vt_handle_vkWaitForFences(VkContext* context) {
+     VkFence fences[fenceCount];
+     vt_unserialize_vkWaitForFences(VK_NULL_HANDLE, NULL, fences, NULL, NULL, context->inputBuffer, &context->memoryPool);
+ 
++    // The paired client owns deadlines and unlocks between immediate queries.
++    // Blocking this serialized request thread would prevent other submissions.
+     if (timeout != 0) {
+-        VkResult result = VK_SUCCESS;
+-        int fds[fenceCount];
+-        for (int i = 0; i < fenceCount; i++) {
+-            VkFenceGetFdInfoKHR getFdInfo = {0};
+-            getFdInfo.sType = VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR;
+-            getFdInfo.fence = fences[i];
+-            getFdInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+-
+-            result = vulkanWrapper.vkGetFenceFd(device, &getFdInfo, &fds[i]);
+-            if (result != VK_SUCCESS) break;
+-        }
+-
+-        send_fds(context->clientFd, fds, fenceCount, &result, sizeof(VkResult));
+-        for (int i = 0; i < fenceCount; i++) CLOSEFD(fds[i]);
+-    }
+-    else {
+-        VkResult result = vulkanWrapper.vkWaitForFences(device, fenceCount, fences, waitAll, timeout);
+-        vt_send(context->clientRing, result, NULL, 0);
++        println("GK3HD unexpected nonzero native fence-query timeout");
++        vt_send(context->clientRing,VK_ERROR_DEVICE_LOST,NULL,0);
++        shutdown(context->clientFd,SHUT_RDWR);context->status=VK_ERROR_DEVICE_LOST;
++        return;
+     }
++    VkResult result=gk3hdFencePredicate(device,fenceCount,fences,waitAll,vulkanWrapper.vkGetFenceStatus);
++    vt_send(context->clientRing,result,NULL,0);
+ }
+ 
+ void vt_handle_vkCreateSemaphore(VkContext* context) {
+@@ -2085,11 +2071,20 @@ void vt_handle_vkAcquireNextImageKHR(VkContext* context) {
+ }
+ 
+ void vt_handle_vkQueuePresentKHR(VkContext* context) {
++    uint64_t queueId = 0;
+     VkPresentInfoKHR presentInfo = {0};
+-    vt_unserialize_VkPresentInfoKHR(&presentInfo, context->inputBuffer, &context->memoryPool);
++    vt_unserialize_vkQueuePresentKHR((VkQueue)&queueId, &presentInfo,
++            context->inputBuffer, &context->memoryPool);
++    VkQueue queue = VkObject_fromId(queueId);
++    VkResult result = gk3hdConsumePresentWaits(vulkanWrapper.vkQueueSubmit, queue, &presentInfo);
++    if (result != VK_SUCCESS) {
++        println("GK3HD native Vulkan presentation waits failed: %d", result);
++        context->status = result;
++        return;
++    }
+ 
+     for (int i = 0; i < presentInfo.swapchainCount; i++) {
+-        XWindowSwapchain_presentImage((XWindowSwapchain*)presentInfo.pSwapchains[i]);
++        XWindowSwapchain_presentImage((XWindowSwapchain*)presentInfo.pSwapchains[i], queue);
+     }
+ }
+ 
+diff --git a/app/src/main/cpp/vortekrenderer/src/vk_context.c b/app/src/main/cpp/vortekrenderer/src/vk_context.c
+index 3fed461..e3bdfd4 100644
+--- a/app/src/main/cpp/vortekrenderer/src/vk_context.c
++++ b/app/src/main/cpp/vortekrenderer/src/vk_context.c
+@@ -4,6 +4,43 @@
+ #include "sysvshared_memory.h"
+ #include "string_utils.h"
+ #include "jni_utils.h"
++#include <android/log.h>
++#include <time.h>
++#include <sys/syscall.h>
++
++// Opt-in, per-RPC-thread aggregates. No clocks or per-call logging when off.
++typedef struct Gk3hdRequestMetric {uint64_t calls, bytes, wall, cpu, maximum;} Gk3hdRequestMetric;
++typedef struct Gk3hdRequestProfile {
++    Gk3hdRequestMetric metrics[REQUEST_CODE_VK_CALL_COUNT];
++    uint64_t start, receiveWall, receiveCpu, dispatchWall, dispatchCpu, calls;
++    unsigned reports;
++} Gk3hdRequestProfile;
++static uint64_t gk3hdClock(clockid_t clock) {
++    struct timespec now;clock_gettime(clock,&now);return (uint64_t)now.tv_sec*1000000000ull+now.tv_nsec;
++}
++static void gk3hdReportRequests(Gk3hdRequestProfile* profile,bool final) {
++    if(!profile||!profile->calls||profile->reports>=24) return;
++    uint64_t now=gk3hdClock(CLOCK_MONOTONIC);
++    if(!final&&now-profile->start<2000000000ull) return;
++    long tid=syscall(SYS_gettid);
++    __android_log_print(ANDROID_LOG_INFO,"GK3HDRpc",
++        "window tid=%ld end_ns=%llu span_ms=%.3f calls=%llu receive_wall_ms=%.3f receive_cpu_ms=%.3f dispatch_wall_ms=%.3f dispatch_cpu_ms=%.3f",
++        tid,(unsigned long long)now,(now-profile->start)/1e6,(unsigned long long)profile->calls,
++        profile->receiveWall/1e6,profile->receiveCpu/1e6,profile->dispatchWall/1e6,profile->dispatchCpu/1e6);
++    bool selected[REQUEST_CODE_VK_CALL_COUNT]={0};
++    for(unsigned rank=0;rank<8;rank++) {
++        int best=-1;
++        for(int i=0;i<REQUEST_CODE_VK_CALL_COUNT;i++)
++            if(!selected[i]&&profile->metrics[i].calls&&(best<0||profile->metrics[i].wall>profile->metrics[best].wall)) best=i;
++        if(best<0) break;
++        selected[best]=true;Gk3hdRequestMetric* metric=&profile->metrics[best];
++        __android_log_print(ANDROID_LOG_INFO,"GK3HDRpc",
++            "request tid=%ld end_ns=%llu code=%d calls=%llu bytes=%llu wall_ms=%.3f cpu_ms=%.3f max_ms=%.3f",
++            tid,(unsigned long long)now,best+REQUEST_CODE_VK_CALL_START,
++            (unsigned long long)metric->calls,(unsigned long long)metric->bytes,metric->wall/1e6,metric->cpu/1e6,metric->maximum/1e6);
++    }
++    unsigned reports=profile->reports+1;memset(profile,0,sizeof(*profile));profile->reports=reports;profile->start=gk3hdClock(CLOCK_MONOTONIC);
++}
+ 
+ static void loadJMethods(JMethods* jmethods) {
+     JNIEnv* env;
+@@ -15,6 +52,8 @@ static void loadJMethods(JMethods* jmethods) {
+     jmethods->getWindowHeight = (*env)->GetMethodID(env, cls, "getWindowHeight", "(I)I");
+     jmethods->getWindowHardwareBuffer = (*env)->GetMethodID(env, cls, "getWindowHardwareBuffer", "(IZ)J");
+     jmethods->updateWindowContent = (*env)->GetMethodID(env, cls, "updateWindowContent", "(I)V");
++    jmethods->orderedPublication = (*env)->GetMethodID(env, cls, "requiresOrderedPublication", "(I)Z");
++    jmethods->retirePublication = (*env)->GetMethodID(env, cls, "releasePublicationContext", "()V");
+ }
+ 
+ static ExtraDataRequest* waitForExtraDataRequest(VkContext* context, uint16_t requestId) {
+@@ -45,9 +84,19 @@ static void* requestHandlerThread(void* param) {
+     VkContext* context = param;
+     loadJMethods(&context->jmethods);
+     ExtraDataRequest* extraDataRequest = NULL;
++    JNIEnv* env=context->jmethods.env;
++    jclass cls=(*env)->GetObjectClass(env,context->jmethods.obj);
++    jmethodID profileMethod=(*env)->GetMethodID(env,cls,"profileNativeRequests","()Z");
++    bool profiling=(*env)->CallBooleanMethod(env,context->jmethods.obj,profileMethod);
++    (*env)->DeleteLocalRef(env,cls);
++    Gk3hdRequestProfile* profile=profiling?calloc(1,sizeof(Gk3hdRequestProfile)):NULL;
++    if(profile) profile->start=gk3hdClock(CLOCK_MONOTONIC);
+ 
+     while (context->status >= 0) {
++        uint64_t receiveStart=profile?gk3hdClock(CLOCK_MONOTONIC):0,receiveCpu=profile?gk3hdClock(CLOCK_THREAD_CPUTIME_ID):0;
+         int requestCode = vt_recv(context->serverRing, &context->inputBuffer, &context->inputBufferSize, &context->memoryPool);
++        uint64_t dispatchStart=profile?gk3hdClock(CLOCK_MONOTONIC):0,dispatchCpu=profile?gk3hdClock(CLOCK_THREAD_CPUTIME_ID):0;
++        if(profile) {profile->receiveWall+=dispatchStart-receiveStart;profile->receiveCpu+=dispatchCpu-receiveCpu;}
+         if (requestCode < 0) break;
+ 
+         if (requestCode > INT16_MAX) {
+@@ -66,6 +115,17 @@ static void* requestHandlerThread(void* param) {
+         HandleRequestFunc handleRequestFunc = getHandleRequestFunc(requestCode);
+         if (handleRequestFunc) handleRequestFunc(context);
+ 
++        if(profile) {
++            uint64_t wall=gk3hdClock(CLOCK_MONOTONIC)-dispatchStart,cpu=gk3hdClock(CLOCK_THREAD_CPUTIME_ID)-dispatchCpu;
++            profile->calls++;profile->dispatchWall+=wall;profile->dispatchCpu+=cpu;
++            int index=requestCode-REQUEST_CODE_VK_CALL_START;
++            if(index>=0&&index<REQUEST_CODE_VK_CALL_COUNT) {
++                Gk3hdRequestMetric* metric=&profile->metrics[index];metric->calls++;metric->bytes+=context->inputBufferSize;
++                metric->wall+=wall;metric->cpu+=cpu;if(wall>metric->maximum) metric->maximum=wall;
++            }
++            gk3hdReportRequests(profile,false);
++        }
++
+         vt_free(&context->memoryPool);
+ 
+         if (extraDataRequest) {
+@@ -77,6 +137,8 @@ static void* requestHandlerThread(void* param) {
+         context->inputBufferSize = 0;
+     }
+ 
++    gk3hdReportRequests(profile,true);free(profile);
++    (*context->jmethods.env)->CallVoidMethod(context->jmethods.env, context->jmethods.obj, context->jmethods.retirePublication);
+     (*context->jmethods.jvm)->DetachCurrentThread(context->jmethods.jvm);
+     vt_free(&context->memoryPool);
+     return NULL;
+@@ -189,4 +251,4 @@ bool handleExtraDataRequest(VkContext* context, uint16_t requestId, int requestL
+     ArrayList_add(&context->extraDataRequests, extraDataRequest);
+     pthread_mutex_unlock(&context->extraDataRequestsMutex);
+     return true;
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/cpp/vortekrenderer/src/xwindow_swapchain.c b/app/src/main/cpp/vortekrenderer/src/xwindow_swapchain.c
+index d94196a..04f1fcb 100644
+--- a/app/src/main/cpp/vortekrenderer/src/xwindow_swapchain.c
++++ b/app/src/main/cpp/vortekrenderer/src/xwindow_swapchain.c
+@@ -1,5 +1,6 @@
+ #include "xwindow_swapchain.h"
+ #include "vulkan_helper.h"
++#include "HardwareBufferFormat.h"
+ 
+ void getWindowExtent(JMethods* jmethods, int windowId, VkExtent2D* extent) {
+     extent->width = (*jmethods->env)->CallIntMethod(jmethods->env, jmethods->obj, jmethods->getWindowWidth, windowId);
+@@ -11,11 +12,8 @@ static AHardwareBuffer* getWindowHardwareBuffer(JMethods* jmethods, int windowId
+     return (AHardwareBuffer*)hardwareBufferPtr;
+ }
+ 
+-static VkResult createImageMemory(VkDevice device, VkImage image, AHardwareBuffer* hardwareBuffer, VkDeviceMemory* pMemory) {
+-    VkAndroidHardwareBufferPropertiesANDROID ahbProperties = {0};
+-    ahbProperties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+-    vulkanWrapper.vkGetAndroidHardwareBufferPropertiesANDROID(device, hardwareBuffer, &ahbProperties);
+-
++static VkResult createImageMemory(VkDevice device, VkImage image, AHardwareBuffer* hardwareBuffer,
++        const VkAndroidHardwareBufferPropertiesANDROID* ahbProperties, VkDeviceMemory* pMemory) {
+     VkImportAndroidHardwareBufferInfoANDROID memoryImportInfo = {0};
+     memoryImportInfo.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+     memoryImportInfo.buffer = hardwareBuffer;
+@@ -29,15 +27,18 @@ static VkResult createImageMemory(VkDevice device, VkImage image, AHardwareBuffe
+     VkMemoryAllocateInfo memoryInfo = {0};
+     memoryInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+     memoryInfo.pNext = &memoryDedicatedInfo;
+-    memoryInfo.allocationSize = ahbProperties.allocationSize;
+-    memoryInfo.memoryTypeIndex = getMemoryTypeIndex(ahbProperties.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++    memoryInfo.allocationSize = ahbProperties->allocationSize;
++    memoryInfo.memoryTypeIndex = getMemoryTypeIndex(ahbProperties->memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+ 
+     VkDeviceMemory memory;
+     VkResult result = vulkanWrapper.vkAllocateMemory(device, &memoryInfo, NULL, &memory);
+     if (result != VK_SUCCESS) return result;
+ 
+     result = vulkanWrapper.vkBindImageMemory(device, image, memory, 0);
+-    if (result != VK_SUCCESS) return result;
++    if (result != VK_SUCCESS) {
++        vulkanWrapper.vkFreeMemory(device, memory, NULL);
++        return result;
++    }
+ 
+     *pMemory = memory;
+     return VK_SUCCESS;
+@@ -46,6 +47,7 @@ static VkResult createImageMemory(VkDevice device, VkImage image, AHardwareBuffe
+ static VkResult createImage(VkDevice device, XWindowSwapchain* swapchain, XWindowSwapchain_Image* swapchainImage) {
+     jboolean useHALPixelFormatBGRA8888 = swapchain->imageFormat == VK_FORMAT_B8G8R8A8_UNORM || swapchain->imageFormat == VK_FORMAT_B8G8R8A8_SRGB;
+     AHardwareBuffer* hardwareBuffer = getWindowHardwareBuffer(swapchain->jmethods, swapchain->windowId, useHALPixelFormatBGRA8888);
++    if (!hardwareBuffer) return VK_ERROR_SURFACE_LOST_KHR;
+ 
+     AHardwareBuffer_Desc ahbDesc = {0};
+     AHardwareBuffer_describe(hardwareBuffer, &ahbDesc);
+@@ -80,12 +82,25 @@ static VkResult createImage(VkDevice device, XWindowSwapchain* swapchain, XWindo
+     VkDeviceMemory memory;
+     VkResult result;
+ 
+-    result = vulkanWrapper.vkCreateImage(device, &imageInfo, NULL, &image);
++    VkAndroidHardwareBufferFormatPropertiesANDROID formatProperties = {0};
++    formatProperties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
++    VkAndroidHardwareBufferPropertiesANDROID ahbProperties = {0};
++    ahbProperties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
++    ahbProperties.pNext = &formatProperties;
++    result = vulkanWrapper.vkGetAndroidHardwareBufferPropertiesANDROID(device, hardwareBuffer, &ahbProperties);
++    if (result != VK_SUCCESS) return result;
++    result = gk3hdHardwareBufferFormat(swapchain->imageFormat, formatProperties.format, &imageInfo);
+     if (result != VK_SUCCESS) return result;
+ 
+-    result = createImageMemory(device, image, hardwareBuffer, &memory);
++    result = vulkanWrapper.vkCreateImage(device, &imageInfo, NULL, &image);
+     if (result != VK_SUCCESS) return result;
+ 
++    result = createImageMemory(device, image, hardwareBuffer, &ahbProperties, &memory);
++    if (result != VK_SUCCESS) {
++        vulkanWrapper.vkDestroyImage(device, image, NULL);
++        return result;
++    }
++
+     swapchainImage->image = image;
+     swapchainImage->memory = memory;
+     return VK_SUCCESS;
+@@ -147,6 +162,10 @@ void XWindowSwapchain_destroy(VkDevice device, XWindowSwapchain* swapchain) {
+ }
+ 
+ VkResult XWindowSwapchain_acquireNextImage(XWindowSwapchain* swapchain, uint64_t timeout, VkSemaphore signalSemaphore, VkFence fence, uint32_t* imageIndex) {
++    if (swapchain->publicationFailed) {
++        println("GK3HD native Vulkan publication rejected: VK_ERROR_DEVICE_LOST");
++        return VK_ERROR_DEVICE_LOST;
++    }
+     if (signalSemaphore || fence) {
+         VkSubmitInfo submitInfo = {0};
+         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+@@ -171,7 +190,32 @@ VkResult XWindowSwapchain_acquireNextImage(XWindowSwapchain* swapchain, uint64_t
+     return result;
+ }
+ 
+-void XWindowSwapchain_presentImage(XWindowSwapchain* swapchain) {
++static bool checkPublicationException(XWindowSwapchain* swapchain) {
++    JNIEnv* env = swapchain->jmethods->env;
++    if (!(*env)->ExceptionCheck(env)) return false;
++    // Report the original failure while JNI still permits exception handling.
++    // Do not call another Java method with a pending exception or keep rendering.
++    (*env)->ExceptionDescribe(env);
++    (*env)->ExceptionClear(env);
++    swapchain->publicationFailed = true;
++    println("GK3HD native Vulkan publication callback failed; retiring this swapchain");
++    return true;
++}
++
++void XWindowSwapchain_presentImage(XWindowSwapchain* swapchain, VkQueue queue) {
++    if (swapchain->publicationFailed) return;
++    jboolean ordered = (*swapchain->jmethods->env)->CallBooleanMethod(swapchain->jmethods->env,
++            swapchain->jmethods->obj, swapchain->jmethods->orderedPublication, swapchain->windowId);
++    if (checkPublicationException(swapchain)) return;
++    if (ordered) {
++        VkResult status = vulkanWrapper.vkQueueWaitIdle(queue);
++        if (status != VK_SUCCESS) {
++            println("GK3HD native Vulkan publication queue failed: %d", status);
++            swapchain->publicationFailed = true;
++            return;
++        }
++    }
+     (*swapchain->jmethods->env)->CallVoidMethod(swapchain->jmethods->env, swapchain->jmethods->obj,
+                                                 swapchain->jmethods->updateWindowContent, swapchain->windowId);
+-}
+\ No newline at end of file
++    checkPublicationException(swapchain);
++}
+diff --git a/app/src/main/cpp/winlator/include/ring_buffer.h b/app/src/main/cpp/winlator/include/ring_buffer.h
+index d00e32c..562cd0b 100644
+--- a/app/src/main/cpp/winlator/include/ring_buffer.h
++++ b/app/src/main/cpp/winlator/include/ring_buffer.h
+@@ -100,4 +100,4 @@ extern bool RingBuffer_waitForWrite(RingBuffer* ring, uint32_t size);
+     } \
+     while (0)
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/app/src/main/cpp/winlator/src/ring_buffer.c b/app/src/main/cpp/winlator/src/ring_buffer.c
+index 97c9155..bf84d52 100644
+--- a/app/src/main/cpp/winlator/src/ring_buffer.c
++++ b/app/src/main/cpp/winlator/src/ring_buffer.c
+@@ -167,4 +167,4 @@ bool RingBuffer_waitForWrite(RingBuffer* ring, uint32_t size) {
+     }
+     while (1);
+     return true;
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/winlator/XServerDisplayActivity.java b/app/src/main/java/com/winlator/XServerDisplayActivity.java
+index 667f1b3..ff9866c 100644
+--- a/app/src/main/java/com/winlator/XServerDisplayActivity.java
++++ b/app/src/main/java/com/winlator/XServerDisplayActivity.java
+@@ -1,5 +1,7 @@
+ package com.winlator;
+
++import org.gk3hd.standalone.XrPresenter;
++
+ import android.app.Activity;
+ import android.app.PictureInPictureParams;
+ import android.content.ClipData;
+@@ -137,10 +139,39 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+     private Win32AppWorkarounds win32AppWorkarounds;
+     private String screenEffectProfile;
+
++    private ManagedPlayerAccess.Lease displayAccess;
++    private boolean displayStartupPending;
++    private volatile boolean displayDestroyed;
++
++    protected boolean prepareDisplayStartup() {return true;}
++    protected boolean displayStartupFailed(XrPresenter.InitializationFailure error) {return false;}
++
++    private void handlePresenterStartupFailure(XrPresenter.InitializationFailure error) {
++        if (!displayStartupFailed(error)) throw error;
++        finish();
++    }
++
++    protected void displayStarted() {}
++    protected void displayRetired() {}
++    protected void guestExited(int status) {}
++
+     @Override
+     public void onCreate(Bundle savedInstanceState) {
+         AppUtils.setActivityTheme(this);
+         super.onCreate(savedInstanceState);
++        displayAccess = ManagedPlayerAccess.tryPlay();
++        if (displayAccess == null) {
++            android.widget.Toast.makeText(this, "Close the active game or wait for setup to finish.",
++                    android.widget.Toast.LENGTH_LONG).show();
++            finish();
++            return;
++        }
++        if (!prepareDisplayStartup()) {
++            displayAccess.close();
++            displayAccess = null;
++            finish();
++            return;
++        }
+         AppUtils.hideSystemUI(this);
+         AppUtils.keepScreenOn(this);
+         setContentView(R.layout.xserver_display_activity);
+@@ -227,10 +257,19 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
++            if (!BuildConfig.DEBUG) audioDriver = AudioDrivers.ALSA;
++            if (!BuildConfig.DEBUG && getIntent().getBooleanExtra("gk3hd_vr", false)) {
++                // The game uses its own DirectDraw renderer and Wine's built-in DLLs.
++                dxwrapper = DXWrappers.WINED3D;
++                dxwrapperConfig = "";
++            }
++
+             this.graphicsDriver = GraphicsDrivers.parseIdentifiers(graphicsDriver);
+             this.graphicsDriverConfig = GraphicsDrivers.parseConfigs(graphicsDriver, graphicsDriverConfig);
+             this.dxwrapper = DXWrappers.parseIdentifier(dxwrapper);
+             this.dxwrapperConfig = DXWrappers.parseConfigs(dxwrapper, dxwrapperConfig);
+         }
+
+-        preloaderDialog.show(R.string.starting_up);
++        // A regular Android modal can take the immersive activity out of view.
++        if (!getIntent().getBooleanExtra("gk3hd_vr", false))
++            preloaderDialog.show(R.string.starting_up);
+
+         inputControlsManager = new InputControlsManager(this);
+         xServer = new XServer(this, screenInfo);
+@@ -265,16 +297,36 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+             }
+         });
+
+-        setupUI();
++        try {
++            setupUI();
++        } catch (XrPresenter.InitializationFailure error) {
++            handlePresenterStartupFailure(error);
++            return;
++        }
+
+-        Executors.newSingleThreadExecutor().execute(() -> {
+-            if (!isGenerateWineprefix()) {
+-                setupWineSystemFiles();
+-                extractGraphicsDriverFiles();
+-                changeWineAudioDriver();
++        displayStartupPending = true;
++        java.util.concurrent.ExecutorService startup = Executors.newSingleThreadExecutor();
++        startup.execute(() -> {
++            try {
++                if (!isGenerateWineprefix() && !displayDestroyed) {
++                    setupWineSystemFiles();
++                    extractGraphicsDriverFiles();
++                    changeWineAudioDriver();
++                }
++                if (!displayDestroyed) setupXEnvironment();
++            } catch (XrPresenter.InitializationFailure error) {
++                runOnUiThread(() -> {
++                    if (!displayDestroyed) handlePresenterStartupFailure(error);
++                });
++            } finally {
++                runOnUiThread(() -> {
++                    displayStartupPending = false;
++                    if (displayDestroyed) retireDisplay();
++                });
+             }
+-            setupXEnvironment();
+         });
++        startup.shutdown();
++        displayStarted();
+     }
+
+     @Override
+@@ -293,9 +345,12 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+         }
+     }
+
++    private boolean xrActivityResumed;
++
+     @Override
+     public void onWindowFocusChanged(boolean hasFocus) {
+         super.onWindowFocusChanged(hasFocus);
++        if (xServerView != null) xServerView.xrInputFocused(hasFocus && xrActivityResumed);
+
+         if (hasFocus) {
+             if (capturePointerOnExternalMouse) {
+@@ -313,10 +368,34 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+         }
+     }
+
++    // Match the selected runtime's Activity contract, without changing other
++    // backends. A visible system overlay may pause a Crystal Activity while
++    // the vendor compositor still needs its owning render loop.
++    @Override
++    public void onStart() {
++        super.onStart();
++        if (environment != null && xServerView.rendersWhileVisible()) {
++            xServerView.onResume();
++            environment.onResume();
++        }
++    }
++
++    @Override
++    public void onStop() {
++        if (environment != null && xServerView.rendersWhileVisible()) {
++            environment.onPause();
++            xServerView.onPause();
++        }
++        super.onStop();
++    }
++
+     @Override
+     public void onResume() {
+         super.onResume();
+-        if (environment != null) {
++        if (displayAccess == null) return;
++        xrActivityResumed = true;
++        if (xServerView != null) xServerView.xrInputFocused(hasWindowFocus());
++        if (environment != null && !xServerView.rendersWhileVisible()) {
+             xServerView.onResume();
+             environment.onResume();
+         }
+@@ -325,9 +404,11 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+
+     @Override
+     public void onPause() {
+-        ForegroundService.onPauseSession(this);
++        xrActivityResumed = false;
++        if (xServerView != null) xServerView.xrInputFocused(false);
++        if (displayAccess != null) ForegroundService.onPauseSession(this);
+         super.onPause();
+-        if (environment != null && !isInPictureInPictureMode()) {
++        if (environment != null && !isInPictureInPictureMode() && !xServerView.rendersWhileVisible()) {
+             environment.onPause();
+             xServerView.onPause();
+         }
+@@ -336,15 +417,25 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+     @Override
+     public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
+         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+-        ForegroundService.setPipMode(isInPictureInPictureMode);
++        if (displayAccess != null) ForegroundService.setPipMode(isInPictureInPictureMode);
+     }
+
+     @Override
+     protected void onDestroy() {
++        displayDestroyed = true;
++        if (!displayStartupPending) retireDisplay();
++        super.onDestroy();
++    }
++
++    private void retireDisplay() {
++        if (displayAccess == null) return;
+         winHandler.stop();
+         if (environment != null) environment.stopEnvironmentComponents();
++        if (xServerView != null) {xServerView.destroyPresenter();xServerView.close();}
+         ForegroundService.stopSession(this);
+-        super.onDestroy();
++        displayRetired();
++        displayAccess.close();
++        displayAccess = null;
+     }
+
+     @Override
+@@ -428,6 +519,12 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+     }
+
+     private void exit() {
++        // The standalone entry is a game, not a return-to-desktop shortcut.
++        // Restarting the launcher here would immediately start it again.
++        if (getIntent().getBooleanExtra("gk3hd_vr", false)) {
++            runOnUiThread(this::finish);
++            return;
++        }
+         winHandler.stop();
+         if (environment != null) environment.stopEnvironmentComponents();
+
+@@ -504,6 +601,7 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+         envVars.put("WINEDEBUG", enableWineDebug && !wineDebugChannels.isEmpty() ? "+"+wineDebugChannels.replace(",", ",+") : "-all");
+
+         FileUtils.clear(rootFS.getTmpDir());
++        if (xServerView != null) xServerView.prepareGuestXR();
+
+         GuestProgramLauncherComponent guestProgramLauncherComponent = new GuestProgramLauncherComponent();
+
+@@ -554,7 +653,30 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+         if (graphicsDriver[1].equals(GraphicsDrivers.VIRGL)) {
+             environment.addComponent(new VirGLRendererComponent(xServer, UnixSocketConfig.create(rootPath, UnixSocketConfig.VIRGL_SERVER_PATH)));
+         }
++        if (getIntent().getBooleanExtra("gk3hd_native_vulkan", false)) {
++            try {org.gk3hd.standalone.NativeVulkan.prepare(this,environment,xServer,envVars);}
++            catch(Exception error) {throw new IllegalStateException("Cannot prepare the native Vulkan backend",error);}
++        }
++        else if (BuildConfig.DEBUG && getIntent().getBooleanExtra("gk3hd_test_native_vulkan", false)) {
++            try {
++                Class.forName("org.gk3hd.standalone.NativeVulkanControl")
++                    .getMethod("prepare", android.app.Activity.class, XEnvironment.class, XServer.class, EnvVars.class)
++                    .invoke(null, this, environment, xServer, envVars);
++            } catch (Exception error) {
++                throw new IllegalStateException("Cannot prepare the explicit native-driver control", error);
++            }
++        }
+
+         guestProgramLauncherComponent.setEnvVars(envVars);
+-        guestProgramLauncherComponent.setTerminationCallback((status) -> exit());
++        guestProgramLauncherComponent.setTerminationCallback(status -> {
++            if (!getIntent().getBooleanExtra("gk3hd_vr", false)) {
++                exit();
++                return;
++            }
++            runOnUiThread(() -> {
++                if (displayDestroyed || isFinishing()) return;
++                guestExited(status);
++                finish();
++            });
++        });
+         environment.addComponent(guestProgramLauncherComponent);
+@@ -567,6 +678,7 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+             envVars.putAll(overrideEnvVars);
+             overrideEnvVars = null;
+         }
++        if (displayDestroyed) return;
+         environment.startEnvironmentComponents();
+
+         winHandler.start();
+@@ -736,9 +848,15 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+         String currentGraphicsDriver = preferences.getString("current_graphics_driver", "");
+         boolean changed = !cacheId.equals(currentGraphicsDriver);
+         File rootDir = rootFS.getRootDir();
++        boolean managedTurnip = getIntent().getBooleanExtra("gk3hd_vr", false) &&
++                graphicsDriver[0].equals(GraphicsDrivers.TURNIP);
++        if (managedTurnip) {
++            try { org.gk3hd.standalone.TurnipAssets.prepare(this, rootDir); }
++            catch (Exception error) { throw new IllegalStateException("Private graphics setup did not complete", error); }
++        }
+         File libDir = rootFS.getLibDir();
+
+-        if (changed) {
++        if (changed && !managedTurnip) {
+             FileUtils.delete(new File(libDir, "libvulkan_freedreno.so"));
+             FileUtils.delete(new File(libDir, "libvulkan_vortek.so"));
+             FileUtils.delete(new File(libDir, "libGL.so.1.7.0"));
+@@ -747,13 +865,13 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+             FileUtils.delete(vulkanICDDir);
+             vulkanICDDir.mkdirs();
+
+-            preferences.edit().putString("current_graphics_driver", cacheId).apply();
++
+         }
+
+         if (graphicsDriver[0].equals(GraphicsDrivers.TURNIP)) {
+             TurnipConfigDialog.setEnvVars(this, graphicsDriverConfig[0], envVars);
+
+-            if (changed) {
++            if (changed && !managedTurnip) {
+                 String version = graphicsDriverConfig[0].get("version", DefaultVersion.TURNIP);
+                 GeneralComponents.extractFile(GeneralComponents.Type.TURNIP, this, version, DefaultVersion.TURNIP);
+             }
+@@ -784,6 +902,7 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+                 if (changed || MainActivity.DEBUG_MODE) TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "graphics_driver/gladio-"+DefaultVersion.GLADIO+".tzst", rootDir);
+                 break;
+         }
++        if (changed) preferences.edit().putString("current_graphics_driver", cacheId).apply();
+     }
+
+     private void showTouchpadHelpDialog() {
+@@ -796,11 +915,13 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+
+     @Override
+     public boolean dispatchGenericMotionEvent(MotionEvent event) {
++        if (touchpadView == null) return super.dispatchGenericMotionEvent(event);
+         return !winHandler.onGenericMotionEvent(event) && !touchpadView.onExternalMouseEvent(event) && super.dispatchGenericMotionEvent(event);
+     }
+
+     @Override
+     public boolean dispatchKeyEvent(KeyEvent event) {
++        if (inputControlsView == null) return super.dispatchKeyEvent(event);
+         return (!inputControlsView.onKeyEvent(event) && !winHandler.onKeyEvent(event) && xServer.keyboard.onKeyEvent(event)) ||
+                (!ExternalController.isGameController(event.getDevice()) && super.dispatchKeyEvent(event));
+     }
+@@ -1088,5 +1227,8 @@ public class XServerDisplayActivity extends AppCompatActivity implements Navigat
+         File rootDir = rootFS.getRootDir();
+         FileUtils.delete(new File(rootDir, "/opt/apps"));
+-        TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "rootfs_patches.tzst", rootDir);
++        TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "rootfs_patches.tzst", rootDir,
++                (file, size) -> org.gk3hd.standalone.RuntimeAssets.filterOverlay(rootDir, file));
+-        TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "pulseaudio.tzst", new File(getFilesDir(), "pulseaudio"));
++        if (BuildConfig.DEBUG) {
++            TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "pulseaudio.tzst", new File(getFilesDir(), "pulseaudio"));
++        }
+         WineUtils.applySystemTweaks(this, wineInfo);
+diff --git a/app/src/main/java/com/winlator/container/Container.java b/app/src/main/java/com/winlator/container/Container.java
+index 2086786..4474772 100644
+--- a/app/src/main/java/com/winlator/container/Container.java
++++ b/app/src/main/java/com/winlator/container/Container.java
+@@ -306,9 +306,11 @@ public class Container {
+             data.put("extraData", extraData);
+ 
+             if (!WineInfo.isMainWineVersion(wineVersion)) data.put("wineVersion", wineVersion);
+-            FileUtils.writeString(getConfigFile(), data.toString());
++            org.gk3hd.standalone.ContainerSettings.write(getConfigFile(), data);
++        }
++        catch (JSONException | java.io.IOException error) {
++            throw new IllegalStateException("Cannot save private game settings", error);
+         }
+-        catch (JSONException e) {}
+     }
+ 
+     public void loadData(JSONObject data) throws JSONException {
+diff --git a/app/src/main/java/com/winlator/container/ContainerManager.java b/app/src/main/java/com/winlator/container/ContainerManager.java
+--- a/app/src/main/java/com/winlator/container/ContainerManager.java
++++ b/app/src/main/java/com/winlator/container/ContainerManager.java
+@@ -52,7 +52,7 @@
+                         if (file.getName().startsWith(RootFS.USER+"-")) {
+                             Container container = new Container(Integer.parseInt(file.getName().replace(RootFS.USER+"-", "")));
+                             container.setRootDir(new File(homeDir, RootFS.USER+"-"+container.id));
+-                            JSONObject data = new JSONObject(FileUtils.readString(container.getConfigFile()));
++                            JSONObject data = org.gk3hd.standalone.ContainerSettings.read(container.getConfigFile());
+                             container.loadData(data);
+                             containers.add(container);
+                             maxContainerId = Math.max(maxContainerId, container.id);
+@@ -61,7 +61,9 @@
+                 }
+             }
+         }
+-        catch (JSONException e) {}
++        catch (JSONException | java.io.IOException error) {
++            android.util.Log.e("GK3HDSetup", "Cannot read private game settings; existing files were preserved", error);
++        }
+     }
+ 
+     public void activateContainer(Container container) {
+@@ -95,7 +97,7 @@
+         });
+     }
+ 
+-    private Container createContainer(JSONObject data) {
++    public Container createContainer(JSONObject data) {
+         try {
+             int id = maxContainerId + 1;
+             data.put("id", id);
+diff --git a/app/src/main/java/com/winlator/core/AppUtils.java b/app/src/main/java/com/winlator/core/AppUtils.java
+index cac686e..644eff1 100644
+--- a/app/src/main/java/com/winlator/core/AppUtils.java
++++ b/app/src/main/java/com/winlator/core/AppUtils.java
+@@ -35,6 +35,7 @@ import androidx.preference.PreferenceManager;
+ 
+ import com.google.android.material.tabs.TabLayout;
+ import com.winlator.R;
++import com.winlator.BuildConfig;
+ import com.winlator.SettingsFragment;
+ 
+ import java.lang.ref.WeakReference;
+@@ -44,7 +45,7 @@ import java.util.TimerTask;
+ 
+ public abstract class AppUtils {
+     public static final String DIRECTORY_DOWNLOADS = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getPath();
+-    public static final String INTERNAL_STORAGE = "/data/data/com.winlator/storage";
++    public static final String INTERNAL_STORAGE = "/data/data/"+BuildConfig.APPLICATION_ID+"/storage";
+     private static WeakReference<Toast> globalToastReference = null;
+ 
+     public static class RestartApplicationOptions {
+diff --git a/app/src/main/java/com/winlator/core/FileUtils.java b/app/src/main/java/com/winlator/core/FileUtils.java
+index b503fc0..8700402 100644
+--- a/app/src/main/java/com/winlator/core/FileUtils.java
++++ b/app/src/main/java/com/winlator/core/FileUtils.java
+@@ -210,5 +210,5 @@ public abstract class FileUtils {
+             File parent = dstFile.getParentFile();
+             if (!parent.isDirectory()) parent.mkdirs();
+-            try (InputStream inStream = context.getAssets().open(assetFile);
++            try (InputStream inStream = org.gk3hd.standalone.RuntimeAssets.open(context, assetFile);
+                  BufferedOutputStream outStream = new BufferedOutputStream(new FileOutputStream(dstFile), StreamUtils.BUFFER_SIZE)) {
+                 StreamUtils.copy(inStream, outStream);
+@@ -410,7 +410,7 @@ public abstract class FileUtils {
+         Intent intent;
+         if (path.startsWith("file://")) {
+             File file = new File(Uri.decode(path.replace("file://", "")));
+-            intent = new Intent(Intent.ACTION_VIEW, FileProvider.getUriForFile(activity, "com.winlator.FileProvider", file));
++            intent = new Intent(Intent.ACTION_VIEW, FileProvider.getUriForFile(activity, activity.getPackageName()+".FileProvider", file));
+             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+         }
+         else intent = new Intent(Intent.ACTION_VIEW, Uri.parse(path));
+diff --git a/app/src/main/java/com/winlator/core/ProcessHelper.java b/app/src/main/java/com/winlator/core/ProcessHelper.java
+index 4651b83..b533ca3 100644
+--- a/app/src/main/java/com/winlator/core/ProcessHelper.java
++++ b/app/src/main/java/com/winlator/core/ProcessHelper.java
+@@ -89,7 +89,7 @@ public abstract class ProcessHelper {
+ 
+             if (terminationCallback != null) createWaitForThread(process, terminationCallback);
+         }
+-        catch (Exception e) {}
++        catch (Exception e) {android.util.Log.e("GK3HDGuest", "Cannot start the private guest process", e);}
+         return pid;
+     }
+ 
+diff --git a/app/src/main/java/com/winlator/renderer/Texture.java b/app/src/main/java/com/winlator/renderer/Texture.java
+index fb0252f..395ebb6 100644
+--- a/app/src/main/java/com/winlator/renderer/Texture.java
++++ b/app/src/main/java/com/winlator/renderer/Texture.java
+@@ -17,6 +17,9 @@ public class Texture {
+     protected int format = GLES11Ext.GL_BGRA;
+     protected boolean needsUpdate = true;
+     private boolean flipY = false;
++    private short readCopyWidth,readCopyHeight;
++    private final org.gk3hd.standalone.GpuHandoff xrHandoff=new org.gk3hd.standalone.GpuHandoff();
++    private final java.util.concurrent.atomic.AtomicLong contentGeneration=new java.util.concurrent.atomic.AtomicLong();
+     protected Drawable owner;
+ 
+     public Texture(Drawable owner) {
+@@ -37,6 +40,7 @@ public class Texture {
+     }
+ 
+     public void allocateTexture(short width, short height, ByteBuffer data) {
++        readCopyWidth=readCopyHeight=0;
+         generateTextureId();
+ 
+         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+@@ -112,9 +116,14 @@ public class Texture {
+     }
+ 
+     public void setNeedsUpdate(boolean needsUpdate) {
++        if (needsUpdate) contentGeneration.incrementAndGet();
+         this.needsUpdate = needsUpdate;
+     }
+ 
++    // GPU-backed windows do not upload CPU pixels, so needsUpdate can remain
++    // set indefinitely. Track publications independently of that upload flag.
++    public long getContentGeneration() {return contentGeneration.get();}
++
+     public void updateFromDrawable() {
+         if (owner == null || owner.getData() == null) return;
+ 
+@@ -139,6 +148,7 @@ public class Texture {
+     }
+ 
+     public void copyFromSource(Texture source) {
++        xrHandoff.beforeWrite();
+         if (!source.isAllocated()) source.allocateTexture(source.owner.width, source.owner.height, null);
+         if (!this.isAllocated()) this.allocateTexture(source.owner.width, source.owner.height, null);
+         GLES32.glCopyImageSubData(
+@@ -147,17 +157,35 @@ public class Texture {
+             source.owner.width, source.owner.height, 1
+         );
+         GLES20.glFlush();
++        xrHandoff.afterWrite();
++        contentGeneration.incrementAndGet();
++    }
++
++    // CPU upload and eye read share a context, but must still wait for any
++    // preceding GPU producer when a drawable changes its backing mode.
++    public boolean beginXrRead() {
++        return xrHandoff.beginRead(owner != null && owner.getData() != null);
+     }
++    public void endXrRead() {xrHandoff.afterRead();}
+ 
+     public void copyFromReadBuffer(short width, short height) {
++        xrHandoff.beforeWrite();
+         if (!isAllocated()) allocateTexture(width, height, null);
+         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId);
+-        GLES20.glCopyTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 0, 0, width, height, 0);
++        if(readCopyWidth!=width||readCopyHeight!=height) {
++            GLES20.glCopyTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 0, 0, width, height, 0);
++            readCopyWidth=width;readCopyHeight=height;
++        } else GLES20.glCopyTexSubImage2D(GLES20.GL_TEXTURE_2D,0,0,0,0,0,width,height);
+         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+         GLES20.glFlush();
++        xrHandoff.afterWrite();
++        contentGeneration.incrementAndGet();
+     }
+ 
+     public void destroy() {
++        xrHandoff.beforeWrite();
++        xrHandoff.close();
++        readCopyWidth=readCopyHeight=0;
+         if (textureId > 0) {
+             int[] textureIds = new int[]{textureId};
+             GLES20.glDeleteTextures(textureIds.length, textureIds, 0);
+diff --git a/app/src/main/java/com/winlator/widget/XServerView.java b/app/src/main/java/com/winlator/widget/XServerView.java
+index b651bc1..14fdf99 100644
+--- a/app/src/main/java/com/winlator/widget/XServerView.java
++++ b/app/src/main/java/com/winlator/widget/XServerView.java
+@@ -8,10 +8,16 @@ import android.widget.FrameLayout;
+
+ import com.winlator.renderer.GLRenderer;
+ import com.winlator.xserver.XServer;
++import android.app.Activity;
++import com.winlator.renderer.WinlatorStereoSource;
++import org.gk3hd.standalone.NativeSurfaceView;
++import org.gk3hd.standalone.PimaxPresenter;
++import org.gk3hd.standalone.XrPresenter;
+
+ @SuppressLint("ViewConstructor")
+-public class XServerView extends GLSurfaceView {
++public class XServerView extends NativeSurfaceView {
+     private final GLRenderer renderer;
++    private XrPresenter presenter;
+
+     public XServerView(Context context, XServer xServer) {
+         super(context);
+@@ -19,12 +25,49 @@ public class XServerView extends GLSurfaceView {
+         setEGLContextClientVersion(3);
+         setEGLConfigChooser(8, 8, 8, 8, 0, 0);
+         setPreserveEGLContextOnPause(true);
+-        renderer = new GLRenderer(this, xServer);
+-        setRenderer(renderer);
+-        setRenderMode(RENDERMODE_WHEN_DIRTY);
++        boolean vr = context instanceof Activity && ((Activity)context).getIntent().getBooleanExtra("gk3hd_vr", false);
++        if (vr) {
++            try {
++                renderer = new WinlatorStereoSource(this, xServer);
++                // The optional off-head fixture lives only in the test source set.
++                // It does not initialize or submit to any headset compositor.
++                if(context.getClass().getName().equals("com.winlator.OffHeadGameActivity"))
++                    presenter=(XrPresenter)Class.forName("org.gk3hd.standalone.OffHeadGamePresenter")
++                        .getConstructor(Activity.class,XrPresenter.Source.class)
++                        .newInstance((Activity)context,(XrPresenter.Source)renderer);
++                else if(((Activity)context).getIntent().getStringExtra("gk3hd_xr_presenter")!=null) {
++                    String kind=((Activity)context).getIntent().getStringExtra("gk3hd_xr_presenter");
++                    if(!kind.equals("openxr"))throw new IllegalArgumentException("Unknown native presenter: "+kind);
++                    presenter=new org.gk3hd.standalone.OpenXrPresenter((Activity)context,this,(XrPresenter.Source)renderer);
++                } else presenter = new PimaxPresenter((Activity)context, this, (XrPresenter.Source)renderer);
++            }
++            catch (Exception | LinkageError error) { throw new XrPresenter.InitializationFailure(error); }
++            setRenderer(presenter);
++        } else {renderer = new GLRenderer(this, xServer);setRenderer(renderer);}
++        setRenderMode(vr ? RENDERMODE_CONTINUOUSLY : RENDERMODE_WHEN_DIRTY);
+     }
+
+     public GLRenderer getRenderer() {
+         return renderer;
+     }
++
++    @Override public void onPause() {if(presenter!=null) presenter.pause();super.onPause();}
++    @Override public void onResume() {if(presenter!=null) presenter.resume();super.onResume();}
++    public void destroyPresenter() {if(presenter!=null) presenter.destroy();}
++    @Override protected void onRenderFailure(Throwable failure) {
++        try {if(presenter!=null) presenter.renderFailed(failure);}
++        finally {if(getContext() instanceof Activity) {
++            Activity owner=(Activity)getContext();owner.runOnUiThread(owner::finish);
++        }}
++    }
++    public void prepareGuestXR() {
++        if (presenter == null) return;
++        try {
++            presenter.prepareGuest();
++        } catch (RuntimeException | LinkageError error) {
++            throw new XrPresenter.InitializationFailure(error);
++        }
++    }
++    public boolean rendersWhileVisible() {return presenter!=null && presenter.rendersWhileVisible();}
++    public void xrInputFocused(boolean focused) {if(presenter!=null) presenter.inputFocused(focused);}
+ }
+diff --git a/app/src/main/java/com/winlator/xenvironment/components/GuestProgramLauncherComponent.java b/app/src/main/java/com/winlator/xenvironment/components/GuestProgramLauncherComponent.java
+--- a/app/src/main/java/com/winlator/xenvironment/components/GuestProgramLauncherComponent.java
++++ b/app/src/main/java/com/winlator/xenvironment/components/GuestProgramLauncherComponent.java
+@@ -27,6 +27,7 @@
+     private String guestExecutable;
+     private static int pid = -1;
+     private EnvVars envVars;
++    private String standaloneSession;
+     private String box64Preset = Box64Preset.CONSERVATIVE;
+     private Callback<Integer> terminationCallback;
+     private static final Object lock = new Object();
+@@ -37,13 +38,17 @@
+             stop();
+             extractBox64File();
+             copyDefaultBox64RCFile();
+             pid = execGuestProgram();
++            if (pid == -1 && standaloneSession != null && terminationCallback != null)
++                terminationCallback.call(-1);
+         }
+     }
+
+     @Override
+     public void stop() {
+         synchronized (lock) {
++            org.gk3hd.standalone.OwnedGuestShutdown.stop(standaloneSession);
++            standaloneSession = null;
+             if (pid != -1) {
+                 Process.killProcess(pid);
+                 pid = -1;
+@@ -101,16 +106,31 @@
+         envVars.put("ANDROID_SYSVSHM_SERVER", rootDir+UnixSocketConfig.SYSVSHM_SERVER_PATH);
+ 
+         if (this.envVars != null) envVars.putAll(this.envVars);
++        // The Activity clears EnvVars after launch; keep only this ownership token.
++        standaloneSession = "1".equals(envVars.get("GK3HD_STANDALONE_LAUNCH")) ?
++            envVars.get("GK3HD_FRAME_SESSION") : null;
+ 
+         File shmDir = new File(rootDir, "/tmp/shm");
+         if (!shmDir.isDirectory()) shmDir.mkdirs();
+ 
++        try {
++            File runtimeAlias=org.gk3hd.standalone.PrivateRuntimePaths.prepare(environment.getContext(),rootDir);
++            envVars.put("TMPDIR",new File(runtimeAlias,"tmp").getPath());
++            if ("1".equals(envVars.get("GK3HD_STANDALONE_LAUNCH")) &&
++                    "1".equals(envVars.get("GK3HD_GPU_ALLOC_COMPAT")))
++                envVars.put("LD_PRELOAD",org.gk3hd.standalone.GpuAllocationCompat.preload(
++                    environment.getContext(),envVars.get("LD_PRELOAD")));
++        } catch(Exception error) {throw new IllegalStateException("Cannot prepare the private CPU translator",error);}
+         String command = rootDir+"/usr/local/bin/box64 "+guestExecutable;
+ 
++        String session = standaloneSession;
+         return ProcessHelper.exec(command, envVars, rootDir, (status) -> {
+             synchronized (lock) {
++                if (session != null && !session.equals(standaloneSession)) return;
+                 pid = -1;
+             }
++            if (session != null)
++                android.util.Log.i("GK3HDGuest", "Private guest bootstrap exited status="+status+" session="+session);
+             if (terminationCallback != null) terminationCallback.call(status);
+         });
+     }
+@@ -202,4 +218,4 @@
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/winlator/xenvironment/components/SysVSharedMemoryComponent.java b/app/src/main/java/com/winlator/xenvironment/components/SysVSharedMemoryComponent.java
+--- a/app/src/main/java/com/winlator/xenvironment/components/SysVSharedMemoryComponent.java
++++ b/app/src/main/java/com/winlator/xenvironment/components/SysVSharedMemoryComponent.java
+@@ -40,3 +40,6 @@
+-        sysVSharedMemory.deleteAll();
++        if (sysVSharedMemory != null) {
++            sysVSharedMemory.deleteAll();
++            sysVSharedMemory = null;
++        }
+     }
+ }
+diff --git a/app/src/main/java/com/winlator/xenvironment/components/VortekRendererComponent.java b/app/src/main/java/com/winlator/xenvironment/components/VortekRendererComponent.java
+index 8f9b7e5..487b44e 100644
+--- a/app/src/main/java/com/winlator/xenvironment/components/VortekRendererComponent.java
++++ b/app/src/main/java/com/winlator/xenvironment/components/VortekRendererComponent.java
+@@ -117,8 +117,14 @@ public class VortekRendererComponent extends EnvironmentComponent implements Con
+         return 0;
+     }
+ 
++    @Keep
++    private boolean requiresOrderedPublication(int windowId) {
++        return org.gk3hd.standalone.NativeVulkan.requires(xServer,windowId);
++    }
++
+     @Keep
+     private void updateWindowContent(int windowId) {
++        if(org.gk3hd.standalone.NativeVulkan.publish(xServer,windowId)) return;
+         Window window = xServer.windowManager.getWindow(windowId);
+         if (window != null) {
+             Drawable drawable = window.getContent();
+@@ -128,6 +134,16 @@ public class VortekRendererComponent extends EnvironmentComponent implements Con
+         }
+     }
+ 
++    @Keep
++    private void releasePublicationContext() {
++        org.gk3hd.standalone.NativeVulkan.releaseThread(xServer);
++    }
++
++    @Keep
++    private boolean profileNativeRequests() {
++        return org.gk3hd.standalone.NativeVulkan.profileRequests(xServer);
++    }
++
+     @Override
+     public void handleConnectionShutdown(ConnectedClient client) {
+         if (client.getTag() != null) {
+diff --git a/app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java b/app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java
+--- a/app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java
++++ b/app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java
+@@ -43,6 +43,20 @@
+     private SyncExtension syncExtension;
+     private long eglContextPtr;
+     private ScheduledExecutorService idleNotifyScheduler;
++    private boolean retirementReported;
++    private static boolean managedStereo(Window window) {
++        for(int depth=0;window!=null&&depth<16;depth++,window=window.getParent()) {
++            String name=window.getName();
++            if(name.isEmpty()) {
++                int atom=com.winlator.xserver.Atom.getId("_NET_WM_NAME");
++                com.winlator.xserver.Property title=atom>0?window.getProperty(atom):null;
++                if(title!=null&&title.data.capacity()<=256&&title.format==com.winlator.xserver.Property.Format.BYTE_ARRAY&&
++                    (com.winlator.xserver.Atom.getName(title.type).equals("UTF8_STRING")||com.winlator.xserver.Atom.getName(title.type).equals("STRING")))name=title.toString();
++            }
++            if(name.equals("GK3HD XR stereo")||name.equals("OpenXR Simulator (Mouse Look + WASD)"))return true;
++        }
++        return false;
++    }
+ 
+     private static abstract class ClientOpcodes {
+         private static final byte QUERY_VERSION = 0;
+@@ -158,7 +172,8 @@
+         inputStream.skip(8);
+         short xOff = inputStream.readShort();
+         short yOff = inputStream.readShort();
+-        inputStream.skip(8);
++        inputStream.skip(4);
++        int waitFence=inputStream.readInt();
+         int idleFence = inputStream.readInt();
+         inputStream.skip(8);
+         long targetMSC = inputStream.readLong();
+@@ -180,19 +195,58 @@
+             sendCompleteNotify(window, serial, CompleteKind.PIXMAP, CompleteMode.COPY, ust, msc);
+ 
+             if (pixmap != null) {
++                boolean deferredIdle=false;
+                 Texture srcTexture = pixmap.drawable.getTexture();
+                 if (srcTexture instanceof GPUImage) {
+                     if (eglContextPtr == 0) createCopyEGLContext(client);
++                    if(managedStereo(window)&&org.gk3hd.standalone.BorrowedPresentFrames.active(xServer)) {
++                        if(waitFence!=0||xOff!=0||yOff!=0||content.width!=pixmap.drawable.width||content.height!=pixmap.drawable.height)
++                            throw new IllegalStateException("Unsupported synchronization/offset/extent in managed stereo Present");
++                        if(!srcTexture.isAllocated())srcTexture.allocateTexture(pixmap.drawable.width,pixmap.drawable.height,null);
++                        Runnable retired=()-> {
++                            try(XLock retiredLock=xServer.lock(XServer.Lockable.WINDOW_MANAGER,XServer.Lockable.DRAWABLE_MANAGER)) {
++                                if(targetMSC>0)sendIdleNotifyScheduled(window,pixmap,serial,idleFence);
++                                else sendIdleNotify(window,pixmap,serial,idleFence);
++                            }
++                        };
++                        if(!org.gk3hd.standalone.BorrowedPresentFrames.offer(xServer,content,srcTexture,srcTexture.getTextureId(),
++                            pixmap.drawable.width,pixmap.drawable.height,srcTexture.isFlipY(),window.id,pixmap.id,serial,retired))
++                            throw new IllegalStateException("Borrowed Present source capacity exhausted");
++                        content.setData(null);content.forceUpdate();
++                        if(!retirementReported) {
++                            retirementReported=true;
++                            android.util.Log.i("GK3HDXR","Direct Present pixmap leased until immutable GPU snapshot completes; waitFence="+waitFence);
++                        }
++                        return;
++                    }
+                     content.setData(null);
+                     content.getTexture().copyFromSource(srcTexture);
++                    if (com.winlator.BuildConfig.DEBUG && xServer.activity.getIntent().getBooleanExtra("gk3hd_test_finish_present_copy", false)) {
++                        android.opengl.GLES20.glFinish();
++                    }
+                     content.forceUpdate();
++                    if(managedStereo(window)&&org.gk3hd.standalone.PresentCopyRetirement.active(xServer)) {
++                        Runnable retired=()-> {
++                            try(XLock retiredLock=xServer.lock(XServer.Lockable.WINDOW_MANAGER,XServer.Lockable.DRAWABLE_MANAGER)) {
++                                if(targetMSC>0)sendIdleNotifyScheduled(window,pixmap,serial,idleFence);
++                                else sendIdleNotify(window,pixmap,serial,idleFence);
++                            }
++                        };
++                        if(!org.gk3hd.standalone.PresentCopyRetirement.defer(xServer,retired)) {
++                            android.opengl.GLES30.glFinish();retired.run();
++                        } else if(!retirementReported) {
++                            retirementReported=true;
++                            android.util.Log.i("GK3HDXR","Deferred stereo pixmap idle until GPU copy completes");
++                        }
++                        deferredIdle=true;
++                    }
+                 }
+                 else content.copyArea((short)0, (short)0, xOff, yOff, pixmap.drawable.width, pixmap.drawable.height, pixmap.drawable);
+ 
+-                if (targetMSC > 0) {
+-                    sendIdleNotifyScheduled(window, pixmap, serial, idleFence);
+-                }
+-                else sendIdleNotify(window, pixmap, serial, idleFence);
++                if(!deferredIdle) {
++                    if (targetMSC > 0)sendIdleNotifyScheduled(window, pixmap, serial, idleFence);
++                    else sendIdleNotify(window, pixmap, serial, idleFence);
++                }
+             }
+             else content.forceUpdate();
+         }
+diff --git a/app/src/main/java/com/winlator/xserver/Drawable.java b/app/src/main/java/com/winlator/xserver/Drawable.java
+--- a/app/src/main/java/com/winlator/xserver/Drawable.java
++++ b/app/src/main/java/com/winlator/xserver/Drawable.java
+@@ -17,7 +17,9 @@
+     public final short height;
+     public final Visual visual;
+     private Texture texture = new Texture(this);
++    private final int dataCapacity;
+     private ByteBuffer data;
++    private boolean allocateDataOnAccess = true;
+     private boolean useSharedData;
+     private Runnable onDrawListener;
+     private boolean offscreenStorage = false;
+@@ -33,12 +35,12 @@
+         this.width = (short)width;
+         this.height = (short)height;
+         this.visual = visual;
+-        this.data = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.LITTLE_ENDIAN);
++        this.dataCapacity = Math.multiplyExact(Math.multiplyExact(width, height), 4);
+     }
+
+     public static Drawable fromBitmap(Bitmap bitmap) {
+         Drawable drawable = new Drawable(0, bitmap.getWidth(), bitmap.getHeight(), null);
+-        fromBitmap(bitmap, drawable.data);
++        fromBitmap(bitmap, drawable.getData());
+         return drawable;
+     }
+
+@@ -55,17 +57,23 @@
+     }
+
+     public void setTexture(Texture texture) {
+-        if (texture instanceof GPUImage) data = ((GPUImage)texture).getVirtualData();
++        if (texture instanceof GPUImage) setData(((GPUImage)texture).getVirtualData());
+         this.texture = texture;
+     }
+
+     @Nullable
+-    public ByteBuffer getData() {
++    public synchronized ByteBuffer getData() {
++        // GPU and shared-memory pixmaps replace this storage before using it.
++        if (allocateDataOnAccess) {
++            data = ByteBuffer.allocateDirect(dataCapacity).order(ByteOrder.LITTLE_ENDIAN);
++            allocateDataOnAccess = false;
++        }
+         return data;
+     }
+
+-    public void setData(ByteBuffer data) {
++    public synchronized void setData(ByteBuffer data) {
+         this.data = data;
++        allocateDataOnAccess = false;
+     }
+
+     private short getStride() {
+@@ -89,10 +97,11 @@
+     }
+
+     public void drawImage(short srcX, short srcY, short dstX, short dstY, short width, short height, byte depth, ByteBuffer data, short totalWidth, short totalHeight) {
+-        if (this.data == null) return;
++        ByteBuffer pixels = getData();
++        if (pixels == null) return;
+
+         if (depth == 1) {
+-            drawBitmap(width, height, data, this.data);
++            drawBitmap(width, height, data, pixels);
+         }
+         else if (depth == 24 || depth == 32) {
+             dstX = (short)Mathf.clamp(dstX, 0, this.width-1);
+@@ -100,10 +109,10 @@
+             if ((dstX + width) > this.width) width = (short)((this.width - dstX));
+             if ((dstY + height) > this.height) height = (short)((this.height - dstY));
+
+-            copyArea(srcX, srcY, dstX, dstY, width, height, totalWidth, this.getStride(), data, this.data);
+-        }
+-
+-        this.data.rewind();
++            copyArea(srcX, srcY, dstX, dstY, width, height, totalWidth, this.getStride(), data, pixels);
++        }
++
++        pixels.rewind();
+         data.rewind();
+
+         forceUpdate();
+@@ -111,16 +120,17 @@
+
+     public ByteBuffer getImage(short x, short y, short width, short height) {
+         ByteBuffer dstData = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.LITTLE_ENDIAN);
+-        if (this.data == null) return dstData;
++        ByteBuffer pixels = getData();
++        if (pixels == null) return dstData;
+
+         x = (short)Mathf.clamp(x, 0, this.width-1);
+         y = (short)Mathf.clamp(y, 0, this.height-1);
+         if ((x + width) > this.width) width = (short)(this.width - x);
+         if ((y + height) > this.height) height = (short)(this.height - y);
+
+-        copyArea(x, y, (short)0, (short)0, width, height, this.getStride(), width, this.data, dstData);
+-
+-        this.data.rewind();
++        copyArea(x, y, (short)0, (short)0, width, height, this.getStride(), width, pixels, dstData);
++
++        pixels.rewind();
+         dstData.rewind();
+         return dstData;
+     }
+@@ -130,7 +140,8 @@
+     }
+
+     public void copyArea(short srcX, short srcY, short dstX, short dstY, short width, short height, Drawable drawable, GraphicsContext.Function gcFunction) {
+-        if (this.data == null || drawable.data == null) return;
++        ByteBuffer pixels = getData(), source = drawable.getData();
++        if (pixels == null || source == null) return;
+
+         dstX = (short)Mathf.clamp(dstX, 0, this.width-1);
+         dstY = (short)Mathf.clamp(dstY, 0, this.height-1);
+@@ -138,12 +149,12 @@
+         if ((dstY + height) > this.height) height = (short)(this.height - dstY);
+
+         if (gcFunction == GraphicsContext.Function.COPY) {
+-            copyArea(srcX, srcY, dstX, dstY, width, height, drawable.getStride(), this.getStride(), drawable.data, this.data);
+-        }
+-        else copyAreaOp(srcX, srcY, dstX, dstY, width, height, drawable.getStride(), this.getStride(), drawable.data, this.data, gcFunction.ordinal());
+-
+-        this.data.rewind();
+-        drawable.data.rewind();
++            copyArea(srcX, srcY, dstX, dstY, width, height, drawable.getStride(), this.getStride(), source, pixels);
++        }
++        else copyAreaOp(srcX, srcY, dstX, dstY, width, height, drawable.getStride(), this.getStride(), source, pixels, gcFunction.ordinal());
++
++        pixels.rewind();
++        source.rewind();
+
+         forceUpdate();
+     }
+@@ -153,14 +164,15 @@
+     }
+
+     public void fillRect(int x, int y, int width, int height, int color) {
+-        if (this.data == null) return;
++        ByteBuffer pixels = getData();
++        if (pixels == null) return;
+         x = (short)Mathf.clamp(x, 0, this.width-1);
+         y = (short)Mathf.clamp(y, 0, this.height-1);
+         if ((x + width) > this.width) width = (short)((this.width - x));
+         if ((y + height) > this.height) height = (short)((this.height - y));
+
+-        fillRect((short)x, (short)y, (short)width, (short)height, color, this.getStride(), this.data);
+-        this.data.rewind();
++        fillRect((short)x, (short)y, (short)width, (short)height, color, this.getStride(), pixels);
++        pixels.rewind();
+         forceUpdate();
+     }
+
+@@ -171,22 +183,24 @@
+     }
+
+     public void drawLine(int x0, int y0, int x1, int y1, int color, int lineWidth) {
+-        if (this.data == null) return;
++        ByteBuffer pixels = getData();
++        if (pixels == null) return;
+         x0 = Mathf.clamp(x0, 0, width-lineWidth);
+         y0 = Mathf.clamp(y0, 0, height-lineWidth);
+         x1 = Mathf.clamp(x1, 0, width-lineWidth);
+         y1 = Mathf.clamp(y1, 0, height-lineWidth);
+
+-        drawLine((short)x0, (short)y0, (short)x1, (short)y1, color, (short)lineWidth, this.getStride(), this.data);
+-
+-        this.data.rewind();
++        drawLine((short)x0, (short)y0, (short)x1, (short)y1, color, (short)lineWidth, this.getStride(), pixels);
++
++        pixels.rewind();
+         forceUpdate();
+     }
+
+     public void drawAlphaMaskedBitmap(byte foreRed, byte foreGreen, byte foreBlue, byte backRed, byte backGreen, byte backBlue, Drawable srcDrawable, Drawable maskDrawable) {
+-        if (this.data == null || srcDrawable.data == null || maskDrawable.data == null) return;
+-        drawAlphaMaskedBitmap(foreRed, foreGreen, foreBlue, backRed, backGreen, backBlue, srcDrawable.data, maskDrawable.data, this.data);
+-        this.data.rewind();
++        ByteBuffer pixels = getData(), source = srcDrawable.getData(), mask = maskDrawable.getData();
++        if (pixels == null || source == null || mask == null) return;
++        drawAlphaMaskedBitmap(foreRed, foreGreen, foreBlue, backRed, backGreen, backBlue, source, mask, pixels);
++        pixels.rewind();
+
+         forceUpdate();
+     }
+diff --git a/app/src/main/java/com/winlator/xserver/DrawableManager.java b/app/src/main/java/com/winlator/xserver/DrawableManager.java
+--- a/app/src/main/java/com/winlator/xserver/DrawableManager.java
++++ b/app/src/main/java/com/winlator/xserver/DrawableManager.java
+@@ -36,7 +36,9 @@
+         final Texture texture = drawable.getTexture();
+         if (texture != null) {
+             if (texture.getOwner() == drawable) texture.setOwner(null);
+-            xServer.getRenderer().xServerView.queueEvent(texture::destroy);
++            xServer.getRenderer().xServerView.queueEvent(()-> {
++                if(!org.gk3hd.standalone.BorrowedPresentFrames.deferDestroy(xServer,texture,texture::destroy))texture.destroy();
++            });
+         }
+ 
+         Callback<Drawable> onDestroyListener = drawable.getOnDestroyListener();
+diff --git a/app/src/main/cpp/winlator/src/gpu_image.c b/app/src/main/cpp/winlator/src/gpu_image.c
+--- a/app/src/main/cpp/winlator/src/gpu_image.c
++++ b/app/src/main/cpp/winlator/src/gpu_image.c
+@@ -29,8 +29,8 @@
+ EGLImageKHR createImageKHR(AHardwareBuffer* hardwareBuffer, int textureId) {
+     const EGLint attribList[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+ 
+-    AHardwareBuffer_acquire(hardwareBuffer);
++    // EGL retains the native client buffer until the EGLImage is destroyed.
+ 
+     EGLClientBuffer clientBuffer = eglGetNativeClientBufferANDROID(hardwareBuffer);
+     if (!clientBuffer) return NULL;
+ 
+diff --git a/app/src/main/java/com/winlator/alsaserver/ALSAClient.java b/app/src/main/java/com/winlator/alsaserver/ALSAClient.java
+--- a/app/src/main/java/com/winlator/alsaserver/ALSAClient.java
++++ b/app/src/main/java/com/winlator/alsaserver/ALSAClient.java
+@@ -25,7 +25,7 @@
+         }
+     }
+     private DataType dataType = DataType.U8;
+-    private AudioTrack audioTrack = null;
++    private volatile AudioTrack audioTrack = null;
+     private byte channels = 2;
+     private int sampleRate = 0;
+     private int position;
+@@ -39,6 +39,7 @@
+     private static short framesPerBuffer = 256;
+ 
+     public static class Options {
++        public volatile boolean shutdownRequested;
+         public short latencyMillis = AudioDriverConfigDialog.DEFAULT_LATENCY_MILLIS;
+         public byte performanceMode = AudioTrack.PERFORMANCE_MODE_LOW_LATENCY;
+         public float volume = AudioDriverConfigDialog.DEFAULT_VOLUME;
+@@ -140,7 +141,8 @@
+     }
+ 
+     public void pause() {
+-        if (audioTrack != null) audioTrack.pause();
++        AudioTrack track = audioTrack;
++        if (track != null) track.pause();
+     }
+ 
+     public void drain() {
+@@ -155,14 +157,14 @@
+             data.order(ByteOrder.BIG_ENDIAN);
+         }
+ 
+-        if (audioTrack != null) {
++        if (audioTrack != null && !options.shutdownRequested) {
+             int bytesWritten;
+             data.position(0);
+ 
+             do {
+                 try {
+                     bytesWritten = audioTrack.write(data, data.remaining(), AudioTrack.WRITE_BLOCKING);
+-                    if (bytesWritten < 0) break;
++                    if (bytesWritten <= 0 || options.shutdownRequested) break;
+                     increaseBufferSizeIfUnderrunOccurs();
+                 }
+                 catch (Exception e) {
+diff --git a/app/src/main/java/com/winlator/xenvironment/components/ALSAServerComponent.java b/app/src/main/java/com/winlator/xenvironment/components/ALSAServerComponent.java
+--- a/app/src/main/java/com/winlator/xenvironment/components/ALSAServerComponent.java
++++ b/app/src/main/java/com/winlator/xenvironment/components/ALSAServerComponent.java
+@@ -3,6 +3,7 @@
+ import com.winlator.alsaserver.ALSAClient;
+ import com.winlator.alsaserver.ALSAClientConnectionHandler;
+ import com.winlator.alsaserver.ALSARequestHandler;
++import com.winlator.xconnector.ConnectedClient;
+ import com.winlator.xconnector.UnixSocketConfig;
+ import com.winlator.xconnector.XConnectorEpoll;
+ import com.winlator.xenvironment.EnvironmentComponent;
+@@ -20,6 +21,7 @@
+     @Override
+     public void start() {
+         if (connector != null) return;
++        options.shutdownRequested = false;
+         ALSAClient.assignFramesPerBuffer(environment.getContext());
+         connector = new XConnectorEpoll(socketConfig, new ALSAClientConnectionHandler(options), new ALSARequestHandler());
+         connector.setMultithreadedClients(true);
+@@ -29,6 +31,19 @@
+     @Override
+     public void stop() {
+         if (connector != null) {
++            // Interrupt writes before destroy joins their workers. Shared buffers
++            // stay alive until the normal post-join connection shutdown.
++            options.shutdownRequested = true;
++            for (ConnectedClient client : connector.getClients()) {
++                if (client.getTag() instanceof ALSAClient) {
++                    try {
++                        ((ALSAClient)client.getTag()).pause();
++                    }
++                    catch (IllegalStateException retired) {
++                        // Its writer has already released the track.
++                    }
++                }
++            }
+             connector.destroy();
+             connector = null;
+         }
+diff --git a/app/src/main/java/com/winlator/xconnector/XConnectorEpoll.java b/app/src/main/java/com/winlator/xconnector/XConnectorEpoll.java
+--- a/app/src/main/java/com/winlator/xconnector/XConnectorEpoll.java
++++ b/app/src/main/java/com/winlator/xconnector/XConnectorEpoll.java
+@@ -94,7 +94,9 @@
+     }
+ 
+     public List<ConnectedClient> getClients() {
+-        return Collections.unmodifiableList(connectedClients);
++        synchronized (connectedClients) {
++            return Collections.unmodifiableList(new ArrayList<>(connectedClients));
++        }
+     }
+ 
+     public ConnectedClient getClientWidthFd(int fd) {
+
+diff --git a/app/src/main/java/com/winlator/SettingsFragment.java b/app/src/main/java/com/winlator/SettingsFragment.java
+--- a/app/src/main/java/com/winlator/SettingsFragment.java
++++ b/app/src/main/java/com/winlator/SettingsFragment.java
+@@ -501,7 +501,7 @@
+         }
+     }
+ 
+-    public static void resetPreferenceVersions(AppCompatActivity activity) {
++    public static void resetPreferenceVersions(Context activity) {
+         SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(activity);
+         SharedPreferences.Editor editor = preferences.edit();
+         editor.putString("box64_version", DefaultVersion.BOX64);
+
+diff --git a/app/src/main/java/com/winlator/xenvironment/RootFSInstaller.java b/app/src/main/java/com/winlator/xenvironment/RootFSInstaller.java
+--- a/app/src/main/java/com/winlator/xenvironment/RootFSInstaller.java
++++ b/app/src/main/java/com/winlator/xenvironment/RootFSInstaller.java
+@@ -44,35 +44,37 @@
+         }
+     }
+ 
++    public interface Progress {void update(long done, long total);}
++
++    /** File preparation shared by the managed foreground service and UI. */
++    public static boolean installManaged(Context context, Progress progress) {
++        RootFS rootFS = RootFS.find(context);
++        File rootDir = rootFS.getRootDir();
++        SettingsFragment.resetPreferenceVersions(context);
++        clearRootDir(rootDir);
++        long contentLength = TarCompressorUtils.getContentLength(TarCompressorUtils.Type.ZSTD, context, FILENAME, rootDir);
++        AtomicLong totalSizeRef = new AtomicLong();
++        boolean success = TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, context, FILENAME, rootDir, (file, size) -> {
++            if (size > 0) progress.update(totalSizeRef.addAndGet(size), contentLength);
++            return file;
++        });
++        if (success) {
++            rootFS.createRFSVersionFile(LATEST_VERSION);
++            resetContainerRFSVersions(context);
++        }
++        return success;
++    }
++
+     public static void install(final MainActivity activity) {
+         AppUtils.keepScreenOn(activity);
+-        RootFS rootFS = RootFS.find(activity);
+-        final File rootDir = rootFS.getRootDir();
+-
+-        SettingsFragment.resetPreferenceVersions(activity);
+-
+         final DownloadProgressDialog dialog = new DownloadProgressDialog(activity);
+         dialog.show(R.string.installing_system_files);
+         Executors.newSingleThreadExecutor().execute(() -> {
+-            clearRootDir(rootDir);
+-            final long contentLength = TarCompressorUtils.getContentLength(TarCompressorUtils.Type.ZSTD, activity, FILENAME, rootDir);
+-            AtomicLong totalSizeRef = new AtomicLong();
+-
+-            boolean success = TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, activity, FILENAME, rootDir, (file, size) -> {
+-                if (size > 0) {
+-                    long totalSize = totalSizeRef.addAndGet(size);
+-                    final int progress = (int)(((float)totalSize / contentLength) * 100);
+-                    activity.runOnUiThread(() -> dialog.setProgress(progress));
+-                }
+-                return file;
++            boolean success = installManaged(activity, (done, total) -> {
++                int progress = total > 0 ? (int)(100.0 * done / total) : 0;
++                activity.runOnUiThread(() -> dialog.setProgress(progress));
+             });
+-
+-            if (success) {
+-                rootFS.createRFSVersionFile(LATEST_VERSION);
+-                resetContainerRFSVersions(activity);
+-            }
+-            else AppUtils.showToast(activity, R.string.unable_to_install_system_files);
+-
++            if (!success) AppUtils.showToast(activity, R.string.unable_to_install_system_files);
+             dialog.closeOnUiThread();
+         });
+     }
+diff --git a/app/src/main/java/com/winlator/renderer/GPUImage.java b/app/src/main/java/com/winlator/renderer/GPUImage.java
+--- a/app/src/main/java/com/winlator/renderer/GPUImage.java
++++ b/app/src/main/java/com/winlator/renderer/GPUImage.java
+@@ -13,7 +13,8 @@
+     private ByteBuffer virtualData;
+     private short stride;
+     private boolean locked = false;
+-    private int nativeHandle;
++    private int nativeHandle=-1;
++    private final boolean compressed;
+
+     static {
+         System.loadLibrary("winlator");
+@@ -28,8 +29,14 @@
+     }
+
+     public GPUImage(Drawable owner, boolean cpuAccess, boolean useHALPixelFormatBGRA8888) {
++        this(owner, cpuAccess, useHALPixelFormatBGRA8888, false);
++    }
++
++    private GPUImage(Drawable owner, boolean cpuAccess, boolean bgra, boolean compressed) {
+         super(owner);
+-        hardwareBufferPtr = createHardwareBuffer(owner.width, owner.height, cpuAccess, useHALPixelFormatBGRA8888);
++        this.compressed = compressed;
++        hardwareBufferPtr = compressed ? createCompressedHardwareBuffer(owner.width, owner.height) :
++            createHardwareBuffer(owner.width, owner.height, cpuAccess, bgra);
+         if (cpuAccess && hardwareBufferPtr != 0) {
+             virtualData = lockHardwareBuffer(hardwareBufferPtr);
+             locked = true;
+@@ -96,6 +103,20 @@
+         else return (GPUImage)texture;
+     }
+
++    public static GPUImage createOrObtainCompressed(XServer xServer, Drawable drawable) {
++        Texture old = drawable.getTexture();
++        if (old instanceof GPUImage) return ((GPUImage)old).compressed ? (GPUImage)old : null;
++        GPUImage image = new GPUImage(drawable, false, false, true);
++        if (image.hardwareBufferPtr == 0) return null;
++        if (old != null) xServer.getRenderer().xServerView.queueEvent(old::destroy);
++        drawable.setTexture(image);
++        return image;
++    }
++
++    public boolean isCompressed() { return compressed; }
++
++    private native long createCompressedHardwareBuffer(short width, short height);
++
+     private native long createHardwareBuffer(short width, short height, boolean cpuAccess, boolean useHALPixelFormatBGRA8888);
+
+     private native void destroyHardwareBuffer(long hardwareBufferPtr, boolean locked);
+diff --git a/app/src/main/cpp/winlator/src/gpu_image.c b/app/src/main/cpp/winlator/src/gpu_image.c
+--- a/app/src/main/cpp/winlator/src/gpu_image.c
++++ b/app/src/main/cpp/winlator/src/gpu_image.c
+@@ -13,6 +13,9 @@
+ #include <string.h>
+ #include <stdbool.h>
+ #include <sys/mman.h>
++#include <stdint.h>
++#include <unistd.h>
++#include "qcom_rgba_layout.h"
+
+ #include "native_handle.h"
+ #include "winlator.h"
+@@ -82,6 +85,51 @@
+ }
+
+ JNIEXPORT jlong JNICALL
++Java_com_winlator_renderer_GPUImage_createCompressedHardwareBuffer(JNIEnv *env, jobject obj, jshort width, jshort height) {
++    if (width <= 0 || height <= 0 || width > 8192 || height > 4096) return 0;
++    /* Request the Qualcomm-compressed layout through COMPOSER_CLIENT_TARGET. */
++    const AHardwareBuffer_Desc request = {.width=width,.height=height,.layers=1,
++        .format=AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
++        .usage=AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT|AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE|(UINT64_C(1)<<12)};
++    AHardwareBuffer *buffer=NULL;
++    if (AHardwareBuffer_allocate(&request,&buffer)!=0 || !buffer) return 0;
++    AHardwareBuffer_Desc actual;
++    AHardwareBuffer_describe(buffer,&actual);
++    const native_handle_t *handle=AHardwareBuffer_getNativeHandle(buffer);
++    const uint32_t qcom=((uint32_t)'g'<<24)|((uint32_t)'m'<<16)|((uint32_t)'s'<<8)|'m';
++    bool compressed_layout=false;
++    if (handle && handle->version==(int)sizeof(*handle) && handle->numFds==2 && handle->data[0]>=0) {
++        if (handle->numInts>=2 && (uint32_t)handle->data[2]==qcom &&
++                ((uint32_t)handle->data[3]&UINT32_C(0x08000000))) {
++            compressed_layout=true;
++        } else if (handle->numInts==27) {
++            const off_t bytes=lseek(handle->data[0],0,SEEK_END);
++            if (bytes>0 && lseek(handle->data[0],0,SEEK_SET)==0) {
++                compressed_layout=gk3hd_qcom_versioned_rgba_layout(handle->version,handle->numFds,
++                    handle->numInts,handle->data+handle->numFds,actual.width,actual.height,
++                    actual.stride,actual.format,actual.layers,actual.usage,bytes);
++            }
++        }
++    }
++    if (!compressed_layout ||
++        actual.width!=(uint32_t)width || actual.height!=(uint32_t)height || actual.stride<(uint32_t)width || actual.stride>8192 ||
++        actual.layers!=1 || actual.format!=request.format) {
++        AHardwareBuffer_release(buffer);
++        return 0;
++    }
++    jclass cls=(*env)->GetObjectClass(env,obj);
++    jmethodID stride=(*env)->GetMethodID(env,cls,"setStride","(S)V");
++    jmethodID fd=(*env)->GetMethodID(env,cls,"setNativeHandle","(I)V");
++    if (!stride || !fd) {
++        AHardwareBuffer_release(buffer);
++        return 0;
++    }
++    (*env)->CallVoidMethod(env,obj,stride,(jshort)actual.stride);
++    (*env)->CallVoidMethod(env,obj,fd,handle->data[0]);
++    return (jlong)buffer;
++}
++
++JNIEXPORT jlong JNICALL
+ Java_com_winlator_renderer_GPUImage_createImageKHR(JNIEnv *env, jclass obj,
+                                                    jlong hardwareBufferPtr, jint textureId) {
+     return (jlong)createImageKHR((AHardwareBuffer*)hardwareBufferPtr, textureId);
+diff --git a/app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java b/app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java
+--- a/app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java
++++ b/app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java
+@@ -40,6 +40,7 @@
+         private static final byte PIXMAP_FROM_BUFFER = 2;
+         private static final byte BUFFER_FROM_PIXMAP = 3;
+         private static final byte PIXMAP_FROM_BUFFERS = 7;
++        private static final byte BUFFERS_FROM_PIXMAP = 8;
+     }
+
+     public DRI3Extension(XServer xServer, byte majorOpcode) {
+@@ -114,6 +115,7 @@
+         else content = window.getContent();
+
+         GPUImage texture = GPUImage.createOrObtain(xServer, content, false, true);
++        if (texture.isCompressed()) throw new BadAlloc();
+         short stride = texture.getStride();
+         int nativeHandle = texture.getNativeHandle();
+
+@@ -132,6 +134,34 @@
+             outputStream.writeByte((byte)32);
+             outputStream.writePad(12);
+             outputStream.setAncillaryFd(nativeHandle);
++        }
++    }
++
++    // Paired Turnip client only. The advertised DRI3 version remains 1.0.
++    private void compressedBuffersFromPixmap(XClient client, XInputStream inputStream, XOutputStream outputStream)
++            throws IOException, XRequestError {
++        int id = inputStream.readInt();
++        if (!client.isValidResourceId(id)) throw new BadPixmap(id);
++        Pixmap pixmap = xServer.pixmapManager.getPixmap(id);
++        if (pixmap == null) throw new BadPixmap(id);
++        Drawable content = pixmap.drawable;
++        GPUImage image = GPUImage.createOrObtainCompressed(xServer, content);
++        if (image == null || image.getNativeHandle() < 0) throw new BadAlloc();
++        try (XStreamLock lock = outputStream.lock()) {
++            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
++            outputStream.writeByte((byte)1);
++            outputStream.writeShort(client.getSequenceNumber());
++            outputStream.writeInt(2); // One stride and one offset in bytes, both CARD32.
++            outputStream.writeShort(content.width);
++            outputStream.writeShort(content.height);
++            outputStream.writePad(4);
++            outputStream.writeLong(0x0500000000000001L);
++            outputStream.writeByte((byte)32);
++            outputStream.writeByte((byte)32);
++            outputStream.writePad(6);
++            outputStream.writeInt(image.getStride() * 4);
++            outputStream.writeInt(0);
++            outputStream.setAncillaryFd(image.getNativeHandle());
+         }
+     }
+
+@@ -197,6 +227,11 @@
+                     bufferFromPixmap(client, inputStream, outputStream);
+                 }
+                 break;
++            case ClientOpcodes.BUFFERS_FROM_PIXMAP:
++                try (XLock lock = xServer.lock(XServer.Lockable.WINDOW_MANAGER, XServer.Lockable.PIXMAP_MANAGER, XServer.Lockable.DRAWABLE_MANAGER)) {
++                    compressedBuffersFromPixmap(client, inputStream, outputStream);
++                }
++                break;
+             case ClientOpcodes.PIXMAP_FROM_BUFFERS:
+                 try (XLock lock = xServer.lock(XServer.Lockable.WINDOW_MANAGER, XServer.Lockable.PIXMAP_MANAGER, XServer.Lockable.DRAWABLE_MANAGER)) {
+                     pixmapFromBuffers(client, inputStream, outputStream);
+diff --git a/app/src/main/cpp/winlator/CMakeLists.txt b/app/src/main/cpp/winlator/CMakeLists.txt
+index b1ba334..245b52c 100644
+--- a/app/src/main/cpp/winlator/CMakeLists.txt
++++ b/app/src/main/cpp/winlator/CMakeLists.txt
+@@ -12,2 +12,3 @@ add_library(winlator SHARED
+             src/gpu_helper.c
++            src/gk3hd_jni.c
+             src/sysvshared_memory.c
+diff --git a/app/src/main/cpp/winlator/include/gk3hd_jni.h b/app/src/main/cpp/winlator/include/gk3hd_jni.h
+new file mode 100644
+index 0000000..9843b1f
+--- /dev/null
++++ b/app/src/main/cpp/winlator/include/gk3hd_jni.h
+@@ -0,0 +1,13 @@
++#ifndef GK3HD_JNI_H
++#define GK3HD_JNI_H
++
++#include <jni.h>
++
++jint gk3hd_register_methods(JNIEnv *env, const char *class_name,
++                            const JNINativeMethod *methods, jint count);
++jint gk3hd_register_xinput_stream(JNIEnv *env);
++jint gk3hd_register_xoutput_stream(JNIEnv *env);
++jint gk3hd_register_xconnector_epoll(JNIEnv *env);
++jint gk3hd_register_gpu_helper(JNIEnv *env);
++
++#endif
+diff --git a/app/src/main/cpp/winlator/src/gk3hd_jni.c b/app/src/main/cpp/winlator/src/gk3hd_jni.c
+new file mode 100644
+index 0000000..ae634d9
+--- /dev/null
++++ b/app/src/main/cpp/winlator/src/gk3hd_jni.c
+@@ -0,0 +1,25 @@
++#include "gk3hd_jni.h"
++
++jint gk3hd_register_methods(JNIEnv *env, const char *class_name,
++                            const JNINativeMethod *methods, jint count) {
++    jclass type = (*env)->FindClass(env, class_name);
++    if (!type) return JNI_ERR;
++    jint result = (*env)->RegisterNatives(env, type, methods, count);
++    (*env)->DeleteLocalRef(env, type);
++    return result;
++}
++
++// Android 8–11 cannot resolve CriticalNative methods by symbol name.
++JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
++    JNIEnv *env;
++    (void)reserved;
++    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK)
++        return JNI_ERR;
++    if (
++        gk3hd_register_xinput_stream(env) != JNI_OK ||
++        gk3hd_register_xoutput_stream(env) != JNI_OK ||
++        gk3hd_register_xconnector_epoll(env) != JNI_OK ||
++        gk3hd_register_gpu_helper(env) != JNI_OK)
++        return JNI_ERR;
++    return JNI_VERSION_1_6;
++}
+diff --git a/app/src/main/cpp/winlator/src/gpu_helper.c b/app/src/main/cpp/winlator/src/gpu_helper.c
+index bc58f36..7d917de 100644
+--- a/app/src/main/cpp/winlator/src/gpu_helper.c
++++ b/app/src/main/cpp/winlator/src/gpu_helper.c
+@@ -1,2 +1,3 @@
+ #include <jni.h>
++#include "gk3hd_jni.h"
+ #include <malloc.h>
+@@ -170,2 +171,10 @@ Java_com_winlator_core_GPUHelper_destroyOffscreenEGLContext(JNIEnv *env, jclass
+     eglDestroyContext(eglDisplay, (EGLContext)contextPtr);
+-}
+\ No newline at end of file
++}
++
++jint gk3hd_register_gpu_helper(JNIEnv *env) {
++    static const JNINativeMethod methods[] = {
++        {"vkGetApiVersion", "()I", (void *)Java_com_winlator_core_GPUHelper_vkGetApiVersion},
++    };
++    return gk3hd_register_methods(env, "com/winlator/core/GPUHelper", methods,
++                                  sizeof(methods) / sizeof(methods[0]));
++}
+diff --git a/app/src/main/cpp/winlator/src/xconnector_epoll.c b/app/src/main/cpp/winlator/src/xconnector_epoll.c
+index 920cec1..ebeaaa9 100644
+--- a/app/src/main/cpp/winlator/src/xconnector_epoll.c
++++ b/app/src/main/cpp/winlator/src/xconnector_epoll.c
+@@ -2,2 +2,3 @@
+ #include <jni.h>
++#include "gk3hd_jni.h"
+ #include <sys/epoll.h>
+@@ -301,2 +302,10 @@ Java_com_winlator_xconnector_XConnectorEpoll_killConnection(JNIEnv *env, jclass
+     XConnectorEpoll_killConnection((XConnectorEpoll*)connectorPtr, (ConnectedClient*)clientPtr);
+-}
+\ No newline at end of file
++}
++
++jint gk3hd_register_xconnector_epoll(JNIEnv *env) {
++    static const JNINativeMethod methods[] = {
++        {"closeFd", "(I)V", (void *)Java_com_winlator_xconnector_XConnectorEpoll_closeFd},
++    };
++    return gk3hd_register_methods(env, "com/winlator/xconnector/XConnectorEpoll", methods,
++                                  sizeof(methods) / sizeof(methods[0]));
++}
+diff --git a/app/src/main/cpp/winlator/src/xinput_stream.c b/app/src/main/cpp/winlator/src/xinput_stream.c
+index f6798bb..3815a62 100644
+--- a/app/src/main/cpp/winlator/src/xinput_stream.c
++++ b/app/src/main/cpp/winlator/src/xinput_stream.c
+@@ -3,2 +3,3 @@
+ #include <jni.h>
++#include "gk3hd_jni.h"
+ #include <unistd.h>
+@@ -195,2 +196,20 @@ Java_com_winlator_xconnector_XInputStream_destroy(jlong nativePtr) {
+     XInputStream_destroy((XInputStream*)nativePtr);
+-}
+\ No newline at end of file
++}
++
++jint gk3hd_register_xinput_stream(JNIEnv *env) {
++    static const JNINativeMethod methods[] = {
++        {"readByte", "(J)B", (void *)Java_com_winlator_xconnector_XInputStream_readByte},
++        {"readShort", "(J)S", (void *)Java_com_winlator_xconnector_XInputStream_readShort},
++        {"readInt", "(J)I", (void *)Java_com_winlator_xconnector_XInputStream_readInt},
++        {"readLong", "(J)J", (void *)Java_com_winlator_xconnector_XInputStream_readLong},
++        {"skip", "(JI)V", (void *)Java_com_winlator_xconnector_XInputStream_skip},
++        {"available", "(J)I", (void *)Java_com_winlator_xconnector_XInputStream_available},
++        {"readMoreData", "(JZ)I", (void *)Java_com_winlator_xconnector_XInputStream_readMoreData},
++        {"getActivePosition", "(J)I", (void *)Java_com_winlator_xconnector_XInputStream_getActivePosition},
++        {"setActivePosition", "(JI)V", (void *)Java_com_winlator_xconnector_XInputStream_setActivePosition},
++        {"getAncillaryFd", "(J)I", (void *)Java_com_winlator_xconnector_XInputStream_getAncillaryFd},
++        {"destroy", "(J)V", (void *)Java_com_winlator_xconnector_XInputStream_destroy},
++    };
++    return gk3hd_register_methods(env, "com/winlator/xconnector/XInputStream", methods,
++                                  sizeof(methods) / sizeof(methods[0]));
++}
+diff --git a/app/src/main/cpp/winlator/src/xoutput_stream.c b/app/src/main/cpp/winlator/src/xoutput_stream.c
+index 76280cf..cc6c2d8 100644
+--- a/app/src/main/cpp/winlator/src/xoutput_stream.c
++++ b/app/src/main/cpp/winlator/src/xoutput_stream.c
+@@ -3,2 +3,3 @@
+ #include <jni.h>
++#include "gk3hd_jni.h"
+ #include <unistd.h>
+@@ -146,2 +147,18 @@ Java_com_winlator_xconnector_XOutputStream_length(jlong nativePtr) {
+     return outputStream->buffer.position;
+-}
+\ No newline at end of file
++}
++
++jint gk3hd_register_xoutput_stream(JNIEnv *env) {
++    static const JNINativeMethod methods[] = {
++        {"setAncillaryFd", "(JI)V", (void *)Java_com_winlator_xconnector_XOutputStream_setAncillaryFd},
++        {"writeByte", "(JB)V", (void *)Java_com_winlator_xconnector_XOutputStream_writeByte},
++        {"writeShort", "(JS)V", (void *)Java_com_winlator_xconnector_XOutputStream_writeShort},
++        {"writeInt", "(JI)V", (void *)Java_com_winlator_xconnector_XOutputStream_writeInt},
++        {"writeLong", "(JJ)V", (void *)Java_com_winlator_xconnector_XOutputStream_writeLong},
++        {"writePad", "(JI)V", (void *)Java_com_winlator_xconnector_XOutputStream_writePad},
++        {"sendData", "(J)Z", (void *)Java_com_winlator_xconnector_XOutputStream_sendData},
++        {"destroy", "(J)V", (void *)Java_com_winlator_xconnector_XOutputStream_destroy},
++        {"length", "(J)I", (void *)Java_com_winlator_xconnector_XOutputStream_length},
++    };
++    return gk3hd_register_methods(env, "com/winlator/xconnector/XOutputStream", methods,
++                                  sizeof(methods) / sizeof(methods[0]));
++}
+diff --git a/app/src/main/java/com/winlator/core/TarCompressorUtils.java b/app/src/main/java/com/winlator/core/TarCompressorUtils.java
+--- a/app/src/main/java/com/winlator/core/TarCompressorUtils.java
++++ b/app/src/main/java/com/winlator/core/TarCompressorUtils.java
+@@ -111,6 +111,6 @@
+     public static boolean extract(Type type, Context context, String assetFile, File destination, OnExtractFileListener onExtractFileListener) {
+         try {
+-            return extract(type, context.getAssets().open(assetFile), destination, onExtractFileListener);
++            return extract(type, org.gk3hd.standalone.RuntimeAssets.open(context, assetFile), destination, onExtractFileListener);
+         }
+         catch (IOException e) {
+             return false;
+diff --git a/app/src/main/java/com/winlator/winhandler/MIDIHandler.java b/app/src/main/java/com/winlator/winhandler/MIDIHandler.java
+--- a/app/src/main/java/com/winlator/winhandler/MIDIHandler.java
++++ b/app/src/main/java/com/winlator/winhandler/MIDIHandler.java
+@@ -55,5 +55,5 @@
+
+     static {
+-        System.loadLibrary("midihandler");
++        if (com.winlator.BuildConfig.DEBUG) System.loadLibrary("midihandler");
+     }
+
+diff --git a/app/src/main/java/com/winlator/winhandler/WinHandler.java b/app/src/main/java/com/winlator/winhandler/WinHandler.java
+--- a/app/src/main/java/com/winlator/winhandler/WinHandler.java
++++ b/app/src/main/java/com/winlator/winhandler/WinHandler.java
+@@ -367,4 +367,5 @@
+             }
+             case RequestCodes.MIDI_OPEN: {
++                if (!com.winlator.BuildConfig.DEBUG) break;
+                 boolean isMidiOut = receiveData.get() == 1;
+                 if (midiHandler == null) midiHandler = new MIDIHandler(this);
+diff --git a/app/src/main/java/com/winlator/contentdialog/SoundFontTestDialog.java b/app/src/main/java/com/winlator/contentdialog/SoundFontTestDialog.java
+--- a/app/src/main/java/com/winlator/contentdialog/SoundFontTestDialog.java
++++ b/app/src/main/java/com/winlator/contentdialog/SoundFontTestDialog.java
+@@ -15,4 +15,5 @@
+     public SoundFontTestDialog(Context context, String soundfont) {
+         super(context, R.layout.soundfont_test_dialog);
++        if (!com.winlator.BuildConfig.DEBUG) return;
+         setIcon(R.drawable.icon_piano);
+         setTitle(soundfont);

@@ -1,6 +1,8 @@
 #define NOMINMAX
 #include <windows.h>
 #include "../dxvk/dxvk_descriptor.cpp"
+#include <map>
+#include <set>
 #include <cstdlib>
 #include <iostream>
 
@@ -19,7 +21,11 @@ namespace dxvk {
 void DxvkDevice::recycleDescriptorPool(const Rc<DxvkDescriptorPool>&) { std::abort(); }
 }
 
-static unsigned capacity, calls, resets, destroys;
+static unsigned capacity, calls, resets, destroys, allocated;
+static uint64_t nextHandle;
+static std::map<VkDescriptorSet,VkDescriptorSetLayout> live;
+static std::set<VkDescriptorSet> consumed;
+static bool failBatch, fatalAllocation;
 static bool failAllocation, failReset;
 static VKAPI_ATTR VkResult VKAPI_CALL createPool(VkDevice, const VkDescriptorPoolCreateInfo* info,
     const VkAllocationCallbacks*, VkDescriptorPool* pool) {
@@ -28,13 +34,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL createPool(VkDevice, const VkDescriptorPoo
 static VKAPI_ATTR VkResult VKAPI_CALL allocate(VkDevice, const VkDescriptorSetAllocateInfo* info,
     VkDescriptorSet* set) {
   ++calls;
-  if (failAllocation) return VK_ERROR_OUT_OF_POOL_MEMORY;
-  if (info->descriptorSetCount != 1) std::abort();
-  *set = VkDescriptorSet(calls); return VK_SUCCESS;
+  if (fatalAllocation) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+  if (failAllocation || (failBatch && info->descriptorSetCount>1)) return VK_ERROR_OUT_OF_POOL_MEMORY;
+  if (!info->descriptorSetCount || allocated+info->descriptorSetCount>capacity) std::abort();
+  allocated+=info->descriptorSetCount;
+  for(unsigned i=0;i<info->descriptorSetCount;i++) {set[i]=VkDescriptorSet(++nextHandle);live.emplace(set[i],info->pSetLayouts[i]);}
+  return VK_SUCCESS;
 }
 static VKAPI_ATTR VkResult VKAPI_CALL reset(VkDevice, VkDescriptorPool, VkDescriptorPoolResetFlags) {
   if (failReset) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-  ++resets; return VK_SUCCESS;
+  ++resets; allocated=0;live.clear();consumed.clear();return VK_SUCCESS;
 }
 static VKAPI_ATTR void VKAPI_CALL destroy(VkDevice, VkDescriptorPool, const VkAllocationCallbacks*) {
   ++destroys;
@@ -43,6 +52,7 @@ static void require(bool result) {
   if (!result) { std::cerr << "Descriptor pool behavior failed\n"; std::exit(1); }
 }
 int main() {
+  _putenv_s("GK3HD_XR_DESCRIPTOR_BATCH", "");
   dxvk::Rc<dxvk::vk::DeviceFn> driver = new dxvk::vk::DeviceFn(nullptr, false, VK_NULL_HANDLE);
   driver->vkCreateDescriptorPool = createPool; driver->vkAllocateDescriptorSets = allocate;
   driver->vkResetDescriptorPool = reset; driver->vkDestroyDescriptorPool = destroy;
@@ -63,5 +73,43 @@ int main() {
     }
   }
   require(resets == 3 && destroys == 1);
-  std::cout << "Descriptor capacity, allocation failure, safe reset and recycling pass\n";
+  // The standalone native-driver host opts in. Direct Turnip and PC-VR
+  // retain ordinary allocation; run the same safety checks for either build.
+  _putenv_s("GK3HD_XR_DESCRIPTOR_BATCH", "1");
+  {
+    dxvk::DxvkDescriptorPool pool(driver);
+    const VkDescriptorSetLayout a=VkDescriptorSetLayout(11), b=VkDescriptorSetLayout(22);
+    auto take=[&](VkDescriptorSetLayout layout) {
+      auto set=pool.alloc(layout);
+      require(set!=VK_NULL_HANDLE && live.at(set)==layout && consumed.insert(set).second);
+      return set;
+    };
+    for(unsigned i=0;i<256;i++) take(i%2?a:b);
+    pool.reset();
+    failBatch=true;
+    take(a);require(allocated==1);
+    failBatch=false;
+    pool.reset();
+    fatalAllocation=true;
+    unsigned before=calls;
+    require(pool.alloc(a)==VK_NULL_HANDLE && calls==before+1);
+    fatalAllocation=false;
+    take(a);take(b);
+    failReset=true;
+    bool threw=false;try {pool.reset();} catch(const dxvk::DxvkError&) {threw=true;}
+    require(threw);take(a);take(b);
+    failReset=false;pool.reset();take(a);
+    pool.reset();
+    // More layouts than the bounded cache: unused prefetched sets must stay
+    // charged to pool capacity and no stale handles may survive reset.
+    unsigned delivered=0;
+    while(delivered<capacity*2) {
+      auto layout=VkDescriptorSetLayout(100+delivered%19);
+      auto set=pool.alloc(layout);if(set==VK_NULL_HANDLE) break;
+      require(live.at(set)==layout && consumed.insert(set).second);delivered++;
+    }
+    require(delivered>0 && delivered<=allocated && allocated<=capacity);
+    pool.reset();take(a);pool.reset();
+  }
+  std::cout << "Descriptor uniqueness/layouts, capacity/eviction, fallback, fatal errors and reset behavior pass\n";
 }

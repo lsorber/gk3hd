@@ -67,9 +67,25 @@ def inspect_dll(path: Path) -> RendererAsset:
     This gate never executes a supplied binary and cannot replace gameplay review.
     """
     pin = json.loads((_TOOLS / "upstream.json").read_text(encoding="utf-8"))
-    match = ASSET_NAME.fullmatch(path.name)
-    expected_name = f"dxvk-sarek-{pin['version']}.dll"
-    if match is None or path.name != expected_name or not 0 < path.stat().st_size <= MAX_DLL_BYTES:
+    return inspect_recipe_dll(path, version=pin["version"], expected={"openxr_prototype": False})
+
+
+def inspect_recipe_dll(
+    path: Path,
+    *,
+    version: str,
+    expected: dict[str, object],
+    extra_notices: tuple[str, ...] = (),
+    filename: str | None = None,
+) -> RendererAsset:
+    """Verify a caller-selected recipe variant, not its release eligibility.
+
+    Public flat installation/publication must use inspect_dll. Prototype
+    callers additionally pin every XR source and test result before reuse.
+    """
+    pin = json.loads((_TOOLS / "upstream.json").read_text(encoding="utf-8"))
+    expected_name = filename or f"dxvk-sarek-{version}.dll"
+    if path.name != expected_name or not 0 < path.stat().st_size <= MAX_DLL_BYTES:
         msg = f"expected the build recipe's {expected_name} (at most 32 MiB)"
         raise ValueError(msg)
     dll = path.read_bytes()
@@ -79,8 +95,9 @@ def inspect_dll(path: Path) -> RendererAsset:
     notices = path.with_suffix(".txt")
     build = json.loads(provenance.read_text(encoding="utf-8"))
     patch = (_TOOLS / "renderer.patch").read_bytes().replace(b"\r\n", b"\n")
-    expected = {
-        "version": pin["version"],
+    required = {
+        **expected,
+        "version": version,
         "upstream_commit": pin["commit"],
         **{key: pin[key] for key in ("msvc", "windows_sdk", "meson", "ninja")},
         "source_path_mapping": "gk3hd-build",
@@ -90,8 +107,10 @@ def inspect_dll(path: Path) -> RendererAsset:
         "helper_tests": "passed",
         "notices_sha256": sha256_file(notices),
     }
-    if not isinstance(build, dict) or any(
-        build.get(key) != value for key, value in expected.items()
+    if (
+        not isinstance(build, dict)
+        or type(build.get("openxr_prototype")) is not bool
+        or any(build.get(key) != value for key, value in required.items())
     ):
         msg = "renderer provenance differs from the reviewed recipe, test results or DLL"
         raise ValueError(msg)
@@ -100,12 +119,12 @@ def inspect_dll(path: Path) -> RendererAsset:
     if not isinstance(licenses, dict) or not licenses:
         msg = "renderer recipe must declare its third-party notices"
         raise ValueError(msg)
-    if not all(f"=== {name} ===" in text for name in licenses):
+    if not all(f"=== {name} ===" in text for name in (*licenses, *extra_notices)):
         msg = "renderer notices are missing required third-party entries"
         raise ValueError(msg)
     return RendererAsset(
         path,
-        match[1],
+        version,
         digest,
         len(dll),
         ((provenance, sha256_file(provenance)), (notices, sha256_file(notices))),

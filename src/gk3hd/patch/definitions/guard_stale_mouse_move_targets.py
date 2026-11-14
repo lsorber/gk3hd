@@ -65,48 +65,51 @@ class StaleMouseMoveCompiler:
     # valid only for a vectored handler and makes Windows raise
     # STATUS_INVALID_DISPOSITION.  Helpers and late telemetry occupy separate
     # ranges so diagnostic writes can never self-modify executable payloads.
-    _section_size: ClassVar[int] = 0xE00
+    _section_size: ClassVar[int] = 0x2000
     _section_characteristics: ClassVar[int] = 0xE0000020
     _magic: ClassVar[bytes] = b"GK3MOVE1"
-    _layout_version: ClassVar[int] = 34
+    _layout_version: ClassVar[int] = 35
     _off_layout_version: ClassVar[int] = 0x08
-    _off_dropped_count: ClassVar[int] = 0x0C
-    _off_changed_during_validation_count: ClassVar[int] = 0x10
-    _off_forwarded_count: ClassVar[int] = 0x14
-    _off_nested_dropped_count: ClassVar[int] = 0x18
-    _off_wndproc_dropped_count: ClassVar[int] = 0x1C
+    # Callback traces are written during ordinary exploration, not only on
+    # faults. Their data must not invalidate the translated instruction page.
+    _state_offset: ClassVar[int] = 0x1000
+    _off_dropped_count: ClassVar[int] = _state_offset + 0x0C
+    _off_changed_during_validation_count: ClassVar[int] = _state_offset + 0x10
+    _off_forwarded_count: ClassVar[int] = _state_offset + 0x14
+    _off_nested_dropped_count: ClassVar[int] = _state_offset + 0x18
+    _off_wndproc_dropped_count: ClassVar[int] = _state_offset + 0x1C
     # MouseManager has already committed its durable physical cursor state
     # when it reaches the common UI traversal. A zero value preserves the
     # standalone native path; scale_fixed_interfaces publishes a transactional
     # coordinate adapter here.
-    _off_ui_dispatch_adapter: ClassVar[int] = 0x1EC
-    _off_tree_dropped_count: ClassVar[int] = 0x1F0
-    _off_wndproc_exception_count: ClassVar[int] = 0x1F4
-    _off_last_projection_width: ClassVar[int] = 0x1F8
-    _off_last_current_layer_vtable: ClassVar[int] = 0x1FC
+    _off_ui_dispatch_adapter: ClassVar[int] = _state_offset + 0x1EC
+    _off_tree_dropped_count: ClassVar[int] = _state_offset + 0x1F0
+    _off_wndproc_exception_count: ClassVar[int] = _state_offset + 0x1F4
+    _off_last_projection_width: ClassVar[int] = _state_offset + 0x1F8
+    _off_last_current_layer_vtable: ClassVar[int] = _state_offset + 0x1FC
     # Keep all late diagnostics after every executable helper. Earlier layouts
     # accidentally placed these cells in the exception-handler payload; a
     # normal trace write could then self-modify the code intended to recover
     # the very movement fault being diagnosed.
-    _off_last_event_target_vtable: ClassVar[int] = 0xA00
-    _off_last_current_layer: ClassVar[int] = 0xA04
-    _off_exception_projection_width: ClassVar[int] = 0xA08
-    _off_exception_current_layer_vtable: ClassVar[int] = 0xA0C
-    _off_exception_event_target_vtable: ClassVar[int] = 0xA10
-    _off_exception_current_layer: ClassVar[int] = 0xA14
-    _off_exception_eip: ClassVar[int] = 0xA18
-    _off_exception_address: ClassVar[int] = 0xA1C
-    _off_exception_access_address: ClassVar[int] = 0xA20
-    _off_exception_registers: ClassVar[int] = 0xA24
-    _off_exception_stack: ClassVar[int] = 0xA44
-    _off_obsolete_wndproc_point_count: ClassVar[int] = 0xA54
-    _off_popup_message_dropped_count: ClassVar[int] = 0xA58
+    _off_last_event_target_vtable: ClassVar[int] = _state_offset + 0xA00
+    _off_last_current_layer: ClassVar[int] = _state_offset + 0xA04
+    _off_exception_projection_width: ClassVar[int] = _state_offset + 0xA08
+    _off_exception_current_layer_vtable: ClassVar[int] = _state_offset + 0xA0C
+    _off_exception_event_target_vtable: ClassVar[int] = _state_offset + 0xA10
+    _off_exception_current_layer: ClassVar[int] = _state_offset + 0xA14
+    _off_exception_eip: ClassVar[int] = _state_offset + 0xA18
+    _off_exception_address: ClassVar[int] = _state_offset + 0xA1C
+    _off_exception_access_address: ClassVar[int] = _state_offset + 0xA20
+    _off_exception_registers: ClassVar[int] = _state_offset + 0xA24
+    _off_exception_stack: ClassVar[int] = _state_offset + 0xA44
+    _off_obsolete_wndproc_point_count: ClassVar[int] = _state_offset + 0xA54
+    _off_popup_message_dropped_count: ClassVar[int] = _state_offset + 0xA58
     # Exact callback traces expose the native object/POINT/descriptor boundary
     # without interpreting mutable UI trees from a later capture sample. Each
     # record contains call count, last object/x/y/result, non-zero count, and
     # the last non-zero object/x/y/result in that order.
-    _off_tree_b8_trace: ClassVar[int] = 0xA60
-    _off_tree_bc_trace: ClassVar[int] = 0xA88
+    _off_tree_b8_trace: ClassVar[int] = _state_offset + 0xA60
+    _off_tree_bc_trace: ClassVar[int] = _state_offset + 0xA88
     _off_wrapper: ClassVar[int] = 0x20
     _off_ui_dispatch_bridge: ClassVar[int] = 0x1D0
     _off_nested_wrapper: ClassVar[int] = 0x200
@@ -123,11 +126,11 @@ class StaleMouseMoveCompiler:
     # the popup-query counter rather than compressing that ownership proof.
     _off_popup_message_wrapper: ClassVar[int] = 0xB84
     _off_popup_query_wrapper: ClassVar[int] = 0xB00
-    _off_popup_query_dropped_count: ClassVar[int] = 0xB80
+    _off_popup_query_dropped_count: ClassVar[int] = _state_offset + 0xB80
     _off_direct_message_wrapper: ClassVar[int] = 0xC00
     _off_selected_message_wrapper: ClassVar[int] = 0xD00
-    _off_direct_message_dropped_count: ClassVar[int] = 0xD80
-    _off_selected_message_dropped_count: ClassVar[int] = 0xD84
+    _off_direct_message_dropped_count: ClassVar[int] = _state_offset + 0xD80
+    _off_selected_message_dropped_count: ClassVar[int] = _state_offset + 0xD84
     # FUN_004bebf0 forwards a POINT to the currently focused UI object.  It
     # has no stack frame of its own, which is why GK3's crash report shows the
     # outer 0x00533CEC WndProc return rather than this invalid virtual call.
@@ -1113,7 +1116,7 @@ class StaleMouseMoveCompiler:
                     wrapper_va=section_va + self._off_ui_dispatch_bridge,
                     adapter_slot_va=section_va + self._off_ui_dispatch_adapter,
                 ),
-                self._off_ui_dispatch_adapter,
+                self._off_nested_wrapper,
                 "UI-dispatch bridge",
             ),
             (
@@ -1197,7 +1200,7 @@ class StaleMouseMoveCompiler:
                 self._build_popup_query_wrapper(
                     dropped_count_va=section_va + self._off_popup_query_dropped_count,
                 ),
-                self._off_popup_query_dropped_count,
+                self._off_popup_message_wrapper,
                 "popup query wrapper",
             ),
             (
@@ -1215,7 +1218,7 @@ class StaleMouseMoveCompiler:
                     direct_wrapper_va=section_va + self._off_direct_message_wrapper,
                     dropped_count_va=section_va + self._off_selected_message_dropped_count,
                 ),
-                self._off_direct_message_dropped_count,
+                self._state_offset,
                 "selected message wrapper",
             ),
         )
@@ -1223,7 +1226,7 @@ class StaleMouseMoveCompiler:
     def _validate_payload_slots(self, payloads: tuple[tuple[int, bytes, int, str], ...]) -> None:
         """Reject generated helpers that escape or overlap their stable ABI slots."""
         for offset, payload, limit, label in payloads:
-            if not (0 <= offset < limit <= self._section_size):
+            if not (0 <= offset < limit <= self._state_offset):
                 msg = f"{self.id} {label} has an invalid section slot"
                 raise PatchError(msg)
             if offset + len(payload) > limit:
@@ -1482,7 +1485,7 @@ class StaleMouseMoveCompiler:
             msg = f"{self.id} postcheck failed: layout mismatch"
             raise PatchError(msg)
         # Compare only this compiler's immutable regions. The fixed-interface
-        # runtime intentionally publishes its adapter into +0x1EC after this
+        # runtime intentionally publishes its adapter into the data page after this
         # dependency installs; zero-filled ABI/state cells are therefore not
         # immutable mouse-guard payload.
         payloads = self._build_payloads(section_va)

@@ -24,6 +24,7 @@ class TransitionFrameABI:
     room_presentation_active_va: int
     pre_flip_presenter_slot_va: int
     post_flip_presenter_slot_va: int
+    last_blt_state_va: int = 0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -71,10 +72,10 @@ class TransitionFrameCompiler:
 
     _section_name: ClassVar[str] = ".gk3dd"
     section_name: ClassVar[str] = _section_name
-    _section_size: ClassVar[int] = 0x900
+    _section_size: ClassVar[int] = 0x2000
     _section_characteristics: ClassVar[int] = 0xE0000020
     _magic: ClassVar[bytes] = b"GK3NDD1\0"
-    _layout_version: ClassVar[int] = 163
+    _layout_version: ClassVar[int] = 164
     _native_flip_page_count: ClassVar[int] = 2
     _off_layout_version: ClassVar[int] = 0x08
     # Control state consumed by later hooks.
@@ -116,7 +117,10 @@ class TransitionFrameCompiler:
     _off_2d_exit_count: ClassVar[int] = 0x30
     _off_blt_count: ClassVar[int] = 0x34
     _off_primary_blt_count: ClassVar[int] = 0x38
-    _off_flip_wrapper: ClassVar[int] = 0x60
+    # Transition counters are written on every Blt/Flip. Keep instructions on
+    # another page so x86 translation can protect code without trapping those
+    # ordinary state writes. Read-only window-name literals may share code.
+    _off_flip_wrapper: ClassVar[int] = 0x1060
     # Diagnostic only: 1=native Flip entered, 2=Flip returned, 3=the following
     # BeginScene entered. Repair decisions never read this field.
     _off_frame_phase: ClassVar[int] = 0x40
@@ -148,13 +152,14 @@ class TransitionFrameCompiler:
     _off_primary_blt_trace_dest_rect: ClassVar[int] = 0x448
     _off_primary_blt_trace_source_valid: ClassVar[int] = 0x458
     _off_primary_blt_trace_source_rect: ClassVar[int] = 0x45C
-    _off_scene_wrapper: ClassVar[int] = 0x180
-    _off_begin_wrapper: ClassVar[int] = 0x400
-    _off_blt_wrapper: ClassVar[int] = 0x500
-    _off_window_wrapper: ClassVar[int] = 0x800
-    _off_window_module_name: ClassVar[int] = 0x8C0
-    _off_window_proc_name: ClassVar[int] = 0x8D0
-    _off_window_order_proc_name: ClassVar[int] = 0x8E0
+    _off_last_blt_state: ClassVar[int] = 0x470  # HRESULT, destination, source, flags.
+    _off_scene_wrapper: ClassVar[int] = 0x1180
+    _off_begin_wrapper: ClassVar[int] = 0x1400
+    _off_blt_wrapper: ClassVar[int] = 0x1500
+    _off_window_wrapper: ClassVar[int] = 0x1800
+    _off_window_module_name: ClassVar[int] = 0x18C0
+    _off_window_proc_name: ClassVar[int] = 0x18D0
+    _off_window_order_proc_name: ClassVar[int] = 0x18E0
     _anchors: ClassVar[tuple[tuple[str, str], ...]] = (
         ("transition.flip_retry_anchor", "Flip retry setup"),
         ("transition.flip_result_anchor", "Flip result handling"),
@@ -164,6 +169,24 @@ class TransitionFrameCompiler:
         ("window.topmost_args", "topmost window arguments"),
         ("window.topmost_result", "topmost window continuation"),
     )
+
+    def room_draw_entry(self, pe: PEFile) -> int:
+        """Return the verified retained-page seed adapter for draw-hook composition."""
+        self.runtime_abi(pe)
+        section = pe.get_section(self._section_name)
+        if section is None:
+            msg = "transition room draw entry is unavailable"
+            raise PatchError(msg)
+        section_va = pe.rva_to_va(section.virtual_address)
+        wrapper = dict(self._build_wrappers(section_va))[self._off_scene_wrapper]
+        if (
+            section.characteristics != self._section_characteristics
+            or pe.read_bytes(section.pointer_to_raw_data + self._off_scene_wrapper, len(wrapper))
+            != wrapper
+        ):
+            msg = "transition room draw entry is modified or not executable"
+            raise PatchError(msg)
+        return section_va + self._off_scene_wrapper
 
     @classmethod
     def runtime_abi(cls, pe: PEFile) -> TransitionFrameABI:
@@ -191,6 +214,7 @@ class TransitionFrameCompiler:
             room_presentation_active_va=section_va + cls._off_room_presentation_active,
             pre_flip_presenter_slot_va=section_va + cls._off_pre_flip_presenter,
             post_flip_presenter_slot_va=(section_va + cls._off_post_flip_presenter),
+            last_blt_state_va=section_va + cls._off_last_blt_state,
         )
 
     def _check_anchors(self, pe: PEFile) -> None:
@@ -332,6 +356,8 @@ class TransitionFrameCompiler:
         last_seed_flip_generation_va: int,
         seed_count_va: int,
         last_seed_result_va: int,
+        prepare_only: bool = False,
+        seed_flip_pages: bool = True,
     ) -> bytes:
         """Repair the current page before GK3 prepares its 3D frame."""
         # Preserve every register across the preparatory page work;
@@ -354,6 +380,13 @@ class TransitionFrameCompiler:
         code.raw(b"\xc7\x05" + struct.pack("<I", room_presentation_active_va) + b"\x01\x00\x00\x00")
         code.raw(b"\x47")
         code.label("room_owner_ready")
+        if not seed_flip_pages:
+            # A windowed VR eye mirror replaces the complete retained back
+            # image, not a fullscreen physical flip page. Publish ownership
+            # without reading the desktop primary or inventing Flip success.
+            code.raw(b"\x61")
+            code.ret()
+            return code.build()
         # Initialize only the two physical pages owned by this handoff. The
         # earlier implementation invalidated the entire room on every later
         # frame; besides being unnecessary after both histories were rebuilt,
@@ -379,7 +412,7 @@ class TransitionFrameCompiler:
         code.raw(
             b"\x8b\x15" + struct.pack("<I", self.profile.address("transition.primary_surface_ptr"))
         )
-        # IDirectDrawSurface4::Blt(back, NULL, primary, NULL, DDBLT_WAIT, NULL)
+        # IDirectDrawSurface4::BltFast(back, 0, 0, primary, NULL, DDBLTFAST_WAIT)
         code.raw(b"\x6a\x10\x6a\x00\x52\x6a\x00\x6a\x00\x8b\x08\x50\xff\x51\x1c")
         code.raw(b"\xa3" + struct.pack("<I", last_seed_result_va))
         code.raw(b"\x85\xc0")
@@ -399,11 +432,45 @@ class TransitionFrameCompiler:
         code.call_absolute(self.profile.address("transition.invalidate_all_damage"))
         code.raw(b"\xff\x05" + struct.pack("<I", scene_invalidation_count_va))
         code.label("replay_scene_setup")
-        code.raw(b"\x61\x83\xc4\x04")
-        seed_site = self.profile.site("transition.seed_hook")
-        code.raw(seed_site.original)
-        code.jump_absolute(self.profile.address("transition.seed_continue"))
+        code.raw(b"\x61")
+        if prepare_only:
+            # VR still owns the same page preparation when a completed eye
+            # replaces center geometry. It must run before the mirror copy.
+            code.ret()
+        else:
+            code.raw(b"\x83\xc4\x04")
+            seed_site = self.profile.site("transition.seed_hook")
+            code.raw(seed_site.original)
+            code.jump_absolute(self.profile.address("transition.seed_continue"))
         return code.build()
+
+    def room_preparation_code(
+        self, *, wrapper_va: int, draw_entry: int, seed_flip_pages: bool = True
+    ) -> bytes:
+        """Reuse page preparation without entering the ordinary geometry draw.
+
+        The caller verifies this transition section with ``room_draw_entry``
+        before deriving its base. Preserve registers and return with no args.
+        The ordinary transition wrapper and this adapter share the same logic.
+        A complete windowed VR GPU mirror needs only room ownership, not the
+        fullscreen chain's physical-page seed; retain that pending repair for
+        a later genuine fullscreen presentation or ordinary fallback.
+        """
+        section_va = draw_entry - self._off_scene_wrapper
+        return self._build_scene_wrapper(
+            wrapper_va=wrapper_va,
+            repair_active_va=section_va + self._off_repair_active,
+            room_presentation_active_va=section_va + self._off_room_presentation_active,
+            handoff_pending_va=section_va + self._off_handoff_pending,
+            scene_invalidation_count_va=section_va + self._off_scene_invalidation_count,
+            seed_pages_remaining_va=section_va + self._off_seed_pages_remaining,
+            flip_count_va=section_va + self._off_flip_count,
+            last_seed_flip_generation_va=section_va + self._off_last_seed_flip_generation,
+            seed_count_va=section_va + self._off_seed_count,
+            last_seed_result_va=section_va + self._off_last_seed_result,
+            prepare_only=True,
+            seed_flip_pages=seed_flip_pages,
+        )
 
     def _build_begin_wrapper(
         self,
@@ -438,6 +505,7 @@ class TransitionFrameCompiler:
         retry_max_va: int,
         retry_max_caller_va: int,
         primary_blt_trace_va: int,
+        last_blt_state_va: int = 0,
     ) -> bytes:
         """Arm a native 2D-to-3D handoff at the canonical primary Blt."""
         code = X86Emitter(base_va=wrapper_va)
@@ -446,6 +514,10 @@ class TransitionFrameCompiler:
         # in volatile EDX before collecting them. The native tail reloads both
         # registers from the prebuilt COM frame and needs no restoration.
         code.raw(b"\x8b\xd0")
+        if last_blt_state_va:
+            for stack_offset, state_offset in ((4, 4), (12, 8), (20, 12)):
+                code.raw(b"\x8b\x44\x24" + bytes([stack_offset]))
+                code.raw(b"\xa3" + struct.pack("<I", last_blt_state_va + state_offset))
         code.raw(b"\xff\x05" + struct.pack("<I", blt_count_va))
         # [EBP+10h] is initialized to 99,999 before the first COM attempt and
         # decremented only after a busy result. That makes the first attempt a
@@ -518,6 +590,8 @@ class TransitionFrameCompiler:
         # Remove the hook CALL's return address so the original prebuilt COM
         # argument frame is at the top of the stack again.
         code.raw(b"\x8b\x44\x24\x04\x8b\x10\x83\xc4\x04\xff\x52\x14")
+        if last_blt_state_va:
+            code.raw(b"\xa3" + struct.pack("<I", last_blt_state_va))
         code.raw(b"\x3d\xae\x01\x76\x88")
         code.jump_absolute(self.profile.address("transition.blt_continue"))
         return code.build()
@@ -672,6 +746,7 @@ class TransitionFrameCompiler:
                     retry_max_va=section_va + self._off_blt_retry_max,
                     retry_max_caller_va=section_va + self._off_blt_retry_max_caller,
                     primary_blt_trace_va=(section_va + self._off_primary_blt_trace_count),
+                    last_blt_state_va=section_va + self._off_last_blt_state,
                 ),
             ),
         )
@@ -721,6 +796,10 @@ class TransitionFrameCompiler:
             "primary_blt_trace_source_top": self._off_primary_blt_trace_source_rect + 4,
             "primary_blt_trace_source_right": self._off_primary_blt_trace_source_rect + 8,
             "primary_blt_trace_source_bottom": self._off_primary_blt_trace_source_rect + 12,
+            "last_blt_result": self._off_last_blt_state,
+            "last_blt_destination": self._off_last_blt_state + 4,
+            "last_blt_source": self._off_last_blt_state + 8,
+            "last_blt_flags": self._off_last_blt_state + 12,
         }
         if len(set(state_offsets.values())) != len(state_offsets):
             duplicates = sorted(

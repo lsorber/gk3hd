@@ -1,0 +1,35 @@
+{
+  "winlator": {
+    "repository": "https://github.com/brunodev85/winlator-app.git",
+    "commit": "8077f374ef2d54127b088de9e8cd7b4af14d9c8b"
+  },
+  "wxr": {
+    "repository": "https://github.com/WinlatorXR/OpenXR-WXR.git",
+    "commit": "5f7a5c455050e320578539f9009333a336599659"
+  },
+  "vortek": {
+    "repository": "https://github.com/brunodev85/vortek.git",
+    "commit": "b1730c5def9b575672e671aee11d79ae7adc63d1"
+  },
+  "ndk": "24.0.8215888",
+  "zstd_jni": {
+    "commit": "c983ae3e086b63a40e1bb430cb2ebf95ecc52c71",
+    "notices": {
+      "Zstd-JNI-LICENSE.txt": {
+        "path": "LICENSE",
+        "size": 1360,
+        "sha256": "c6a6a8926f2f1732603e4b75779a5f6ce79238eb79bc36dcc5b7feb509bc6cd9"
+      },
+      "Zstandard-LICENSE.txt": {
+        "path": "src/main/native/LICENSE",
+        "size": 1530,
+        "sha256": "2c1a7fa704df8f3a606f6fc010b8b5aaebf403f3aeec339a12048f1ba7331a0b"
+      }
+    }
+  },
+  "openxr_android_loader": {
+    "url": "https://repo.maven.apache.org/maven2/org/khronos/openxr/openxr_loader_for_android/1.1.65/openxr_loader_for_android-1.1.65.aar",
+    "sha256": "a298c326085b09181c85235fb04d37510939bd30938ed4322c093c09780e8643",
+    "maximum_bytes": 33554432
+  }
+}

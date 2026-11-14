@@ -29,43 +29,87 @@ This project's goal is to modernize [Gabriel Knight 3](https://en.wikipedia.org/
 - 🚀 Faster high-resolution rendering with fewer readbacks and less overhead
 - 🧩 Support for the Steam and GOG editions
 - 🐧 Experimental Linux and Steam Deck support through Proton
+- 🖥️ Experimental PC VR on Windows
+- 🥽 Experimental standalone VR on Meta Quest 3 and Pimax Crystal
 
 ## Install and use
 
-> [!WARNING]
-> `gk3hd` is currently considered beta software.
+For any of the setups below, install Gabriel Knight 3 through Steam or GOG and
+[install uv](https://docs.astral.sh/uv/) on the same computer.
+
+### Desktop
 
 > [!TIP]
 > On Linux, select *Proton 9.0* in GK3's Steam *Properties → Compatibility*.
 > Close GK3 and exit Steam, then run the commands below (in Desktop Mode on Steam Deck).
 
-[Install uv](https://docs.astral.sh/uv/), then run this from a terminal on
-Windows or on Linux with Steam and Proton:
+Run this command in a terminal on Windows or on Linux with Steam and Proton.
 
 ```sh
 uvx gk3hd@latest install  # Install or update patches, renderer, textures and videos
-uvx gk3hd@latest status
-uvx gk3hd@latest uninstall
 ```
 
-New installations use the current display resolution. Updates keep your resolution
-and patch selection. Steam libraries are found automatically.
+Start GK3 as usual after installing. New installations use the current display
+resolution. Updates keep your resolution and patch selection. Steam libraries are
+found automatically.
 Windows requires Vulkan-capable graphics drivers.
 Nonstandard game locations can use `--game-dir PATH` (protected Windows folders
 may require an elevated terminal).
 
+### VR
+
+#### PC VR
+
+On Windows, run this in a terminal to install or update PC VR.
+
+```sh
+uvx gk3hd@latest vr install
+```
+
+Connect your headset and start an OpenXR runtime with 32-bit support, such as
+SteamVR. Open *GK3HD VR* from the Windows Start menu or double-click its shortcut
+in the GK3 game folder.
+
+#### Standalone VR
+
+1. Prepare your headset.
+   - On Quest 3, [turn on Developer Mode](https://developers.meta.com/vr/documentation/android-apps/enable-developer-mode/)
+     and stay in Quest Home with Quest Link off.
+   - On Pimax Crystal, [move the physical switch to *AIO*](https://support.pimax.com/en/support/solutions/articles/60000961814-crystal-quick-guide)
+     and [enable USB debugging](https://developer.android.com/studio/debug/dev-options#Enable-debugging).
+2. Connect the headset to the computer with a USB data cable. Put on the headset
+   and select *Allow USB debugging* if prompted.
+3. Run this in a terminal to install or update the game.
+
+   ```sh
+   uvx gk3hd@latest vr standalone install
+   ```
+
+4. Start the game from the headset.
+   - On Quest 3, open Library, select the ☰ menu on the left, then choose
+     [*Unknown Sources*](https://developers.meta.com/vr/documentation/android-apps/enable-developer-mode/#step-3-find-your-app-on-the-device)
+     and select *GK3HD VR*.
+   - On Pimax Crystal, open Library in
+     [Pimax Home](https://support.pimax.com/en/support/solutions/articles/60000803101-what-games-can-be-played-in-the-stanalone-mode-of-pimax-crystal-)
+     and select *GK3HD VR*.
+
+> [!TIP]
+> Use `uvx gk3hd@latest vr standalone doctor` to check the USB connection
+> and headset capabilities, or `uvx gk3hd@latest vr standalone launch` to open
+> the game over USB.
+
 ## Advanced use
 
-Use `gk3hd --help` for an overview of all top-level commands.
+Use `uvx gk3hd@latest --help` for an overview of all top-level commands.
 
 ### Patch the game
 
 ```sh
-uvx gk3hd patch list               # Browse patch groups and individual patches
-uvx gk3hd patch install --dry-run  # Preview without changing the game
-uvx gk3hd patch install            # Apply the recommended executable patches
-uvx gk3hd patch verify             # Verify patches and game settings
-uvx gk3hd patch uninstall          # Restore the original executable and settings
+uvx gk3hd@latest patch list               # Browse patch groups and individual patches
+uvx gk3hd@latest patch install --dry-run  # Preview without changing the game
+uvx gk3hd@latest patch install            # Apply the recommended executable patches
+uvx gk3hd@latest patch verify             # Verify patches and game settings
+uvx gk3hd@latest patch uninstall          # Restore the original executable and settings
 ```
 
 This leaves the renderer and textures untouched. Game location and display resolution are detected
@@ -80,10 +124,10 @@ changing the game.
 Install the published renderer independently, or build our modified DXVK-Sarek renderer locally:
 
 ```sh
-uvx gk3hd renderer build            # Download source, build and test in `<GAME>/gk3hd/renderer/`
-uvx gk3hd renderer install --local  # Reinstall the last verified local build
-uvx gk3hd renderer verify           # Check the DLL and its platform settings
-uvx gk3hd renderer uninstall        # Restore the previous renderer and settings (uninstall patches first)
+uvx gk3hd@latest renderer build            # Download source, build and test in `<GAME>/gk3hd/renderer/`
+uvx gk3hd@latest renderer install --local  # Reinstall the last verified local build
+uvx gk3hd@latest renderer verify           # Check the DLL and its platform settings
+uvx gk3hd@latest renderer uninstall        # Restore the previous renderer and settings (uninstall patches first)
 ```
 
 Close GK3 before installation or removal. No manual copying or registry editing is needed.
@@ -149,8 +193,7 @@ folder exists. Use `--video intro.bik` to process one video, or repeat
 `--video` for a selection. Verified outputs are reused when resuming.
 
 > [!NOTE]
-> Cinematics use SeedVR2 3B, without original-image blending, and AV1 CRF 24
-> (10-bit 4:4:4) with lossless FLAC audio in MKV files. Scene cuts separate
+> Cinematics use SeedVR2 3B without original-image blending. Scene cuts separate
 > temporal inference. Sources at 16 fps or less use independent-frame restoration
 > to avoid motion trails. Approximately 15 fps cinematics, including the Sierra
 > logo, additionally use RIFE to reach 60 fps. Other frame rates and audio timing
@@ -201,7 +244,8 @@ uv run gk3hd package draft             # New package reusing published assets
 uv run gk3hd package draft --textures  # Also pack/upload the local upscaled PNGs
 uv run gk3hd package draft --renderer  # Also upload the last verified local renderer build
 uv run gk3hd package draft --videos    # Also pack/upload local videos and the verified player
-# Combine --textures, --renderer and --videos as needed
+uv run gk3hd package draft --vr        # Also upload the verified VR components and sources
+# Combine asset flags as needed
 ```
 
 Generate/review changed textures with `textures analyze` and `textures upscale`,

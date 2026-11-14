@@ -1,0 +1,1713 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 02e5e3a..d99872a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -26,6 +26,12 @@ if(NOT DEFINED ENV{VULKAN_SDK})
+     endforeach()
+ endif()
+ find_package(Vulkan REQUIRED)
++if(NOT DEFINED GK3HD_ANDROID_SOURCE)
++    message(FATAL_ERROR "Set GK3HD_ANDROID_SOURCE to the first-party standalone adapters")
++endif()
++set(WXR_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}")
++set(VULKAN_INCLUDE "${Vulkan_INCLUDE_DIR}")
++add_subdirectory("${GK3HD_ANDROID_SOURCE}/vulkan" "${CMAKE_CURRENT_BINARY_DIR}/gk3hd-quads")
+ 
+ # Include directories
+ include_directories(${CMAKE_SOURCE_DIR}/include)
+@@ -36,6 +42,7 @@ add_library(openxr_wxr SHARED
+     src/runtime.cpp
+     src/WinXrApiUDP.cpp
+ )
++target_include_directories(openxr_wxr PRIVATE "${GK3HD_ANDROID_SOURCE}")
+ 
+ # 32-bit builds sit next to the 64-bit dll
+ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+@@ -44,6 +51,7 @@ endif()
+ 
+ # Link libraries
+ target_link_libraries(openxr_wxr
++    gk3hd_standalone_quads
+     d3d11
+     d3d12
+     dxgi
+diff --git a/src/WinXrApiUDP.cpp b/src/WinXrApiUDP.cpp
+index 2658f7a..a88afbd 100644
+--- a/src/WinXrApiUDP.cpp
++++ b/src/WinXrApiUDP.cpp
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "WinXrApiUDP.h"
++#include "tracking_freshness.h"
+ #include <Winsock2.h>
+ #include <ws2tcpip.h>
+ #include <iostream>
+@@ -36,7 +37,8 @@
+ WinXrApiUDP::WinXrApiUDP()
+ {
+ 	WSADATA wsaData;
+-	WSAStartup(MAKEWORD(2, 2), &wsaData);
++	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return;
++    winsockReady=true;
+ 
+ 	// Bound here rather than on the reader thread, so GetRetData can read it before that thread runs
+ 	udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+@@ -44,7 +46,7 @@ WinXrApiUDP::WinXrApiUDP()
+ 	{
+ 		sockaddr_in serverAddr{};
+ 		serverAddr.sin_family = AF_INET;
+-		serverAddr.sin_addr.s_addr = INADDR_ANY;
++		serverAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+ 		serverAddr.sin_port = htons(udpPort);
+ 
+ 		if (bind(udpSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
+@@ -55,25 +57,34 @@ WinXrApiUDP::WinXrApiUDP()
+ 	}
+ 
+ 	//Logger::log << "[WinXrUDP] Starting UDP receiver thread..." << std::endl;
+-	udpReadThread = std::thread(&WinXrApiUDP::ReceiveData, this);
+-	udpReadThread.detach();
++    if (udpSocket == INVALID_SOCKET) return;
++    try { udpReadThread = std::thread(&WinXrApiUDP::ReceiveData, this); }
++    catch (...) {
++        closesocket(udpSocket.exchange(INVALID_SOCKET));
++        WSACleanup();winsockReady=false;throw;
++    }
+ }
+ 
+ void WinXrApiUDP::ReceiveData()
+ {
+-	readerStarted = true;
+-	if (udpSocket == INVALID_SOCKET)
+-		return;
++    {
++        // The loader-lock fallback and worker must never both consume the
++        // first datagram. ReceiveOnce holds this lock until its bounded read ends.
++        std::lock_guard<std::mutex> owner(receiveMtx);
++        readerStarted = true;
++    }
++    if (udpSocket == INVALID_SOCKET) return;
+ 
+ 	sockaddr_in clientAddr{};
+ 
+-	while (true)
++	while (!stopping.load())
+ 	{
+ 		try
+ 		{
+ 			char buffer[16384];
+ 			int addrLen = sizeof(clientAddr);
+ 			int bytesReceived = recvfrom(udpSocket, buffer, sizeof(buffer) - 1, 0, reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
++            if (stopping.load()) break;
+ 			if (bytesReceived <= 0)
+ 			{
+ 				// Socket closed by KillReceiver: stop instead of spinning
+@@ -89,6 +100,7 @@ void WinXrApiUDP::ReceiveData()
+ 			//Logger::log << "[WinXrUDP] Error receiving UDP data: " << e.what() << std::endl;
+ 		}
+ 	}
++    readerStarted=false;cv.notify_all();
+ }
+ 
+ // A host that was asked for XrAPI 0.7 starts its tracking packet with these bytes and sends the
+@@ -202,15 +214,24 @@ void ParseBinary(const char* buffer, int length, WxrHostState& out)
+ 	for (int i = 0; i < 19; i++) out.buttons[i] = (buttonBits >> i) & 1;
+ 
+ 	int count = in.Read<int32_t>();
++	if((buffer[3]==9&&(count<0||count>kMaxPoses||length!=68+count*68+88))||
++       (buffer[3]==10&&(count<0||count>kMaxPoses||length<68+count*68+32)))
++		throw std::invalid_argument("Exact-view tracking packet extent");
+ 	if (count > kMaxPoses) count = kMaxPoses;
+ 	for (int i = 0; i < count; i++) {
+ 		WxrHostPose pose;
+ 		pose.space = in.Read<int32_t>();
+ 		pose.baseSpace = in.Read<int32_t>();
++		if (buffer[3] >= 8) pose.locationFlags = in.Read<uint32_t>() & 15;
+ 		for (float& f : pose.pose) f = in.Read<float>();
+ 		for (float& f : pose.velocity) f = in.Read<float>();
+ 		out.poses.push_back(pose);
+ 	}
++	if(buffer[3]==9) out.stereo=gk3hd::standalone::readStereoViews(in.p,size_t(in.end-in.p));
++    if(buffer[3]==10) {
++        out.inputLifetime=gk3hd::standalone::readInputLifetime(in.p,size_t(in.end-in.p));in.p+=32;
++        if(out.inputLifetime.views)out.stereo=gk3hd::standalone::readStereoViews(in.p,size_t(in.end-in.p));
++    }
+ }
+ 
+ } // namespace
+@@ -224,18 +245,30 @@ void WinXrApiUDP::StorePacket(const char* buffer, int bytesReceived)
+ 	scratch = WxrHostState{};
+ 	scratch.poses = std::move(poses);
+ 
+-	if (bytesReceived >= (int)sizeof(kBinaryMagic) && memcmp(buffer, kBinaryMagic, sizeof(kBinaryMagic)) == 0)
++	if (bytesReceived >= (int)sizeof(kBinaryMagic) && memcmp(buffer, kBinaryMagic, 3) == 0 && (buffer[3] == 7 || buffer[3] == 8 || buffer[3] == 9 || buffer[3] == 10))
+ 		ParseBinary(buffer, bytesReceived, scratch);
+ 	else
+ 		ParseText(buffer, bytesReceived, scratch);
+ 
+-	if (LastOpenXRFrameID == scratch.frameId)
++	if (!scratch.inputLifetime.present && LastOpenXRFrameID == scratch.frameId)
+ 		return;
+ 
+ 	{
+-		std::lock_guard<std::mutex> lock(mtx);
+-		std::swap(state, scratch);
+-		hasState = true;
++        std::lock_guard<std::mutex> lock(mtx);
++        if(!inputOrder.accept(scratch.inputLifetime,uint32_t(scratch.frameId)))return;
++        const auto stamp=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        controllerHistory.observe(scratch.inputLifetime,scratch,stamp);
++        if(scratch.inputLifetime.withdrawal) {
++            // This notification has no freshly sampled pose. Keep its original
++            // frame/optics and receipt timestamp while withdrawing controls.
++            state.inputLifetime=scratch.inputLifetime;
++            gk3hd::standalone::withdrawControls(state);
++        } else {
++            if(scratch.inputLifetime.present&&!scratch.inputLifetime.focused)
++                gk3hd::standalone::withdrawControls(scratch);
++            std::swap(state,scratch);hasState=true;
++            lastReceived=std::chrono::steady_clock::now();
++        }
+ 	}
+ 
+ 	cv.notify_all();
+@@ -244,6 +277,8 @@ void WinXrApiUDP::StorePacket(const char* buffer, int bytesReceived)
+ // Reads one packet on the calling thread, waiting up to timeoutMs for it
+ void WinXrApiUDP::ReceiveOnce(int timeoutMs)
+ {
++    std::lock_guard<std::mutex> owner(receiveMtx);
++    if (readerStarted.load() || stopping.load()) return;
+ 	if (udpSocket == INVALID_SOCKET)
+ 	{
+ 		Sleep(timeoutMs);
+@@ -261,12 +296,14 @@ void WinXrApiUDP::ReceiveOnce(int timeoutMs)
+ 	sockaddr_in clientAddr{};
+ 	int addrLen = sizeof(clientAddr);
+ 	int bytesReceived = recvfrom(udpSocket, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
+-	if (bytesReceived > 0)
++	if (bytesReceived > 0 && !stopping.load())
+ 		StorePacket(buffer, bytesReceived);
+ }
+ 
+ void WinXrApiUDP::SendData(std::string sendData)
+ {
++    std::lock_guard<std::mutex> owner(sendMtx);
++    if (stopping.load()) return;
+ 	try
+ 	{
+ 		struct sockaddr_in targetAddress;
+@@ -296,47 +333,94 @@ void WinXrApiUDP::SendData(std::string sendData)
+ 
+ void WinXrApiUDP::KillReceiver()
+ {
+-	//Logger::log << "[WinXrUDP] Shutting down UDP receiver..." << std::endl;
+-
+-	try
+-	{
+-		udpReadThread.~thread();
+-		udpReadThread = std::thread();
+-		closesocket(udpSocket);
+-		WSACleanup();
+-	}
+-	catch (const std::exception& e)
+-	{
+-		//Logger::log << "[WinXrUDP] Error killing UDP receiver: " << e.what() << std::endl;
+-	}
++    std::lock_guard<std::mutex> owner(stopMtx);
++    {
++        std::lock_guard<std::mutex> stateLock(mtx);
++        if (stopping.exchange(true)) return;
++    }
++    cv.notify_all();
++    const SOCKET receiving=udpSocket.load();
++    if (udpReadThread.joinable()) {
++        // Wake the blocking receiver once, without changing its steady-state
++        // receive loop or publishing an invented tracking packet. The worker
++        // checks stopping before parsing this datagram.
++        bool woken=false;
++        if (receiving!=INVALID_SOCKET) {
++            const SOCKET wake=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
++            if (wake!=INVALID_SOCKET) {
++                sockaddr_in address{};address.sin_family=AF_INET;
++                address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);address.sin_port=htons(udpPort);
++                const char marker=0;
++                woken=sendto(wake,&marker,1,0,reinterpret_cast<sockaddr*>(&address),sizeof(address))==1;
++                closesocket(wake);
++            }
++            if (!woken) {
++                // Winsock cancels blocked calls when their socket is closed.
++                shutdown(receiving,SD_BOTH);
++                closesocket(udpSocket.exchange(INVALID_SOCKET));
++            }
++        }
++        udpReadThread.join();
++    }
++    const SOCKET closed=udpSocket.exchange(INVALID_SOCKET);
++    if (closed!=INVALID_SOCKET) closesocket(closed);
++    {
++        std::lock_guard<std::mutex> sending(sendMtx);
++        if (udpSendSocket!=INVALID_SOCKET) {
++            closesocket(udpSendSocket);udpSendSocket=INVALID_SOCKET;
++        }
++    }
++    if (winsockReady) {WSACleanup();winsockReady=false;}
+ }
+ 
+ // Copies the latest host packet into out, waiting for the first one
+-bool WinXrApiUDP::GetState(WxrHostState& out) {
++bool WinXrApiUDP::GetState(WxrHostState& out, bool waitForNew, int previousFrame) {
++    return ReadState(out,waitForNew,previousFrame,nullptr);
++}
++
++bool WinXrApiUDP::GetInputFrame(WxrHostState& out, ControllerEvents& events, bool waitForNew, int previousFrame) {
++    events={};
++    return ReadState(out,waitForNew,previousFrame,&events);
++}
++
++bool WinXrApiUDP::ReadState(WxrHostState& out, bool waitForNew, int previousFrame, ControllerEvents* events) {
+ 	std::unique_lock<std::mutex> lock(mtx);
++    if (stopping.load()) return false;
+ 	// Without the socket nothing can arrive (another process already holds the port), so this
+ 	// returns false and the caller fails the call instead of the game hanging in it
+ 	if (!hasState && !HasSocket())
+ 		return false;
+ 	// The host only streams after it has seen a state message, and the one sent at startup can arrive before it listens
+-	while (!hasState) {
++	if (!hasState) {
++        // A system boundary/controller prompt may own the headset for minutes.
++        // Yield a bounded pending result; xrWaitFrame keeps the guest responsive.
++        lock.unlock();SendData("0 0 2 0");lock.lock();
+ 		if (readerStarted) {
+-			if (cv.wait_for(lock, std::chrono::milliseconds(250), [this] { return hasState; }))
+-				break;
++			cv.wait_for(lock, std::chrono::milliseconds(250), [this] { return stopping.load() || hasState; });
+ 		} else {
+ 			// Set up from inside a DllMain (Max Payne 2 VR), the loader lock keeps the reader thread
+ 			// from starting until this call returns, so waiting for it would never end
+ 			lock.unlock();
+ 			ReceiveOnce(250);
+ 			lock.lock();
+-			if (hasState)
+-				break;
++
+ 		}
+-		lock.unlock();
+-		SendData("0 0 2 0");
+-		lock.lock();
++        if (!hasState) return false;
++	}
++	// Frame admission follows actual input arrival, rather than an unrelated
++	// timer. Other state queries remain nonwaiting. A missing/stopped host can
++	// delay a frame by at most one advertised period; expiry still runs below.
++	if (waitForNew && state.frameId == previousFrame) {
++		float hz = state.floats[11];
++		auto period = std::chrono::nanoseconds(int64_t(1000000000.0 / (hz >= 30 && hz <= 240 ? hz : 90)));
++		cv.wait_for(lock, period, [&] { return stopping.load() || state.frameId != previousFrame; });
+ 	}
++    if (stopping.load()) return false;
+ 	out = state;
++    // Freeze tracking and actions at one mutex/clock cut.
++    const auto now=std::chrono::steady_clock::now();
++    gk3hd::standalone::expireTracking(out,now-lastReceived);
++    if(events)*events=controllerHistory.drain(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+ 	return true;
+ }
+ 
+@@ -344,3 +428,8 @@ WinXrApiUDP::~WinXrApiUDP()
+ {
+ 	KillReceiver();
+ }
++
++void WinXrApiUDP::RetireControllerEvents() {
++    std::lock_guard<std::mutex> lock(mtx);
++    controllerHistory.retirePending();
++}
+diff --git a/src/WinXrApiUDP.h b/src/WinXrApiUDP.h
+index bbec608..7efd789 100644
+--- a/src/WinXrApiUDP.h
++++ b/src/WinXrApiUDP.h
+@@ -29,11 +29,16 @@
+ #include <cstddef>
+ #include <atomic>
+ #include <vector>
++#include <chrono>
++#include "host_stereo_views.h"
++#include "host_input_lifetime.h"
++#include "controller_history.h"
+ 
+ // One pair of spaces the host located
+ struct WxrHostPose {
+ 	int space = 0;
+ 	int baseSpace = 0;
++	uint32_t locationFlags = 15; // Legacy WXR7 implied tracking; WXR8 carries it explicitly.
+ 	float pose[7] = {};     // position xyz, orientation xyzw; an all-zero orientation means not located
+ 	float velocity[7] = {}; // XrSpaceVelocityFlags, linear xyz, angular xyz
+ };
+@@ -45,6 +50,8 @@ struct WxrHostState {
+ 	int recenterId = 0;
+ 	bool buttons[19] = {};
+ 	std::vector<WxrHostPose> poses;
++	gk3hd::standalone::HostStereoViews stereo;
++    gk3hd::standalone::HostInputLifetime inputLifetime;
+ };
+ 
+ class WinXrApiUDP
+@@ -58,20 +65,30 @@ public:
+ 	void StorePacket(const char* buffer, int bytesReceived);
+ 	void ReceiveOnce(int timeoutMs);
+ 
+-	bool GetState(WxrHostState& out);
+-	bool HasSocket() const { return udpSocket != (int)INVALID_SOCKET; }
++	bool GetState(WxrHostState& out, bool waitForNew = false, int previousFrame = 0);
++    using ControllerEvents=gk3hd::standalone::ControllerHistory<WxrHostState>::Batch;
++    bool GetInputFrame(WxrHostState& out, ControllerEvents& events, bool waitForNew = false, int previousFrame = 0);
++    void RetireControllerEvents();
++	bool HasSocket() const { return !stopping.load() && udpSocket.load() != INVALID_SOCKET; }
+ 	~WinXrApiUDP();
+ 
+-	int LastOpenXRFrameID = -1;
++	std::atomic<int> LastOpenXRFrameID{ -1 };
+ 
+ private:
++    bool ReadState(WxrHostState& out, bool waitForNew, int previousFrame, ControllerEvents* events);
+ 	int udpPort = 7872;
+-	int udpSocket;
++	std::atomic<SOCKET> udpSocket{INVALID_SOCKET};
+ 	int udpSendPort = 7278;
+-	int udpSendSocket = (int)INVALID_SOCKET;
++	SOCKET udpSendSocket = INVALID_SOCKET;
+ 	std::thread udpReadThread;
++    std::atomic<bool> stopping{false};
++    bool winsockReady=false;
++    std::mutex stopMtx,sendMtx,receiveMtx;
+ 	WxrHostState state;
++    gk3hd::standalone::ControllerHistory<WxrHostState> controllerHistory;
++    gk3hd::standalone::InputSourceOrder inputOrder;
+ 	bool hasState = false;
++	std::chrono::steady_clock::time_point lastReceived;
+ 	WxrHostState scratch;
+ 	std::mutex parseMtx;
+ 	std::atomic<bool> readerStarted{ false };
+diff --git a/src/runtime.cpp b/src/runtime.cpp
+index ff6fd52..7d47dc5 100644
+--- a/src/runtime.cpp
++++ b/src/runtime.cpp
+@@ -19,6 +19,8 @@
+ 
+ #include "WinXrApiUDP.h"
+ #include "wxr_bridge.h"
++#include "frame_metadata_publisher.h"
++#include "ProducerAdmission.h"
+ 
+ // Minimal OpenXR Simulator Runtime (D3D11/D3D12/OpenGL)
+ // - Implements enough of the runtime interface to let OpenXR apps start and render into runtime-owned swapchains
+@@ -34,8 +36,14 @@
+ 
+ #include <windows.h>
+ #include <WinUser.h>
++#include "wine_messages.h"
++#include "renderer_failure.h"
+ #include <wrl/client.h>
+ #include <vulkan/vulkan.h>
++#include "quad.h"
++#include "movie_owner.h"
++#include "image_limits.h"
++#include "projection_capture.h"
+ #include <d3d11.h>
+ #include <d3d11_4.h>
+ #include <d3d12.h>
+@@ -180,14 +188,20 @@ inline UINT D3D12CalcSubresource(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice
+ 
+ // Simple logging (debug output + file log)
+ static FILE* g_LogFile = nullptr;
++static std::filesystem::path RuntimeDirectory() {
++    HMODULE module = nullptr;
++    wchar_t path[32768]{};
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                           reinterpret_cast<LPCWSTR>(&RuntimeDirectory), &module) ||
++        !GetModuleFileNameW(module, path, 32768))
++        throw std::runtime_error("Cannot locate the standalone runtime module");
++    return std::filesystem::path(path).parent_path();
++}
+ static void EnsureLogFile(bool append = true) {
+     if (g_LogFile) return;
+-    std::filesystem::create_directories("D:\\Winlator\\oxrwxr\\logs");
+-    if (append) {
+-        fopen_s(&g_LogFile, "D:\\Winlator\\oxrwxr\\logs\\openxr_wxr.log", "a");
+-    } else {
+-        fopen_s(&g_LogFile, "D:\\Winlator\\oxrwxr\\logs\\openxr_wxr.log", "w");
+-    }
++    auto directory = RuntimeDirectory() / "logs";
++    std::filesystem::create_directories(directory);
++    _wfopen_s(&g_LogFile, (directory / "openxr_wxr.log").c_str(), append ? L"a" : L"w");
+ }
+ static void Log(const char* msg) {
+     OutputDebugStringA(msg);
+@@ -296,6 +310,8 @@ static std::string preferredProfile;
+ static bool sendHaptics = true;
+ 
+ static WinXrApiUDP* udpReader;
++static bool g_hostInputFocused=false;
++static bool g_hostInputPending=true;
+ 
+ static std::string hmdMake;
+ static std::string hmdModel;
+@@ -310,10 +326,16 @@ static float FOVH = -1;
+ static float FOVV = -1;
+ 
+ static std::map<std::pair<XrSpace, XrSpace>, XrPosef> SpacePoses;
++static std::map<std::pair<XrSpace, XrSpace>, XrSpaceLocationFlags> SpaceFlags;
+ static std::map<std::pair<XrSpace, XrSpace>, XrSpaceVelocity> SpaceVelocities;
+ 
+ static int OpenXRFrameID = 0;
+ static int OpenXRFrameWait = 0;
++static std::array<XrView,2> g_vulkanFrameViews{};
++static gk3hd::standalone::HostStereoViews g_hostStereoViews;
++static XrSpace g_vulkanFrameSpace=XR_NULL_HANDLE;
++static bool g_vulkanFrameViewsValid=false;
++static XrResult XRAPI_PTR xrLocateSpace_runtime(XrSpace,XrSpace,XrTime,XrSpaceLocation*);
+ static int ViewportWidth = 1280;
+ static int ViewportHeight = 720;
+ static int DirectEyeWidth = 0;   // Per-eye size for direct transport from the host (headset x render scale), 0 if none
+@@ -381,6 +403,8 @@ static std::map<std::pair<XrSpace, XrSpace>, bool> g_locateSpaces;
+ static bool g_spacesChanged = false;
+ 
+ static PFN_vkGetInstanceProcAddr g_app_vk_gipa = NULL;
++static VkInstance g_app_vk_instance = VK_NULL_HANDLE;
++static VkDevice g_format_list_device = VK_NULL_HANDLE;
+ static XrCompositionLayerProjection g_last_proj;
+ 
+ struct Instance {
+@@ -403,6 +427,14 @@ struct Session {
+     VkCommandPool vkCmdPool{VK_NULL_HANDLE};
+     VkFence vkAcquireFence;
+     bool usesVulkan{false};
++    std::unique_ptr<gk3hd::standalone::QuadComposer> quadComposer;
++    ~Session() {
++        // Explicit xrDestroySession retires work and releases this owner. A
++        // static DLL finalizer cannot safely call Vulkan: ExitProcess has
++        // already stopped the client's other threads. Leave an abandoned
++        // session to process teardown instead of issuing unsafe GPU destroys.
++        (void)quadComposer.release();
++    }
+ 
+     // OpenGL support
+     HDC glDC{nullptr};
+@@ -432,6 +464,8 @@ struct Session {
+     // Vulkan preview resources
+     VkSurfaceKHR vkPreviewSurface;
+     VkSwapchainKHR vkPreviewSwapchain;
++    bool vkPreviewNeedsRebuild{false};
++    uint64_t vkPreviewGeneration{0};
+     VkBuffer vkSyncBuffer = VK_NULL_HANDLE;
+     VkDeviceMemory vkSyncBufferMemory = VK_NULL_HANDLE;
+     // Per preview image, so the blit can be handed to the present instead of waited on: the
+@@ -442,6 +476,7 @@ struct Session {
+     std::vector<VkSemaphore> vkBlitDone;
+     std::vector<VkFence> vkBlitFences;
+     std::vector<bool> vkBlitSubmitted;
++    gk3hd::ProducerAdmission vkProducerAdmission;
+ 
+     // Blit resources
+     ComPtr<ID3D11VertexShader> blitVS;
+@@ -877,7 +912,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
+         default:
+             break;
+     }
+-    return DefWindowProc(hWnd, msg, wParam, lParam);
++    // This class is registered with RegisterClassW/CreateWindowExW. The ANSI
++    // default proc truncates UTF-16 WM_SETTEXT at its first zero byte, leaving
++    // only "G" instead of the stereo producer's full window identity.
++    return DefWindowProcW(hWnd, msg, wParam, lParam);
+ }
+ 
+ static void ensurePreview(Session& s) {
+@@ -907,6 +945,7 @@ static void ensurePreview(Session& s) {
+ // Window thread functions removed - window now handled on main thread
+ 
+ } // namespace rt
++#include "controller_runtime.h"
+ 
+ // ----------------- OpenXR runtime exports -----------------
+ 
+@@ -1182,7 +1221,7 @@ static XrResult XRAPI_PTR xrGetVulkanDeviceExtensionsKHR_runtime(
+ 
+ static XrResult XRAPI_PTR xrGetVulkanGraphicsDeviceKHR_runtime(
+     XrInstance h, XrSystemId id, VkInstance vkInstance, VkPhysicalDevice *out) {
+-
++    rt::g_app_vk_instance = vkInstance;
+     PFN_vkGetInstanceProcAddr gipa = get_gipa();
+     if (!gipa) return XR_ERROR_RUNTIME_FAILURE;
+     PFN_vkEnumeratePhysicalDevices epd =
+@@ -1210,6 +1249,7 @@ static XrResult XRAPI_PTR xrCreateVulkanInstanceKHR_runtime(
+         createInfo->pfnGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
+     if (!pfnCreateInstance) return XR_ERROR_RUNTIME_FAILURE;
+     *vulkanResult = pfnCreateInstance(createInfo->vulkanCreateInfo, createInfo->vulkanAllocator, vulkanInstance);
++    if (*vulkanResult == VK_SUCCESS) rt::g_app_vk_instance = *vulkanInstance;
+     Logf("[SimXR] xrCreateVulkanInstanceKHR: vkResult=%d", (int)*vulkanResult);
+     return XR_SUCCESS;
+ }
+@@ -1220,10 +1260,20 @@ static XrResult XRAPI_PTR xrCreateVulkanDeviceKHR_runtime(
+     VkDevice* vulkanDevice, VkResult* vulkanResult) {
+     if (!createInfo || !vulkanDevice || !vulkanResult) return XR_ERROR_VALIDATION_FAILURE;
+     rt::g_app_vk_gipa = createInfo->pfnGetInstanceProcAddr;
+-    auto pfnCreateDevice = reinterpret_cast<PFN_vkCreateDevice_t>(createInfo->pfnGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateDevice"));
++    if (!rt::g_app_vk_instance) return XR_ERROR_RUNTIME_FAILURE;
++    auto pfnCreateDevice = reinterpret_cast<PFN_vkCreateDevice_t>(createInfo->pfnGetInstanceProcAddr(rt::g_app_vk_instance, "vkCreateDevice"));
+     if (!pfnCreateDevice) return XR_ERROR_RUNTIME_FAILURE;
+     *vulkanResult = pfnCreateDevice(createInfo->vulkanPhysicalDevice, createInfo->vulkanCreateInfo,
+                                     createInfo->vulkanAllocator, vulkanDevice);
++    if (*vulkanResult == VK_SUCCESS) {
++        // Use optional image-format lists only on the device that enabled
++        // them. Other clients/backends keep the ordinary mutable image path.
++        rt::g_format_list_device = VK_NULL_HANDLE;
++        const auto& info=*createInfo->vulkanCreateInfo;
++        for(uint32_t i=0;i<info.enabledExtensionCount;i++)
++            if(info.ppEnabledExtensionNames[i] && !strcmp(info.ppEnabledExtensionNames[i],VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME))
++                rt::g_format_list_device = *vulkanDevice;
++    }
+ 
+     Logf("[SimXR] xrCreateVulkanDeviceKHR: vkResult=%d", (int)*vulkanResult);
+     return XR_SUCCESS;
+@@ -1252,9 +1302,9 @@ static XrResult XRAPI_PTR xrCreateInstance_runtime(const XrInstanceCreateInfo* c
+ 
+     std::filesystem::path tmpPath = "Z:/";
+     std::filesystem::path dirPath = "Z:/tmp/xr";
+-    std::filesystem::path confPath = "D:/Winlator/oxrwxr";
++    std::filesystem::path confPath = RuntimeDirectory();
+     std::filesystem::path confFile = confPath / "conf.txt";
+-    std::filesystem::path fallbackDir = "D:/xrtemp";
++    std::filesystem::path fallbackDir = RuntimeDirectory() / "xr";
+     std::filesystem::path filePath = dirPath / "vr";
+     std::filesystem::path fallbackFile = fallbackDir / "vr";
+ 
+@@ -1471,6 +1521,7 @@ static XrResult XRAPI_PTR xrCreateInstance_runtime(const XrInstanceCreateInfo* c
+ 
+     Logf("[WinXrUDP] Starting UDP");
+     udpReader = new WinXrApiUDP();
++    g_hostInputFocused=false;g_hostInputPending=true;
+     if (!udpReader->HasSocket()) Log("[WinXrUDP] ERROR - could not bind the UDP port, is another VR process already running? No tracking data will arrive");
+     udpReader->SendData("0 0 2 0");
+ 
+@@ -1518,7 +1569,11 @@ static XrResult XRAPI_PTR xrCreateInstance_runtime(const XrInstanceCreateInfo* c
+ static void StopBridgeSender();
+ 
+ static XrResult XRAPI_PTR xrDestroyInstance_runtime(XrInstance instance) {
++    Gk3hdRetireControllerAdmission();
+     StopBridgeSender();  // before the loader can unload this DLL
++    rt::g_app_vk_instance = VK_NULL_HANDLE;
++    rt::g_format_list_device = VK_NULL_HANDLE;
++    rt::g_app_vk_gipa = nullptr;
+     //----------------
+     //OXRWXR CHANGE:
+     //----------------
+@@ -1527,7 +1582,7 @@ static XrResult XRAPI_PTR xrDestroyInstance_runtime(XrInstance instance) {
+     {
+         Logf("[WinXrUDP] Shutting Down UDP");
+         if (udpReader) {
+-            udpReader->KillReceiver();
++            delete udpReader;  // joins receiver before runtime code can unload
+             udpReader = nullptr;
+         }
+     }
+@@ -1610,6 +1665,18 @@ static XrResult XRAPI_PTR xrGetSystemProperties_runtime(XrInstance, XrSystemId,
+     props->graphicsProperties.maxSwapchainImageWidth = 4096;
+     props->graphicsProperties.maxSwapchainImageHeight = 4096;
+     props->graphicsProperties.maxLayerCount = 16;
++    if (rt::g_session.usesVulkan && rt::g_session.vkPhysicalDevice != VK_NULL_HANDLE) {
++        auto resolve = get_gipa();
++        auto query = resolve ? reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(resolve(
++            rt::g_session.vkInstance, "vkGetPhysicalDeviceProperties")) : nullptr;
++        if (!query) return XR_ERROR_RUNTIME_FAILURE;
++        VkPhysicalDeviceProperties device{};
++        query(rt::g_session.vkPhysicalDevice, &device);
++        const auto maximum = gk3hd::standalone::worldImageLimits(device.limits);
++        if (!maximum.width || !maximum.height) return XR_ERROR_RUNTIME_FAILURE;
++        props->graphicsProperties.maxSwapchainImageWidth = maximum.width;
++        props->graphicsProperties.maxSwapchainImageHeight = maximum.height;
++    }
+     props->trackingProperties.positionTracking = XR_TRUE;
+     props->trackingProperties.orientationTracking = XR_TRUE;
+     Log("[SimXR] xrGetSystemProperties: returning OpenXR Simulator");
+@@ -1785,6 +1852,11 @@ static XrResult XRAPI_PTR xrCreateSession_runtime(XrInstance instance, const XrS
+ }
+ 
+ 
++static VkResult RetireStandaloneDevice(VkDevice device) {
++    auto resolve=reinterpret_cast<PFN_vkGetDeviceProcAddr>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkGetDeviceProcAddr"));
++    auto wait=resolve?reinterpret_cast<PFN_vkDeviceWaitIdle>(resolve(device,"vkDeviceWaitIdle")):nullptr;
++    return wait?wait(device):VK_ERROR_INITIALIZATION_FAILED;
++}
+ static XrResult XRAPI_PTR xrDestroySession_runtime(XrSession s) {
+     Logf("[SimXR] xrDestroySession called (handle=%llu)", (unsigned long long)s);
+     if (s != rt::g_session.handle) {
+@@ -1792,7 +1864,17 @@ static XrResult XRAPI_PTR xrDestroySession_runtime(XrSession s) {
+              (unsigned long long)rt::g_session.handle);
+         return XR_ERROR_HANDLE_INVALID;
+     }
+-    
++    // Complete GPU ownership before changing session state or destroying any
++    // compositor resources. A failed retirement must leave the session intact.
++    if(rt::g_session.usesVulkan && rt::g_session.vkDevice) {
++        const auto retired=RetireStandaloneDevice(rt::g_session.vkDevice);
++        if(retired!=VK_SUCCESS && retired!=VK_ERROR_DEVICE_LOST) {
++            Logf("[GK3HD] Session retirement failed: %d",int(retired));
++            return XR_ERROR_RUNTIME_FAILURE;
++        }
++    }
++
++    Gk3hdRetireControllerAdmission();
+     // Transfer window and swapchain to global persistent storage
+     // Unity likes to create/destroy sessions rapidly for compatibility checks
+     {
+@@ -1823,6 +1905,25 @@ static XrResult XRAPI_PTR xrDestroySession_runtime(XrSession s) {
+     rt::g_session.glRC = nullptr;
+     // Reset Vulkan state
+     if (rt::g_session.usesVulkan) {
++        auto& vk=rt::g_session;
++        vk.quadComposer.reset();
++        for(auto semaphore:vk.vkBlitDone) if(semaphore) vkDestroySemaphore(vk.vkDevice,semaphore,nullptr);
++        for(auto fence:vk.vkBlitFences) if(fence) vkDestroyFence(vk.vkDevice,fence,nullptr);
++        vk.vkPreviewImages.clear();vk.vkBlitCmds.clear();vk.vkBlitDone.clear();
++        vk.vkBlitFences.clear();vk.vkBlitSubmitted.clear();
++        vk.vkProducerAdmission.reset(0);
++        if(vk.vkPreviewSwapchain) vkDestroySwapchainKHR(vk.vkDevice,vk.vkPreviewSwapchain,nullptr);
++        vk.vkPreviewSwapchain=VK_NULL_HANDLE;
++        if(vk.vkPreviewSurface) {
++            auto destroy=reinterpret_cast<PFN_vkDestroySurfaceKHR>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkDestroySurfaceKHR"));
++            if(destroy) destroy(vk.vkInstance,vk.vkPreviewSurface,nullptr);
++            vk.vkPreviewSurface=VK_NULL_HANDLE;
++        }
++        if(vk.vkAcquireFence) vkDestroyFence(vk.vkDevice,vk.vkAcquireFence,nullptr);
++        vk.vkAcquireFence=VK_NULL_HANDLE;
++        if(vk.vkSyncBuffer) vkDestroyBuffer(vk.vkDevice,vk.vkSyncBuffer,nullptr);
++        if(vk.vkSyncBufferMemory) vkFreeMemory(vk.vkDevice,vk.vkSyncBufferMemory,nullptr);
++        vk.vkSyncBuffer=VK_NULL_HANDLE;vk.vkSyncBufferMemory=VK_NULL_HANDLE;
+         if (rt::g_session.vkCmdPool != VK_NULL_HANDLE && rt::g_session.vkDevice != VK_NULL_HANDLE) {
+             vkDestroyCommandPool(rt::g_session.vkDevice, rt::g_session.vkCmdPool, nullptr);
+         }
+@@ -1850,6 +1951,7 @@ static XrResult XRAPI_PTR xrDestroySession_runtime(XrSession s) {
+     }
+     rt::g_locateSpaces.clear();
+     SpacePoses.clear();
++    SpaceFlags.clear();
+     SpaceVelocities.clear();
+     rt::g_spacesChanged = true;
+     rt::g_sessionWasVR = false;
+@@ -2125,6 +2227,7 @@ static XrResult XRAPI_PTR xrCreateSwapchain_runtime(XrSession, const XrSwapchain
+         for (uint32_t i = 0; i < chain.imageCount; ++i) {
+             VkImageCreateInfo imgInfo{};
+             imgInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++            imgInfo.flags         = (ci->usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0;
+             imgInfo.imageType     = VK_IMAGE_TYPE_2D;
+             imgInfo.format        = chain.vkFormat;
+             imgInfo.extent        = { chain.width, chain.height, 1 };
+@@ -2135,6 +2238,17 @@ static XrResult XRAPI_PTR xrCreateSwapchain_runtime(XrSession, const XrSwapchain
+             imgInfo.usage         = usageFlags;
+             imgInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+             imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++            VkFormat viewFormats[2]={chain.vkFormat,VK_FORMAT_UNDEFINED};
++            VkImageFormatListCreateInfo viewList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
++            if(rt::g_format_list_device==rt::g_session.vkDevice && rt::g_format_list_device!=VK_NULL_HANDLE &&
++               (ci->usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) &&
++               (chain.vkFormat==VK_FORMAT_B8G8R8A8_SRGB || chain.vkFormat==VK_FORMAT_R8G8B8A8_SRGB)) {
++                viewFormats[1]=chain.vkFormat==VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
++                viewList.viewFormatCount=2;viewList.pViewFormats=viewFormats;
++                imgInfo.pNext=&viewList;
++                if(i==0) Logf("[GK3HD] Explicit mutable eye image formats: %d,%d at %ux%u",
++                              int(viewFormats[0]),int(viewFormats[1]),chain.width,chain.height);
++            }
+ 
+             VkImage img = VK_NULL_HANDLE;
+             VkResult vr = vkCreateImage(rt::g_session.vkDevice, &imgInfo, nullptr, &img);
+@@ -2671,37 +2785,52 @@ static XrResult XRAPI_PTR xrBeginSession_runtime(XrSession s, const XrSessionBeg
+     Logf("[SimXR] xrBeginSession called (session=%llu)", (unsigned long long)s);
+     Log("[SimXR] Session started - moving to SYNCHRONIZED/VISIBLE states");
+     Log("[SimXR] ============================================");
+-    rt::PushState(s, XR_SESSION_STATE_SYNCHRONIZED); 
+-    rt::PushState(s, XR_SESSION_STATE_VISIBLE);
+-    rt::PushState(s, XR_SESSION_STATE_FOCUSED);
+-    return XR_SUCCESS; 
++    g_hostInputFocused=false;g_hostInputPending=true;
++    rt::PushState(s, XR_SESSION_STATE_SYNCHRONIZED);
++    return XR_SUCCESS;
+ }
+-static XrResult XRAPI_PTR xrEndSession_runtime(XrSession s) { Log("[SimXR] xrEndSession"); rt::PushState(s, XR_SESSION_STATE_STOPPING); rt::PushState(s, XR_SESSION_STATE_IDLE); return XR_SUCCESS; }
++static XrResult XRAPI_PTR xrEndSession_runtime(XrSession s) { if(s==rt::g_session.handle)Gk3hdRetireControllerAdmission(); Log("[SimXR] xrEndSession"); rt::PushState(s, XR_SESSION_STATE_STOPPING); rt::PushState(s, XR_SESSION_STATE_IDLE); return XR_SUCCESS; }
+ static XrResult XRAPI_PTR xrRequestExitSession_runtime(XrSession s) { rt::PushState(s, XR_SESSION_STATE_EXITING); return XR_SUCCESS; }
++static uint64_t StandalonePreviewTimeoutNs() {
++    // An owned standalone game can be retired by its launcher if the driver
++    // stops completing frames. Leave developer/unhosted waits unchanged.
++    static const uint64_t timeout=[] {
++        char sessionName[96];
++        return standalone_renderer_failure_name(sessionName) ? uint64_t(5000000000) : UINT64_MAX;
++    }();
++    return timeout;
++}
++
++static void ReportPreviewWaitFailure(VkResult result) {
++    if(result==VK_TIMEOUT || result==VK_ERROR_DEVICE_LOST)
++        standalone_report_renderer_failure();
++}
++
++// Bound submitted GPU work before obtaining the next pose. Keep the transport
++// allocation and every original reuse/ownership wait; allocation is not admission.
++static XrResult Gk3hdAdmitProducer(rt::Session& session) {
++    if(!session.usesVulkan||!session.vkDevice||session.vkPreviewNeedsRebuild)return XR_SUCCESS;
++    auto image=session.vkProducerAdmission.pending(2);
++    if(!image)return XR_SUCCESS;
++    if(*image>=session.vkBlitFences.size()){standalone_report_renderer_failure();return XR_ERROR_RUNTIME_FAILURE;}
++    static bool witnessed=false;
++    if(!witnessed){Log("[GpuLead] standalone admission maxPending=2");witnessed=true;}
++    const auto timeout=StandalonePreviewTimeoutNs();
++    auto result=vkWaitForFences(session.vkDevice,1,&session.vkBlitFences[*image],VK_TRUE,timeout);
++    if(result!=VK_SUCCESS){Logf("[GpuLead] completion wait failed result=%d timeoutNs=%llu",int(result),(unsigned long long)timeout);standalone_report_renderer_failure();return XR_ERROR_RUNTIME_FAILURE;}
++    return XR_SUCCESS;
++}
+ static XrResult XRAPI_PTR xrWaitFrame_runtime(XrSession, const XrFrameWaitInfo*, XrFrameState* s) {
+     if (!s) return XR_ERROR_VALIDATION_FAILURE;
++    g_vulkanFrameViewsValid=false;
++    auto admitted=Gk3hdAdmitProducer(rt::g_session);if(XR_FAILED(admitted))return admitted;
+     // Message pump so the preview window stays responsive
+-    MSG msg; while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessage(&msg); }
++    Gk3hdPumpPreviewMessages(rt::g_session.hwnd);
+     static LARGE_INTEGER freq = [](){ LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
+     static double periodSec = 1.0 / 90.0;
+     static long long periodNs = (long long)(periodSec * 1e9);
+-    static double nextTick = []() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)t.QuadPart; }();
+-
+-    // Paced before the host state is read, so the game gets the poses as they are when it starts the frame
+-    for (;;) {
+-        LARGE_INTEGER now; QueryPerformanceCounter(&now);
+-        double dt = (nextTick - (double)now.QuadPart) / (double)freq.QuadPart;
+-        if (dt <= 0.0) {
+-            // A game slower than the display must not bank ticks, or it runs uncapped until they are used up
+-            if (-dt > periodSec) nextTick = (double)now.QuadPart;
+-            break;
+-        }
+-        double ms = dt * 1000.0;
+-        if (ms > 5.0) ms = 5.0;
+-        if (ms < 0.0) ms = 0.0;
+-        Sleep((DWORD)ms);
+-    }
+-    nextTick += periodSec * (double)freq.QuadPart;
++    // Wait for the next host packet below instead of sleeping on a separate
++    // display clock before sampling input.
+ 
+     //----------------
+     //OXRWXR CHANGE:
+@@ -2709,13 +2838,32 @@ static XrResult XRAPI_PTR xrWaitFrame_runtime(XrSession, const XrFrameWaitInfo*,
+     // Now we pass 6DOF data always
+     // The packet was parsed when it arrived; static so the pose list keeps its buffer between frames
+     static WxrHostState host;
+-    if (!udpReader->GetState(host)) {
++    if (!Gk3hdReadControllerHost(host)) {
++        if (udpReader->HasSocket()) {
++            // No first host packet yet. Never claim a pose, focus or rendered
++            // image while Android's native session is waiting for system UI.
++            LARGE_INTEGER now;QueryPerformanceCounter(&now);
++            s->type=XR_TYPE_FRAME_STATE;s->shouldRender=XR_FALSE;
++            s->predictedDisplayPeriod=periodNs;
++            s->predictedDisplayTime=XrTime(double(now.QuadPart)*1e9/double(freq.QuadPart))+periodNs;
++            return XR_SUCCESS;
++        }
+         static bool logged = false;
+         if (!logged) Log("[SimXR] xrWaitFrame: ERROR - the UDP port is not bound so no data can come from the host, failing the call");
+         logged = true;
+         return XR_ERROR_RUNTIME_FAILURE;
+     }
+ 
++    const bool focused=!host.inputLifetime.present||host.inputLifetime.focused;
++    if(g_hostInputPending) {
++        rt::PushState(rt::g_session.handle,XR_SESSION_STATE_VISIBLE);
++        g_hostInputPending=false;
++    }
++    if(g_hostInputFocused!=focused) {
++        g_hostInputFocused=focused;
++        rt::PushState(rt::g_session.handle,focused?XR_SESSION_STATE_FOCUSED:XR_SESSION_STATE_VISIBLE);
++    }
++    g_hostStereoViews=host.stereo;
+     const float* floats = host.floats;
+     const bool* buttonBools = host.buttons;
+     int openXRFrameID = host.frameId;
+@@ -2734,6 +2882,7 @@ static XrResult XRAPI_PTR xrWaitFrame_runtime(XrSession, const XrFrameWaitInfo*,
+         std::pair<XrSpace, XrSpace> key;
+         key.first = (XrSpace)(intptr_t)hostPose.space;
+         key.second = (XrSpace)(intptr_t)hostPose.baseSpace;
++        SpaceFlags[key] = hostPose.locationFlags;
+         if (pose.orientation.x == 0 && pose.orientation.y == 0 && pose.orientation.z == 0 && pose.orientation.w == 0) {
+             // Pair not located by the host
+             SpaceVelocities.erase(key);
+@@ -2871,9 +3020,22 @@ static void sendUdpData() {
+ 
+ static XrResult XRAPI_PTR xrBeginFrame_runtime(XrSession, const XrFrameBeginInfo*) { return XR_SUCCESS; }
+ 
++static XrResult XRAPI_PTR xrGk3hdGetCpuFrameBeginSupportV1_runtime(XrInstance, XrBool32* supported) {
++    // CPU-only polling/session state and frame begin; never image writes/end.
++    if (!supported) return XR_ERROR_VALIDATION_FAILURE;
++    *supported = XR_TRUE;
++    Log("[GK3HD] CPU-only frame-begin capability negotiated");
++    return XR_SUCCESS;
++}
++
+ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int format) {
+     if (s.usesVulkan) {
+-        if (s.vkPreviewSwapchain && s.previewWidth == width && s.previewHeight == height && s.previewFormat == format) return;
++        if (s.vkPreviewSwapchain && !s.vkPreviewNeedsRebuild && s.previewWidth == width && s.previewHeight == height && s.previewFormat == format) return;
++        if(s.vkPreviewSwapchain) {
++            const auto retired=RetireStandaloneDevice(s.vkDevice);
++            if(retired!=VK_SUCCESS)
++                throw std::runtime_error("Preview GPU retirement failed: "+std::to_string(int(retired)));
++        }
+     } else if (!s.usesD3D12) {
+         if (s.previewSwapchain && s.previewWidth == width && s.previewHeight == height && s.previewFormat == format) return;
+     } else {
+@@ -3055,6 +3217,11 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+         s.previewFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+         Log("[SimXR] DX12 preview swapchain initialized");
+     } else if (s.usesVulkan) {
++        // This is a pixel transport, not a desktop mirror. Keep the native X
++        // drawable at the exact stereo+metadata extent, even off-screen.
++        SetWindowTextW(s.hwnd,L"GK3HD XR stereo");
++        SetWindowLongPtrW(s.hwnd,GWL_STYLE,WS_POPUP|WS_VISIBLE);
++        SetWindowPos(s.hwnd,nullptr,0,0,width,height,SWP_FRAMECHANGED|SWP_NOZORDER|SWP_NOACTIVATE|SWP_SHOWWINDOW);
+         // Destroy existing preview swapchain if needed.
+         if (s.vkPreviewSwapchain != VK_NULL_HANDLE) {
+             // The per-image blit resources below belong to that swapchain's images, so they go with
+@@ -3066,6 +3233,7 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+                     }
+                 }
+             }
++            if(s.quadComposer) s.quadComposer->reset();
+             if (!s.vkBlitCmds.empty()) {
+                 vkFreeCommandBuffers(s.vkDevice, s.vkCmdPool, (uint32_t)s.vkBlitCmds.size(), s.vkBlitCmds.data());
+             }
+@@ -3080,9 +3248,15 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+             s.vkBlitDone.clear();
+             s.vkBlitFences.clear();
+             s.vkBlitSubmitted.clear();
++            s.vkProducerAdmission.reset(0);
+ 
+             vkDestroySwapchainKHR(s.vkDevice, s.vkPreviewSwapchain, nullptr);
+             s.vkPreviewSwapchain = VK_NULL_HANDLE;
++            if(s.vkPreviewSurface) {
++                auto destroy=reinterpret_cast<PFN_vkDestroySurfaceKHR>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkDestroySurfaceKHR"));
++                if(destroy) destroy(s.vkInstance,s.vkPreviewSurface,nullptr);
++                s.vkPreviewSurface=VK_NULL_HANDLE;
++            }
+         }
+ 
+         VkWin32SurfaceCreateInfoKHR surfaceInfo{};
+@@ -3093,21 +3267,58 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+         VkResult result = vkCreateWin32SurfaceKHR(s.vkInstance, &surfaceInfo,  nullptr, &s.vkPreviewSurface);
+         if (result != VK_SUCCESS) {
+             Logf("[SimXR] ERROR: Failed to create Win32 surface (%d)", result);
++            return;
+         }
+ 
++        auto surfaceCaps=reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
++            get_gipa()(s.vkInstance,"vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
++        VkSurfaceCapabilitiesKHR caps{};
++        if(!surfaceCaps || surfaceCaps(s.vkPhysicalDevice,s.vkPreviewSurface,&caps)!=VK_SUCCESS)
++            throw std::runtime_error("Cannot query stereo transport surface capabilities");
++        VkCompositeAlphaFlagBitsKHR alpha=VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
++        for(auto choice:{VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
++                         VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR})
++            if(caps.supportedCompositeAlpha&choice) {alpha=choice;break;}
++
+         VkSwapchainCreateInfoKHR createInfo{};
+         createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+         createInfo.surface = s.vkPreviewSurface;            // VkSurfaceKHR for hwnd
+-        createInfo.minImageCount = 2;
++        // Keep producer capacity while the consumer holds up to three images.
++        // A three-image pool stalls Crystal world-to-menu transitions.
++        createInfo.minImageCount = std::max(6u,caps.minImageCount);
++        if(caps.maxImageCount) createInfo.minImageCount=std::min(createInfo.minImageCount,caps.maxImageCount);
+         createInfo.imageFormat = (VkFormat)format;          // XR swapchain format
+         createInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+         createInfo.imageExtent = { width, height };
+         createInfo.imageArrayLayers = 1;
+-        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+-        createInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+-        createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
++        createInfo.preTransform = caps.currentTransform;
++        createInfo.compositeAlpha = alpha;
+         createInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
++        // Workbench-only A/B. Never assume a presentation mode is supported.
++        auto presentModes=reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
++            get_gipa()(s.vkInstance,"vkGetPhysicalDeviceSurfacePresentModesKHR"));
++        uint32_t modeCount=0;
++        if(!presentModes || presentModes(s.vkPhysicalDevice,s.vkPreviewSurface,&modeCount,nullptr)!=VK_SUCCESS ||
++           modeCount==0 || modeCount>32) throw std::runtime_error("Cannot query stereo transport present modes");
++        std::vector<VkPresentModeKHR> modes(modeCount);
++        if(presentModes(s.vkPhysicalDevice,s.vkPreviewSurface,&modeCount,modes.data())!=VK_SUCCESS)
++            throw std::runtime_error("Cannot read stereo transport present modes");
++        char requested[16]{};
++        auto requestedLength=GetEnvironmentVariableA("GK3HD_WXR_PRESENT_MODE",requested,sizeof(requested));
++        if(requestedLength) {
++            if(requestedLength>=sizeof(requested)) throw std::runtime_error("Invalid transport present mode");
++            VkPresentModeKHR desired;
++            if(!strcmp(requested,"immediate")) desired=VK_PRESENT_MODE_IMMEDIATE_KHR;
++            else if(!strcmp(requested,"mailbox")) desired=VK_PRESENT_MODE_MAILBOX_KHR;
++            else throw std::runtime_error("Unknown transport present mode");
++            if(std::find(modes.begin(),modes.end(),desired)==modes.end())
++                throw std::runtime_error("Requested transport present mode unsupported");
++            createInfo.presentMode=desired;
++        }
++        Logf("[GK3HD] Workbench transport present mode=%d images=%u available=%u",int(createInfo.presentMode),
++             createInfo.minImageCount,modeCount);
+         createInfo.clipped = VK_TRUE;
+         createInfo.oldSwapchain = VK_NULL_HANDLE;
+ 
+@@ -3115,6 +3326,12 @@ static void ensurePreviewSized(rt::Session& s, UINT width, UINT height, int form
+         if (result != VK_SUCCESS) {
+             Logf("[SimXR] ERROR: Failed to create Vulkan preview swapchain with format %d", format);
+         }
++        else {
++            static uint64_t generations=0;
++            if(generations==UINT64_MAX)throw std::runtime_error("Transport pool generation exhausted");
++            s.vkPreviewGeneration=++generations;
++            s.vkPreviewNeedsRebuild=false;Log("[GK3HD] Stereo transport swapchain ready");
++        }
+     } else {
+         ComPtr<IDXGIDevice> dxgiDev; s.d3d11Device.As(&dxgiDev);
+         ComPtr<IDXGIAdapter> adapter; dxgiDev->GetAdapter(adapter.GetAddressOf());
+@@ -3565,7 +3782,11 @@ static bool VulkanReadbackPixels(
+ 
+     VkMemoryAllocateInfo stagingAlloc{};
+     stagingAlloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+-    stagingAlloc.allocationSize = bufMemReq.size;
++    // Wine's placed-memory mapping requires page-aligned allocations even
++    // when a legacy vkMapMemory request names only the unpadded buffer size.
++    SYSTEM_INFO systemInfo{}; GetSystemInfo(&systemInfo);
++    const auto alignment=std::max(bufMemReq.alignment,VkDeviceSize(systemInfo.dwAllocationGranularity));
++    stagingAlloc.allocationSize = (bufMemReq.size+alignment-1)/alignment*alignment;
+     stagingAlloc.memoryTypeIndex = memIdx;
+     VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+     if (vkAllocateMemory(device, &stagingAlloc, nullptr, &stagingMem) != VK_SUCCESS) {
+@@ -3594,7 +3815,7 @@ static bool VulkanReadbackPixels(
+     // Transition image: UNDEFINED/COLOR_ATTACHMENT → TRANSFER_SRC
+     VkImageMemoryBarrier toSrc{};
+     toSrc.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+-    toSrc.srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++    toSrc.srcAccessMask       = VK_ACCESS_MEMORY_WRITE_BIT;
+     toSrc.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+     toSrc.oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+     toSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+@@ -3603,7 +3824,7 @@ static bool VulkanReadbackPixels(
+     toSrc.image               = image;
+     toSrc.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+     vkCmdPipelineBarrier(cb,
+-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
++        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT,
+         0, 0, nullptr, 0, nullptr, 1, &toSrc);
+ 
+@@ -3615,7 +3836,10 @@ static bool VulkanReadbackPixels(
+     region.imageSubresource  = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+     region.imageOffset       = { 0, 0, 0 };
+     region.imageExtent       = { w, h, 1 };
+-    vkCmdCopyImageToBuffer(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuf, 1, &region);
++    auto copyImageToBuffer=reinterpret_cast<PFN_vkCmdCopyImageToBuffer>(
++        GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkCmdCopyImageToBuffer"));
++    if(!copyImageToBuffer) throw std::runtime_error("Missing diagnostic vkCmdCopyImageToBuffer");
++    copyImageToBuffer(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuf, 1, &region);
+ 
+     // Transition image back to COLOR_ATTACHMENT_OPTIMAL
+     VkImageMemoryBarrier toColor{};
+@@ -3653,7 +3877,11 @@ static bool VulkanReadbackPixels(
+ 
+     // Map and copy pixel data
+     void* mapped = nullptr;
+-    vkMapMemory(device, stagingMem, 0, bufSize, 0, &mapped);
++    if(vkMapMemory(device, stagingMem, 0, bufSize, 0, &mapped)!=VK_SUCCESS) {
++        vkDestroyBuffer(device, stagingBuf, nullptr);
++        vkFreeMemory(device, stagingMem, nullptr);
++        return false;
++    }
+     memcpy(out.data(), mapped, bufSize);
+     vkUnmapMemory(device, stagingMem);
+ 
+@@ -3662,6 +3890,51 @@ static bool VulkanReadbackPixels(
+     return true;
+ }
+ 
++// Explicit off-head debugging only. Capture the first three projection pairs
++// before composition (six cropped eyes, under 96 MiB in total). This
++// never runs in ordinary headset play or changes pose validity.
++static void CaptureProjectionInputs(rt::Session& session,const XrCompositionLayerProjection& projection) {
++    static const bool enabled=GetEnvironmentVariableA("GK3HD_XR_CAPTURE_EYES",nullptr,0)>0;
++    static uint32_t projectionFrame=0;
++    if(!enabled) return;
++    const uint32_t frame=++projectionFrame;
++    if(frame>3) return;
++    static const ULONGLONG captureToken=GetTickCount64();
++    std::ofstream index(RuntimeDirectory()/"diagnostic-eye-index.txt",
++        std::ios::binary|(frame==1 ? std::ios::trunc : std::ios::app));
++    if(frame==1) index<<captureToken<<'\n';
++    for(unsigned eye=0;eye<2;eye++) {
++        const auto& sub=projection.views[eye].subImage;
++        auto found=rt::g_swapchains.find(sub.swapchain);
++        if(found==rt::g_swapchains.end()) return;
++        const auto& chain=found->second;
++        const auto& rect=sub.imageRect;
++        const bool rgba8=chain.vkFormat==VK_FORMAT_R8G8B8A8_UNORM || chain.vkFormat==VK_FORMAT_R8G8B8A8_SRGB ||
++            chain.vkFormat==VK_FORMAT_B8G8R8A8_UNORM || chain.vkFormat==VK_FORMAT_B8G8R8A8_SRGB;
++        if(!rgba8 || chain.lastReleased>=chain.imagesVK.size() || sub.imageArrayIndex!=0 ||
++           !gk3hd::standalone::projectionCaptureFits(chain.width,chain.height,
++               rect.offset.x,rect.offset.y,rect.extent.width,rect.extent.height))
++            throw std::runtime_error("Unsupported diagnostic eye region or resource extent");
++        std::vector<uint8_t> bytes;
++        if(!VulkanReadbackPixels(session.vkDevice,session.vkPhysicalDevice,session.vkCmdPool,session.vkQueue,
++            chain.imagesVK[chain.lastReleased],chain.vkFormat,chain.width,chain.height,bytes))
++            throw std::runtime_error("Diagnostic eye readback failed");
++        bool bgra=chain.vkFormat==VK_FORMAT_B8G8R8A8_SRGB || chain.vkFormat==VK_FORMAT_B8G8R8A8_UNORM;
++        auto rgb=gk3hd::standalone::projectionCaptureRgb(bytes,chain.width,chain.height,
++            rect.offset.x,rect.offset.y,rect.extent.width,rect.extent.height,bgra);
++        size_t nonblack=0;
++        for(size_t i=0;i<rgb.size();i+=3) nonblack+=(rgb[i]|rgb[i+1]|rgb[i+2])!=0;
++        auto name="diagnostic-eye-"+std::to_string(captureToken)+"-"+std::to_string(frame)+"-"+std::to_string(eye)+".ppm";
++        std::ofstream file(RuntimeDirectory()/name,std::ios::binary);
++        file<<"P6\n"<<rect.extent.width<<' '<<rect.extent.height<<"\n255\n";
++        file.write(reinterpret_cast<const char*>(rgb.data()),rgb.size());
++        if(!file) throw std::runtime_error("Diagnostic eye file write failed");
++        index<<name<<'\n';
++        Logf("[GK3HD] Diagnostic input eye frame=%u eye=%u nonblack=%u extent=%ux%u format=%d",
++            frame,eye,unsigned(nonblack),unsigned(rect.extent.width),unsigned(rect.extent.height),int(chain.vkFormat));
++    }
++}
++
+ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties)
+ {
+     VkPhysicalDeviceMemoryProperties memProperties{};
+@@ -3736,20 +4009,27 @@ static bool initVulkanSyncBuffer(rt::Session& s)
+     return true;
+ }
+ 
+-static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProjection& proj)
++static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProjection* projection,
++                                 const std::vector<gk3hd::standalone::QuadDraw>& quads = {}, uint32_t movie = 0)
+ {
++    const bool hasProjection=projection && projection->viewCount>=2;
++    VkImage leftImage=VK_NULL_HANDLE,rightImage=VK_NULL_HANDLE;
++    uint32_t eyeWidth=DirectEyeWidth>0 ? DirectEyeWidth : ViewportWidth/2;
++    uint32_t eyeHeight=DirectEyeHeight>0 ? DirectEyeHeight : ViewportHeight;
++    if(hasProjection) {
++    const auto& proj=*projection;
+     // Get left eye swapchain and image index
+     const auto& vL = proj.views[0];
+     auto itL = rt::g_swapchains.find(vL.subImage.swapchain);
+     if (itL == rt::g_swapchains.end()) return;
+-    rt::Swapchain chL = itL->second;
++    const rt::Swapchain& chL = itL->second;
+ 
+     uint32_t leftIdx = (chL.lastReleased != UINT32_MAX) ? chL.lastReleased :
+                        (chL.lastAcquired != UINT32_MAX) ? chL.lastAcquired : 0;
+ 
+     // Get right eye
+     uint32_t rightIdx = leftIdx;
+-    rt::Swapchain* chR = &chL;
++    const rt::Swapchain* chR = &chL;
+     if (proj.viewCount > 1) {
+         const auto& vR = proj.views[1];
+         auto itR = rt::g_swapchains.find(vR.subImage.swapchain);
+@@ -3760,15 +4040,18 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+         }
+     }
+ 
+-    uint32_t eyeWidth = proj.views[0].subImage.imageRect.extent.width;
+-    uint32_t eyeHeight = proj.views[0].subImage.imageRect.extent.height;
+-    VkFormat displayFmt = VK_FORMAT_B8G8R8A8_UNORM;
+-    ensurePreviewSized(s, eyeWidth * 2, eyeHeight, displayFmt);
++    if(leftIdx>=chL.imagesVK.size()||rightIdx>=chR->imagesVK.size()) return;
++    eyeWidth = proj.views[0].subImage.imageRect.extent.width;
++    eyeHeight = proj.views[0].subImage.imageRect.extent.height;
++    leftImage=chL.imagesVK[leftIdx];rightImage=chR->imagesVK[rightIdx];
++    }
++    if(!hasProjection&&quads.empty()&&!movie) return;
++    if(hasProjection) CaptureProjectionInputs(s,*projection);
++    VkFormat displayFmt = VK_FORMAT_B8G8R8A8_SRGB;
++    ensurePreviewSized(s, eyeWidth * 2, gk3hd::standalone::transportImageHeight(eyeHeight), displayFmt);
+     if (!s.vkPreviewSwapchain) { Log("[SimXR] VK PREVIEW: No preview swapchain"); return; }
+ 
+ 
+-    VkImage leftImage = chL.imagesVK[leftIdx];
+-    VkImage rightImage = chR->imagesVK[rightIdx];
+ 
+     // Make sure the required Vulkan objects are valid before doing anything.
+     if (s.vkDevice == VK_NULL_HANDLE) {
+@@ -3783,7 +4066,7 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     } else if (s.vkCmdPool == VK_NULL_HANDLE) {
+         Logf("[SimXR] vkCmdPool is VK_NULL_HANDLE");
+         return;
+-    } else if (leftImage == VK_NULL_HANDLE) {
++    } else if (hasProjection && leftImage == VK_NULL_HANDLE) {
+         Logf("[SimXR] leftImage is VK_NULL_HANDLE");
+         return;
+     } else if (eyeWidth == 0 || eyeHeight == 0) {
+@@ -3856,6 +4139,7 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+         s.vkBlitDone = std::move(semaphores);
+         s.vkBlitFences = std::move(fences);
+         s.vkBlitSubmitted.assign(imageCount, false);
++        s.vkProducerAdmission.reset(imageCount);
+     }
+     const std::vector<VkImage>& previewImages = s.vkPreviewImages;
+ 
+@@ -3867,17 +4151,22 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     }
+ 
+     uint32_t imageIndex = 0;
+-    result = vkAcquireNextImageKHR(s.vkDevice, s.vkPreviewSwapchain, UINT64_MAX, VK_NULL_HANDLE, s.vkAcquireFence, &imageIndex);
+-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
++    const auto timeout=StandalonePreviewTimeoutNs();
++    result = vkAcquireNextImageKHR(s.vkDevice, s.vkPreviewSwapchain, timeout, VK_NULL_HANDLE, s.vkAcquireFence, &imageIndex);
++    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR) {
++        s.vkPreviewNeedsRebuild=true;
+         Logf("[SimXR] vkAcquireNextImageKHR: swapchain is out of date.");
+         return;
+     } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
++        // A timed-out acquire owns no image. Try again on the next frame.
++        if (result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
+         Logf("[SimXR] vkAcquireNextImageKHR failed: %d", (int)result);
+         return;
+     }
+ 
+-    result = vkWaitForFences(s.vkDevice, 1, &s.vkAcquireFence, VK_TRUE, UINT64_MAX);
++    result = vkWaitForFences(s.vkDevice, 1, &s.vkAcquireFence, VK_TRUE, timeout);
+     if (result != VK_SUCCESS) {
++        ReportPreviewWaitFailure(result);
+         Logf("[SimXR] vkWaitForFences failed: %d", (int)result);
+         return;
+     } else if (imageIndex >= previewImages.size()) {
+@@ -3891,12 +4180,15 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     // recording into it again. That is a wait on one frame's blit rather than on the whole queue.
+     VkCommandBuffer cmd = s.vkBlitCmds[imageIndex];
+     if (s.vkBlitSubmitted[imageIndex]) {
+-        result = vkWaitForFences(s.vkDevice, 1, &s.vkBlitFences[imageIndex], VK_TRUE, UINT64_MAX);
++        result = vkWaitForFences(s.vkDevice, 1, &s.vkBlitFences[imageIndex], VK_TRUE, timeout);
+         if (result != VK_SUCCESS) {
+-            Logf("[SimXR] vkWaitForFences (blit) failed: %d", (int)result);
++            ReportPreviewWaitFailure(result);
++            Logf("[GK3HD] Preview reuse completion failed result=%d timeoutNs=%llu", int(result), (unsigned long long)timeout);
+             return;
+         }
+     }
++    // Reuse has observed the old completion; invalidate it before resetting its fence.
++    s.vkProducerAdmission.retired(imageIndex);
+     result = vkResetFences(s.vkDevice, 1, &s.vkBlitFences[imageIndex]);
+     if (result != VK_SUCCESS) {
+         Logf("[SimXR] vkResetFences (blit) failed: %d", (int)result);
+@@ -3939,146 +4231,76 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          0, 0, nullptr, 0, nullptr, 1, &previewBarrier);
+ 
+-    // -----------------------------------------------------------------------------
+-    // Sync pixel: write 10x10 red pixels directly into leftImage.
+-    // -----------------------------------------------------------------------------
+-
+-    float redIntensity = static_cast<float>(OpenXRFrameID & 0xFF) / 255.0f;
+-    if (s.vkSyncBuffer == VK_NULL_HANDLE) {
+-        initVulkanSyncBuffer(s);
+-    }
+-    if (s.vkSyncBuffer == VK_NULL_HANDLE || s.vkSyncBufferMemory == VK_NULL_HANDLE) {
+-        Logf("[SimXR] VK sync buffer is not initialized");
+-        vkEndCommandBuffer(cmd);
+-        return;
+-    }
+-
+-    void* syncMapped = nullptr;
+-    result = vkMapMemory(s.vkDevice, s.vkSyncBufferMemory, 0, 10 * 10 * 4, 0, &syncMapped);
+-    if (result != VK_SUCCESS || !syncMapped) {
+-        Logf("[SimXR] vkMapMemory(sync buffer) failed: %d", (int)result);
+-        vkEndCommandBuffer(cmd);
+-        return;
+-    }
+-
+-    uint8_t r = static_cast<uint8_t>(redIntensity * 255.0f);
+-    uint8_t* pixels = static_cast<uint8_t*>(syncMapped);
+-
+-    for (uint32_t y = 0; y < 10; ++y) {
+-        for (uint32_t x = 0; x < 10; ++x) {
+-            pixels[(y * 10 + x) * 4 + 0] = r;
+-            pixels[(y * 10 + x) * 4 + 1] = 0;
+-            pixels[(y * 10 + x) * 4 + 2] = 0;
+-            pixels[(y * 10 + x) * 4 + 3] = 255;
+-        }
+-    }
+-    vkUnmapMemory(s.vkDevice, s.vkSyncBufferMemory);
+-
+-    VkImageMemoryBarrier syncBegin{};
+-    syncBegin.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+-    syncBegin.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+-    syncBegin.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+-    syncBegin.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+-    syncBegin.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+-    syncBegin.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-    syncBegin.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-    syncBegin.image = leftImage;
+-    syncBegin.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-    syncBegin.subresourceRange.baseMipLevel = 0;
+-    syncBegin.subresourceRange.levelCount = 1;
+-    syncBegin.subresourceRange.baseArrayLayer = 0;
+-    syncBegin.subresourceRange.layerCount = 1;
+-
+-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                         0, 0, nullptr, 0, nullptr, 1, &syncBegin);
+-
+-    VkBufferImageCopy syncCopy{};
+-    syncCopy.bufferOffset = 0;
+-    syncCopy.bufferRowLength = 10;
+-    syncCopy.bufferImageHeight = 10;
+-    syncCopy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-    syncCopy.imageSubresource.mipLevel = 0;
+-    syncCopy.imageSubresource.baseArrayLayer = 0;
+-    syncCopy.imageSubresource.layerCount = 1;
+-    syncCopy.imageOffset = { 0, 0, 0 };
+-    syncCopy.imageExtent = { 10, 10, 1 };
+-
+-    vkCmdCopyBufferToImage(cmd, s.vkSyncBuffer, leftImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &syncCopy);
+-
+-    VkImageMemoryBarrier syncEnd{};
+-    syncEnd.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+-    syncEnd.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+-    syncEnd.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+-    syncEnd.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+-    syncEnd.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+-    syncEnd.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-    syncEnd.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-    syncEnd.image = leftImage;
+-    syncEnd.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-    syncEnd.subresourceRange.baseMipLevel = 0;
+-    syncEnd.subresourceRange.levelCount = 1;
+-    syncEnd.subresourceRange.baseArrayLayer = 0;
+-    syncEnd.subresourceRange.layerCount = 1;
+-
+-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                         0, 0, nullptr, 0, nullptr, 1, &syncEnd);
+-
+-    // Blit left eye
+-    VkImageBlit leftBlit{};
+-    leftBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-    leftBlit.srcSubresource.mipLevel = 0;
+-    leftBlit.srcSubresource.baseArrayLayer = 0;
+-    leftBlit.srcSubresource.layerCount = 1;
+-    leftBlit.srcOffsets[0] = { 0, 0, 0 };
+-    leftBlit.srcOffsets[1] = { (int32_t)eyeWidth, (int32_t)eyeHeight, 1 };
+-    leftBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-    leftBlit.dstSubresource.mipLevel = 0;
+-    leftBlit.dstSubresource.baseArrayLayer = 0;
+-    leftBlit.dstSubresource.layerCount = 1;
+-    leftBlit.dstOffsets[0] = { 0, 0, 0 };
+-    leftBlit.dstOffsets[1] = { monoRendering ? (int32_t)ViewportWidth : (int32_t)ViewportWidth / 2, (int32_t)ViewportHeight, 1 };
+-
+-    vkCmdBlitImage(cmd, leftImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, previewImage,
+-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &leftBlit, VK_FILTER_LINEAR);
+-
+-    // Right eye
+-    if ((rightImage != VK_NULL_HANDLE) && !monoRendering) {
+-
+-        VkImageMemoryBarrier rightBarrier{};
+-        rightBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+-        rightBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+-        rightBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+-        rightBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+-        rightBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+-        rightBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-        rightBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-        rightBarrier.image = rightImage;
+-        rightBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-        rightBarrier.subresourceRange.baseMipLevel = 0;
+-        rightBarrier.subresourceRange.levelCount = 1;
+-        rightBarrier.subresourceRange.baseArrayLayer = 0;
+-        rightBarrier.subresourceRange.layerCount = 1;
+-
+-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                             0, 0, nullptr, 0, nullptr, 1, &rightBarrier);
+-
+-        // Blit right eye
+-        VkImageBlit rightBlit{};
+-        rightBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-        rightBlit.srcSubresource.mipLevel = 0;
+-        rightBlit.srcSubresource.baseArrayLayer = 0;
+-        rightBlit.srcSubresource.layerCount = 1;
+-        rightBlit.srcOffsets[0] = { 0, 0, 0 };
+-        rightBlit.srcOffsets[1] = { (int32_t)eyeWidth, (int32_t)eyeHeight, 1 };
+-        rightBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-        rightBlit.dstSubresource.mipLevel = 0;
+-        rightBlit.dstSubresource.baseArrayLayer = 0;
+-        rightBlit.dstSubresource.layerCount = 1;
+-        rightBlit.dstOffsets[0] = {(int32_t)ViewportWidth / 2, 0, 0 };
+-        rightBlit.dstOffsets[1] = { (int32_t)ViewportWidth, (int32_t)ViewportHeight, 1 };
+-
+-        vkCmdBlitImage(cmd, rightImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, previewImage,
+-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rightBlit, VK_FILTER_LINEAR);
++    std::vector<gk3hd::standalone::QuadDraw> composed;
++    if(hasProjection) {
++        // Sample and write sRGB through the same tested shader path as quads.
++        // This preserves encoded colors across the native WSI transport and
++        // avoids relying on its vendor-dependent sRGB image-blit conversion.
++        for(unsigned eye=0;eye<2;eye++) {
++            const auto& sub=projection->views[eye].subImage;
++            const auto& source=rt::g_swapchains.at(sub.swapchain);
++            const auto rect=sub.imageRect;
++            if(rect.offset.x<0||rect.offset.y<0||rect.extent.width<=0||rect.extent.height<=0||
++               uint64_t(rect.offset.x)+rect.extent.width>source.width||
++               uint64_t(rect.offset.y)+rect.extent.height>source.height)
++                throw std::runtime_error("Invalid projection crop");
++            static const bool directCopy=[] {
++                char setting[2]{};
++                return GetEnvironmentVariableA("GK3HD_WXR_PROJECTION_COPY",setting,sizeof(setting))==1&&setting[0]=='1';
++            }();
++            if(directCopy&&source.vkFormat==displayFmt&&uint32_t(rect.extent.width)==eyeWidth&&uint32_t(rect.extent.height)==eyeHeight) {
++                VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++                barrier.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
++                barrier.oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++                barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
++                barrier.image=eye==0 ? leftImage : rightImage;barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,sub.imageArrayIndex,1};
++                vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
++                VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,sub.imageArrayIndex,1};
++                copy.srcOffset={rect.offset.x,rect.offset.y,0};copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
++                copy.dstOffset={int32_t(eye*eyeWidth),0,0};copy.extent={eyeWidth,eyeHeight,1};
++                auto copyImage=reinterpret_cast<PFN_vkCmdCopyImage>(get_gipa()(s.vkInstance,"vkCmdCopyImage"));
++                if(!copyImage) throw std::runtime_error("Missing projection image copy command");
++                copyImage(cmd,barrier.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,previewImage,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
++                std::swap(barrier.oldLayout,barrier.newLayout);
++                barrier.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;barrier.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
++                vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
++                continue;
++            }
++            gk3hd::standalone::QuadDraw draw;
++            draw.image=eye==0 ? leftImage : rightImage;draw.format=source.vkFormat;
++            draw.arrayLayer=sub.imageArrayIndex;
++            draw.viewport={{int32_t(eye*eyeWidth),0},{eyeWidth,eyeHeight}};
++            for(unsigned corner=0;corner<4;corner++) {
++                draw.vertices.clip[corner][0]=(corner&2) ? 1.f : -1.f;
++                draw.vertices.clip[corner][1]=(corner&1) ? 1.f : -1.f;
++                draw.vertices.clip[corner][2]=0.f;draw.vertices.clip[corner][3]=1.f;
++            }
++            draw.vertices.uv[0]=float(rect.offset.x)/source.width;
++            draw.vertices.uv[1]=float(rect.offset.y)/source.height;
++            draw.vertices.uv[2]=float(rect.offset.x+rect.extent.width)/source.width;
++            draw.vertices.uv[3]=float(rect.offset.y+rect.extent.height)/source.height;
++            composed.push_back(draw);
++        }
++    } else {
++        auto clear=reinterpret_cast<PFN_vkCmdClearColorImage>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkCmdClearColorImage"));
++        if(!clear) {vkEndCommandBuffer(cmd);throw std::runtime_error("Missing vkCmdClearColorImage");}
++        VkClearColorValue black{};black.float32[3]=movie ? 0.f : 1.f;
++        VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
++        clear(cmd,previewImage,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&black,1,&range);
++    }
++    static gk3hd::frame_metadata::Publisher metadataPublisher;
++    gk3hd::frame_metadata::Publisher::PendingGuard metadataGuard{metadataPublisher};
++    auto bootstrap=metadataPublisher.begin(s.vkPreviewGeneration,
++        eyeWidth*2,gk3hd::standalone::transportImageHeight(eyeHeight),static_cast<uint32_t>(s.vkPreviewImages.size()),
++        imageIndex,static_cast<uint32_t>(OpenXRFrameID),movie);
++    {
++        if(!s.quadComposer) {
++            auto resolve=reinterpret_cast<PFN_vkGetDeviceProcAddr>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkGetDeviceProcAddr"));
++            s.quadComposer=std::make_unique<gk3hd::standalone::QuadComposer>(s.vkDevice,resolve);
++        }
++        uint32_t id=static_cast<uint32_t>(OpenXRFrameID);
++        composed.insert(composed.end(),quads.begin(),quads.end());
++        s.quadComposer->record(cmd,previewImage,{eyeWidth*2,gk3hd::standalone::transportImageHeight(eyeHeight)},composed,&id,bootstrap ? &*bootstrap : nullptr);
+     }
+ 
+     // Preview image -> present
+@@ -4103,6 +4325,7 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     result = vkEndCommandBuffer(cmd);
+     if (result != VK_SUCCESS) {
+         Logf("[SimXR] vkEndCommandBuffer failed: %d", (int)result);
++        if(bootstrap)metadataPublisher.cancel();
+         return;
+     }
+ 
+@@ -4118,9 +4341,14 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     result = vkQueueSubmit(s.vkQueue, 1, &submitInfo, s.vkBlitFences[imageIndex]);
+     if (result != VK_SUCCESS) {
+         Logf("[SimXR] vkQueueSubmit failed: %d", (int)result);
++        if(bootstrap)metadataPublisher.cancel();
++        if (result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
+         return;
+     }
+     s.vkBlitSubmitted[imageIndex] = true;
++    s.vkProducerAdmission.submitted(imageIndex);
++    if(bootstrap&&!metadataPublisher.commitSubmitted())
++        throw std::runtime_error("Frame metadata publication failed after submission");
+ 
+     // No vkQueueWaitIdle here: the blit is ordered before the present by the semaphore, so the CPU
+     // does not have to stall on the whole queue (which also drains the game's own work) each frame.
+@@ -4136,7 +4364,9 @@ static void presentVulkanSwapchain(rt::Session& s, const XrCompositionLayerProje
+     presentInfo.pResults = nullptr;
+ 
+     result = vkQueuePresentKHR(s.vkQueue, &presentInfo);
+-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
++    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR) {
++        s.vkPreviewNeedsRebuild=true;
+         Logf("[SimXR] vkQueuePresentKHR: swapchain is out of date.");
+     } else if ((result != VK_SUCCESS) && (result != VK_SUBOPTIMAL_KHR)) {
++        if (result == VK_ERROR_DEVICE_LOST) standalone_report_renderer_failure();
+         Logf("[SimXR] vkQueuePresentKHR failed: %d", (int)result);
+@@ -4187,8 +4415,8 @@ static void presentProjection(rt::Session& s, const XrCompositionLayerProjection
+             vkFrameCount++;
+ 
+             if (!skipPresent) {
+-                MSG msg; while (PeekMessageW(&msg, s.hwnd, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+-                presentVulkanSwapchain(s, proj);
++                Gk3hdPumpPreviewMessages(s.hwnd);
++                presentVulkanSwapchain(s, &proj);
+             } else {
+                 rt::g_last_proj = proj;
+                 g_presentPending = true;
+@@ -4607,8 +4835,7 @@ static void presentProjection(rt::Session& s, const XrCompositionLayerProjection
+ 
+             // Present (may be deferred if overlays are pending)
+             if (!skipPresent) {
+-                MSG msg;
+-                while (PeekMessageW(&msg, s.hwnd, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
++                Gk3hdPumpPreviewMessages(s.hwnd);
+ 
+                 if (glFrameCount % 60 == 1) {
+                     Logf("[SimXR] GL PREVIEW: About to Present - hwnd=%p, swapchain=%p", s.hwnd, s.previewSwapchain.Get());
+@@ -4721,8 +4948,7 @@ static void presentProjection(rt::Session& s, const XrCompositionLayerProjection
+ 
+             // Present D3D11 (may be deferred if overlays are pending)
+             if (!skipPresent) {
+-                MSG msg;
+-                while (PeekMessageW(&msg, s.hwnd, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
++                Gk3hdPumpPreviewMessages(s.hwnd);
+                 s.previewSwapchain->Present(1, 0);
+             } else {
+                 g_presentPending = true;
+@@ -4750,8 +4976,7 @@ static void presentProjection(rt::Session& s, const XrCompositionLayerProjection
+ 
+             // Present D3D12 (may be deferred if overlays are pending)
+             if (!skipPresent) {
+-                MSG msg;
+-                while (PeekMessageW(&msg, s.hwnd, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
++                Gk3hdPumpPreviewMessages(s.hwnd);
+                 s.previewSwapchain12->Present(1, 0);
+             } else {
+                 g_presentPending = true;
+@@ -5285,6 +5510,73 @@ static bool SubmitProjectionToBridge(const XrFrameEndInfo* info, int frameCount,
+     return sent;
+ }
+ 
++static XrResult composeVulkanFrame(const XrFrameEndInfo& info) {
++    using namespace gk3hd::standalone;
++    const XrCompositionLayerProjection* projection=nullptr;
++    for(uint32_t i=0;i<info.layerCount;i++) {
++        if(!info.layers||!info.layers[i]) return XR_ERROR_LAYER_INVALID;
++        if(info.layers[i]->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
++            if(i!=0||projection) return XR_ERROR_LAYER_INVALID;
++            projection=reinterpret_cast<const XrCompositionLayerProjection*>(info.layers[i]);
++            if(projection->viewCount!=2||!projection->views) return XR_ERROR_LAYER_INVALID;
++        } else if(info.layers[i]->type!=XR_TYPE_COMPOSITION_LAYER_QUAD) return XR_ERROR_LAYER_INVALID;
++    }
++    rt::g_sessionWasVR=rt::g_sessionWasVR||projection!=nullptr;
++    isVR=rt::g_sessionWasVR||info.layerCount>0;
++    static ULONGLONG lastSend=0;
++    if(rt::g_spacesChanged||GetTickCount64()-lastSend>=500) {
++        sendUdpData();rt::g_spacesChanged=false;lastSend=GetTickCount64();
++    }
++    if(!projection&&!g_vulkanFrameViewsValid) return XR_SUCCESS;
++    uint32_t width=projection ? projection->views[0].subImage.imageRect.extent.width : DirectEyeWidth;
++    uint32_t height=projection ? projection->views[0].subImage.imageRect.extent.height : DirectEyeHeight;
++    if(!width||!height) return XR_ERROR_SWAPCHAIN_RECT_INVALID;
++    XrSpace space=projection ? projection->space : g_vulkanFrameSpace;
++    const uint32_t movie=projection ? 0 : gk3hd::standalone::externalMovieOwner();
++    std::vector<QuadDraw> draws;
++    try {
++        for(uint32_t i=0;i<info.layerCount;i++) {
++            if(info.layers[i]->type!=XR_TYPE_COMPOSITION_LAYER_QUAD) continue;
++            auto& quad=*reinterpret_cast<const XrCompositionLayerQuad*>(info.layers[i]);
++            auto found=rt::g_swapchains.find(quad.subImage.swapchain);
++            if(found==rt::g_swapchains.end()) return XR_ERROR_HANDLE_INVALID;
++            auto& source=found->second;
++            if(source.backend!=rt::Swapchain::Backend::Vulkan||source.lastReleased>=source.imagesVK.size()||
++               quad.subImage.imageArrayIndex>=source.arraySize) return XR_ERROR_LAYER_INVALID;
++            XrPosef pose=quad.pose;
++            if(quad.space!=space) {
++                XrSpaceLocation relation{XR_TYPE_SPACE_LOCATION};
++                auto result=xrLocateSpace_runtime(quad.space,space,info.displayTime,&relation);
++                if(XR_FAILED(result)) return result;
++                if((relation.locationFlags&3)!=3) continue;
++                XrPosef_Multiply(&pose,&relation.pose,&quad.pose);
++            }
++            unsigned blend=quad.layerFlags&XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT ?
++                (quad.layerFlags&XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT ? 2 : 1) : 0;
++            if(movie&&blend==0) continue; // Android owns only the opaque movie image.
++            for(unsigned eye=0;eye<2;eye++) {
++                if((quad.eyeVisibility==XR_EYE_VISIBILITY_LEFT&&eye==1)||
++                   (quad.eyeVisibility==XR_EYE_VISIBILITY_RIGHT&&eye==0)) continue;
++                // Use actual per-frame located views for quad-only screens. The
++                // conditional deliberately does not query a newer pose at presentation.
++                auto eyePose=projection ? projection->views[eye].pose : g_vulkanFrameViews[eye].pose;
++                auto fov=projection ? projection->views[eye].fov : g_vulkanFrameViews[eye].fov;
++                QuadDraw draw{};draw.image=source.imagesVK[source.lastReleased];draw.format=source.vkFormat;
++                draw.arrayLayer=quad.subImage.imageArrayIndex;draw.blend=blend;
++                draw.viewport={{int32_t(eye*width),0},{width,height}};
++                draw.vertices=projectQuad(eyePose,fov,pose,quad.size,quad.subImage.imageRect,source.width,source.height);
++                draws.push_back(draw);
++            }
++        }
++        presentVulkanSwapchain(rt::g_session,projection,draws,movie);
++    } catch(const std::invalid_argument& error) {
++        Logf("[GK3HD] Invalid Vulkan layer: %s",error.what());return XR_ERROR_LAYER_INVALID;
++    } catch(const std::exception& error) {
++        Logf("[GK3HD] Vulkan composition failed: %s",error.what());return XR_ERROR_RUNTIME_FAILURE;
++    }
++    return XR_SUCCESS;
++}
++
+ static XrResult XRAPI_PTR xrEndFrame_runtime(XrSession, const XrFrameEndInfo* info) {
+     static int frameCount = 0;
+     frameCount++;
+@@ -5308,6 +5600,7 @@ static XrResult XRAPI_PTR xrEndFrame_runtime(XrSession, const XrFrameEndInfo* in
+         Log("[SimXR] xrEndFrame: ERROR - info is null");
+         return XR_ERROR_VALIDATION_FAILURE;
+     }
++    if(rt::g_session.usesVulkan) return composeVulkanFrame(*info);
+ 
+     if (shouldLog && verboseLogging) {
+         Logf("[SimXR] xrEndFrame: layers=%u", info->layerCount);
+@@ -5337,8 +5630,7 @@ static XrResult XRAPI_PTR xrEndFrame_runtime(XrSession, const XrFrameEndInfo* in
+     // drawn when an overlay layer could not go with them
+     bool skipPreview = direct && overlaysSent && rt::g_session.hwnd;
+     if (skipPreview) {
+-        MSG msg;
+-        while (PeekMessageW(&msg, rt::g_session.hwnd, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
++        Gk3hdPumpPreviewMessages(rt::g_session.hwnd);
+     }
+ 
+     // Second pass: render projection layers (background)
+@@ -5387,11 +5679,10 @@ static XrResult XRAPI_PTR xrEndFrame_runtime(XrSession, const XrFrameEndInfo* in
+     // Now Present after all layers are rendered
+     if (g_presentPending) {
+         auto& s = rt::g_session;
+-        MSG msg;
+-        while (PeekMessageW(&msg, s.hwnd, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
++        Gk3hdPumpPreviewMessages(s.hwnd);
+ 
+         if (s.usesVulkan) {
+-            presentVulkanSwapchain(s, rt::g_last_proj);
++            presentVulkanSwapchain(s, &rt::g_last_proj);
+         } else if (s.usesD3D12 && s.previewSwapchain12) {
+             s.previewSwapchain12->Present(1, 0);
+         } else if (s.previewSwapchain) {
+@@ -5479,10 +5770,7 @@ static XrResult XRAPI_PTR xrLocateSpace_runtime(XrSpace space, XrSpace baseSpace
+     if (verboseLogging) Logf("[SimXR] xrLocateSpace: Looking for space=%d in baseSpace=%d", (uint64_t)space, (uint64_t)baseSpace);
+ 
+     if (SpacePoses.find(key) != SpacePoses.end()) {
+-        location->locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT |
+-                                  XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+-                                  XR_SPACE_LOCATION_POSITION_TRACKED_BIT |
+-                                  XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
++        location->locationFlags = SpaceFlags[key];
+         location->pose = SpacePoses[key];
+     } else {
+         // Default for invalid data
+@@ -5586,11 +5874,7 @@ static XrResult XRAPI_PTR xrLocateViews_runtime(XrSession, const XrViewLocateInf
+     if (outCount) *outCount = 2;
+     if (vs) { 
+         vs->type = XR_TYPE_VIEW_STATE; 
+-        // Set both VALID and TRACKED bits so Unity knows this is a real tracked HMD
+-        vs->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | 
+-                            XR_VIEW_STATE_POSITION_VALID_BIT | 
+-                            XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | 
+-                            XR_VIEW_STATE_POSITION_TRACKED_BIT; 
++        vs->viewStateFlags = 0; // A runtime must not promote missing tracking to a tracked HMD.
+     }
+     if (cap < 2 || !views) return XR_SUCCESS;
+ 
+@@ -5605,11 +5889,15 @@ static XrResult XRAPI_PTR xrLocateViews_runtime(XrSession, const XrViewLocateInf
+     if (FOVH < 0 || FOVV < 0) {
+         WxrHostState host;
+         if (!udpReader->GetState(host)) {
++            // The caller already received invalid view flags above. Keep that
++            // contract until native tracking supplies real optical metadata.
++            if (udpReader->HasSocket()) return XR_SUCCESS;
+             static bool logged = false;
+             if (!logged) Log("[SimXR] xrLocateViews: ERROR - the UDP port is not bound so no data can come from the host, failing the call");
+             logged = true;
+             return XR_ERROR_RUNTIME_FAILURE;
+         }
++        g_hostStereoViews=host.stereo;
+         IPDVal = host.floats[8];
+         FOVH = host.floats[9] * toRadians;
+         FOVV = host.floats[10] * toRadians;
+@@ -5617,6 +5905,7 @@ static XrResult XRAPI_PTR xrLocateViews_runtime(XrSession, const XrViewLocateInf
+ 
+     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+     xrLocateSpace_runtime((XrSpace)0, li->space, (XrTime)0, &loc);
++    if (vs) vs->viewStateFlags = loc.locationFlags & 15;
+ 
+     for (uint32_t i = 0; i < 2; ++i) {
+         views[i].type = XR_TYPE_VIEW;
+@@ -5635,7 +5924,12 @@ static XrResult XRAPI_PTR xrLocateViews_runtime(XrSession, const XrViewLocateInf
+         float fovX = FOVH / 2.0f;
+         float fovY = FOVV / 2.0f;
+         views[i].fov = { -fovX, fovX, fovY, -fovY };
++        if(g_hostStereoViews.present)
++            views[i]=gk3hd::standalone::hostEyeInSpace(loc.pose,g_hostStereoViews.eyes[i]);
+     }
++    g_vulkanFrameSpace=li->space;
++    g_vulkanFrameViewsValid=(loc.locationFlags&3)==3;
++    std::copy(views,views+2,g_vulkanFrameViews.begin());
+     return XR_SUCCESS;
+ }
+ 
+@@ -6319,7 +6613,7 @@ static XrResult XRAPI_PTR xrSyncActions_runtime(XrSession, const XrActionsSyncIn
+     rt::DrainPendingControllers();
+     g_syncCount++;
+ 
+-    return XR_SUCCESS;
++    return g_hostInputFocused ? XR_SUCCESS : XR_SESSION_NOT_FOCUSED;
+ }
+ 
+ static XrResult XRAPI_PTR xrStringToPath_runtime(XrInstance, const char* pathString, XrPath* path) {
+@@ -6446,6 +6740,14 @@ static XrResult XRAPI_PTR xrDestroySwapchain_runtime(XrSwapchain sc) {
+     }
+     // For Vulkan swapchains, destroy images and free memory
+     if (it->second.backend == rt::Swapchain::Backend::Vulkan && rt::g_session.vkDevice != VK_NULL_HANDLE) {
++        if(rt::g_session.quadComposer) {
++            const auto retired=RetireStandaloneDevice(rt::g_session.vkDevice);
++            if(retired!=VK_SUCCESS && retired!=VK_ERROR_DEVICE_LOST) {
++                Logf("[GK3HD] Swapchain retirement failed: %d",int(retired));
++                return XR_ERROR_RUNTIME_FAILURE;
++            }
++            rt::g_session.quadComposer->reset();
++        }
+         for (size_t i = 0; i < it->second.imagesVK.size(); ++i) {
+             if (it->second.imagesVK[i] != VK_NULL_HANDLE)
+                 vkDestroyImage(rt::g_session.vkDevice, it->second.imagesVK[i], nullptr);
+@@ -6557,6 +6859,17 @@
+
+ // ----------------------------------------------
+
++static XrResult XRAPI_PTR xrGk3hdGetSwapchainStorageExtentV1_runtime(XrSwapchain chain, XrExtent2Di* extent) {
++    if (!extent) return XR_ERROR_VALIDATION_FAILURE;
++    const auto found = rt::g_swapchains.find(chain);
++    if (found == rt::g_swapchains.end()) return XR_ERROR_HANDLE_INVALID;
++    const auto& target = found->second;
++    if (target.backend != rt::Swapchain::Backend::Vulkan) return XR_ERROR_FEATURE_UNSUPPORTED;
++    if (target.width > INT32_MAX || target.height > INT32_MAX) return XR_ERROR_RUNTIME_FAILURE;
++    *extent = {static_cast<int32_t>(target.width), static_cast<int32_t>(target.height)};
++    return XR_SUCCESS;
++}
++
+ struct NameFn { const char* name; PFN_xrVoidFunction fn; };
+
+ static const NameFn kFnTable[] = {
+@@ -6584,6 +6897,8 @@ static const NameFn kFnTable[] = {
+     {"xrEndSession", (PFN_xrVoidFunction)xrEndSession_runtime},
+     {"xrWaitFrame", (PFN_xrVoidFunction)xrWaitFrame_runtime},
+     {"xrBeginFrame", (PFN_xrVoidFunction)xrBeginFrame_runtime},
++    {"xrGk3hdGetCpuFrameBeginSupportV1", (PFN_xrVoidFunction)xrGk3hdGetCpuFrameBeginSupportV1_runtime},
++    {"xrGk3hdGetSwapchainStorageExtentV1", (PFN_xrVoidFunction)xrGk3hdGetSwapchainStorageExtentV1_runtime},
+     {"xrEndFrame", (PFN_xrVoidFunction)xrEndFrame_runtime},
+     {"xrPollEvent", (PFN_xrVoidFunction)xrPollEvent_runtime},
+     {"xrLocateViews", (PFN_xrVoidFunction)xrLocateViews_runtime},

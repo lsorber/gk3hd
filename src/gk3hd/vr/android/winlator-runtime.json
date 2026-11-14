@@ -1,0 +1,42 @@
+{
+  "box64/box64-0.4.4.tzst": {
+    "size": 4540371,
+    "sha256": "e1a34fed50bb38ef7fbf51ad5e5b9a76ec4c8178f9cfb4b9f6def0497f2f446c"
+  },
+  "container_pattern.tzst": {
+    "size": 7399363,
+    "sha256": "8ae3a4fee33e86da26826395650bb07c6f49ce94629ea4b9442bc633b6b8ca33"
+  },
+  "dxwrapper/vkd3d-2.14.1.tzst": {
+    "size": 2359119,
+    "sha256": "354b43b84df136683c7ad9cb80e125b4a357de7459fab9ac8b56d5fe4a617687"
+  },
+  "graphics_driver/gladio-1.1.tzst": {
+    "size": 107293,
+    "sha256": "925a492ca58d4670271aabe6c6aaeef0df1e22932955025afb3fe23f26442ac3"
+  },
+  "graphics_driver/turnip-26.2.0.tzst": {
+    "size": 2659862,
+    "sha256": "1e5bd643d64b450960ea3208cc96599a4de577f178e9ba0843b1c37083ce50d2"
+  },
+  "graphics_driver/virgl-23.1.9.tzst": {
+    "size": 3481269,
+    "sha256": "614b1edc8e47c57b2cbb2d96f9c7ab5f5b1a89038de618a58b2faf9c64380e09"
+  },
+  "graphics_driver/vortek-2.1.tzst": {
+    "size": 124813,
+    "sha256": "505e5089371d8698184a3722d8672628b8ef1aa0a201efa6bf1f8d6163cc08cf"
+  },
+  "graphics_driver/zink-22.2.5.tzst": {
+    "size": 3874501,
+    "sha256": "b9fc365f894a4b837cfd97861972e95c680b5e744691b508f49b9a06d9e3153c"
+  },
+  "rootfs.tzst": {
+    "size": 65254618,
+    "sha256": "aeea2938cc63b0708cb2da999b5a0e3915229b6ab4eac13de061c87f34ffc1dc"
+  },
+  "rootfs_patches.tzst": {
+    "size": 4174031,
+    "sha256": "49ab7a5158ef7ccff5ae96dfd539df48483454ed11c0d6788a4f95e0104c864a"
+  }
+}

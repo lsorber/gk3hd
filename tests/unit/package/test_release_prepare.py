@@ -15,6 +15,8 @@ from typer.testing import CliRunner
 
 from gk3hd import package
 from gk3hd.renderer.artifact import RendererAsset
+from gk3hd.videos.runtime import recipe_digest as video_recipe_digest
+from gk3hd.vr.standalone.paths import BUILD_RECORD, record_build, workspace
 
 
 @pytest.fixture(autouse=True)
@@ -41,25 +43,24 @@ def renderer_asset(tmp_path: Path) -> RendererAsset:
 
 
 @pytest.mark.parametrize("assets", list(product((False, True), repeat=3)))
+@pytest.mark.parametrize("vr", [False, True])
 def test_release_can_replace_or_reuse_renderer_and_textures_independently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     renderer_asset: RendererAsset,
     *,
     assets: tuple[bool, bool, bool],
+    vr: bool,
 ) -> None:
     textures, renderer, videos = assets
     monkeypatch.chdir(tmp_path)
-    texture_lock = Path("texture-lock.json")
-    renderer_lock = Path("renderer-lock.json")
+    texture_lock, renderer_lock = Path("texture-lock.json"), Path("renderer-lock.json")
     texture_lock.write_text('{"tag":"v1.0"}')
     Path("CHANGELOG.md").write_text(
         "## v1.1 (2026-09-27)\n\n### Fix\n\n- **package**: improve release drafting\n\n"
         "## v1.0 (2026-09-20)\n\n- initial commit\n"
     )
-    asset = renderer_asset
-    archive = asset.path
-    renderer_lock.write_text(json.dumps(asset.lock("v1.0")))
+    renderer_lock.write_text(json.dumps(renderer_asset.lock("v1.0")))
     monkeypatch.setattr(package, "_LOCK", texture_lock)
     monkeypatch.setattr(package, "_RENDERER_LOCK", renderer_lock)
     events: list[tuple[str, ...]] = []
@@ -78,7 +79,8 @@ def test_release_can_replace_or_reuse_renderer_and_textures_independently(
             assert ("/v1.1/" in renderer_url) is renderer
         return ""
 
-    def pack(version: str) -> tuple[Path, ...]:
+    def pack(version: str, *, game_dir: Path | None) -> tuple[Path, ...]:
+        del game_dir
         texture_lock.write_text(json.dumps({"tag": f"v{version}"}))
         return (Path("textures-part01.zip"), Path("textures-part02.zip"))
 
@@ -86,15 +88,21 @@ def test_release_can_replace_or_reuse_renderer_and_textures_independently(
     monkeypatch.setattr(package, "_run", run)
     monkeypatch.setattr(package, "_release_version", Mock(return_value="1.1"))
     monkeypatch.setattr(package, "_pack", pack)
-    monkeypatch.setattr(package, "inspect_dll", Mock(return_value=asset))
+    monkeypatch.setattr(package, "inspect_dll", Mock(return_value=renderer_asset))
     monkeypatch.setattr(package, "discover_game", Mock(return_value=Mock(game_dir=tmp_path)))
     monkeypatch.setattr(package, "movie_workspace", Mock(return_value=tmp_path))
     (tmp_path / package.VIDEO_LOCK_FILENAME).write_text('{"tag":"v1.1","archives":[]}')
     monkeypatch.setattr(package, "build_video_pack", Mock(return_value=(Path("videos.zip"),)))
+    vr_verify, published_vr = _mock_vr_assets(monkeypatch, enabled=vr)
 
     assert (
         package._prepare(
-            None, textures=textures, renderer=archive if renderer else None, videos=videos
+            None,
+            textures=textures,
+            renderer=renderer_asset.path if renderer else None,
+            videos=videos,
+            vr_build=tmp_path if vr else None,
+            game_dir=tmp_path,
         )
         == "v1.1"
     )
@@ -107,10 +115,11 @@ def test_release_can_replace_or_reuse_renderer_and_textures_independently(
     _assert_draft_notes(events)
     uploads = [event for event in events if event[:3] == ("gh", "release", "upload")]
     expected = ("textures-part01.zip", "textures-part02.zip") if textures else ()
+    expected += ("vr-renderer.zip", "vr-standalone.zip", "vr-source.zip") if vr else ()
     if videos:
         expected += ("videos.zip",)
     if renderer:
-        expected += tuple(str(path) for path in asset.uploads)
+        expected += tuple(str(path) for path in renderer_asset.uploads)
     assert uploads == (
         [("gh", "release", "upload", "v1.1", "--repo", "lsorber/gk3hd", *expected)]
         if expected
@@ -121,7 +130,50 @@ def test_release_can_replace_or_reuse_renderer_and_textures_independently(
     assert renderer_verify.call_count == (1 if renderer else 2)
     assert renderer_verify.call_args.kwargs == {"allow_draft": renderer}
     assert video_verify.call_count == (1 if videos else 2)
-    assert video_verify.call_args.kwargs == {"allow_draft": videos}
+    assert video_verify.call_args.kwargs == {"allow_draft": videos, "require_standalone": True}
+    assert published_vr.call_count == (0 if vr else 2)
+    vr_verify.assert_called_once_with(
+        (Path("vr-renderer.zip"), Path("vr-standalone.zip"), Path("vr-source.zip")) if vr else (),
+        "v1.1",
+    )
+
+
+def _mock_vr_assets(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> tuple[Mock, Mock]:
+    verifier, published = Mock(), Mock()
+    monkeypatch.setattr(
+        package,
+        "_vr_archives",
+        Mock(
+            return_value=(Path("vr-renderer.zip"), Path("vr-standalone.zip"), Path("vr-source.zip"))
+            if enabled
+            else ()
+        ),
+    )
+    monkeypatch.setattr(package, "_verify_vr_remote", verifier)
+    monkeypatch.setattr(package.vr_distribution, "published_asset", published)
+    return verifier, published
+
+
+def test_draft_selects_the_signed_build_in_the_chosen_game_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    prepare = Mock(return_value="v1.3.0")
+    renderer = Mock(return_value=None)
+    monkeypatch.setattr(package, "_candidate", renderer)
+    monkeypatch.setattr(package, "_prepare", prepare)
+    root = workspace(tmp_path)
+    candidate = root / "build" / ("a" * 32)
+    candidate.mkdir(parents=True)
+    record = candidate / BUILD_RECORD
+    record.write_text("{}")
+    record_build(root, record, release=True)
+
+    result = CliRunner().invoke(package.app, ["draft", "--vr", "--game-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert prepare.call_args.kwargs["vr_build"] == candidate
+    assert prepare.call_args.kwargs["game_dir"] == tmp_path
+    renderer.assert_called_once_with(renderer=False, dll=None, game_dir=tmp_path)
 
 
 def _mock_release_verifiers(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock, Mock]:
@@ -137,11 +189,28 @@ def _assert_draft_notes(events: list[tuple[str, ...]]) -> None:
     create = next(event for event in events if event[:3] == ("gh", "release", "create"))
     assert "--draft" in create
     assert "--verify-tag" in create
-    assert create[create.index("--notes") + 1] == (
-        "## v1.1 (2026-09-27)\n\n### Fix\n\n- **package**: improve release drafting"
-    )
+    assert "--notes-file" in create
+    assert "--notes" not in create
     assert "--generate-notes" not in create
     assert not any(event[:3] == ("gh", "release", "edit") for event in events)
+
+
+def test_draft_sends_long_utf8_notes_to_github_without_command_line_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notes = "## v1.3.0\n\n" + "- Déjà vu in **SIDNEY**\n" * 1500
+    paths: list[Path] = []
+
+    def create(*arguments: str) -> None:
+        assert arguments[:3] == ("gh", "release", "create")
+        path = Path(arguments[arguments.index("--notes-file") + 1])
+        assert path.read_bytes() == notes.encode("utf-8")
+        paths.append(path)
+
+    monkeypatch.setattr(package, "_run", create)
+    package._upload_draft("v1.3.0", notes, ())
+    assert len(paths) == 1
+    assert not paths[0].exists()
 
 
 def test_failed_renderer_preflight_never_changes_version_or_tags(
@@ -238,7 +307,8 @@ def test_failed_local_preparation_restores_metadata_without_committing_or_taggin
             fail()
         return "1.1.0"
 
-    def pack(_version: str) -> tuple[Path, ...]:
+    def pack(_version: str, *, game_dir: Path | None) -> tuple[Path, ...]:
+        del game_dir
         texture_lock.write_bytes(b"updated textures")
         if failure == "pack":
             fail()
@@ -249,6 +319,7 @@ def test_failed_local_preparation_restores_metadata_without_committing_or_taggin
     monkeypatch.setattr(package, "_pack", pack)
     monkeypatch.setattr(package, "_verify_renderer_remote", Mock())
     monkeypatch.setattr(package, "_verify_videos_remote", Mock())
+    monkeypatch.setattr(package.vr_distribution, "published_asset", Mock())
     asset = Mock(spec=RendererAsset)
     asset.lock.return_value = {"tag": "v1.1.0"}
     asset.uploads = ()
@@ -274,7 +345,7 @@ def test_release_cli_reports_invalid_zip_without_traceback(monkeypatch: pytest.M
     assert "Traceback" not in result.output
 
 
-def test_publish_gate_checks_both_asset_families(
+def test_publish_gate_checks_flat_renderer_alongside_textures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     lock = tmp_path / "lock.json"
@@ -290,6 +361,23 @@ def test_publish_gate_checks_both_asset_families(
     assert "renderer missing" in result.output
     textures.assert_called_once_with({})
     renderer.assert_called_once_with({})
+
+
+def test_publish_gate_requires_a_public_vr_build_and_compatible_movies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "lock.json"
+    lock.write_text("{}")
+    for name in ("_LOCK", "_RENDERER_LOCK", "_VIDEO_LOCK"):
+        monkeypatch.setattr(package, name, lock)
+    _, _, video_verify = _mock_release_verifiers(monkeypatch)
+    monkeypatch.setattr(package.vr_distribution, "_release_page", lambda _page: [])
+
+    result = CliRunner().invoke(package.app, ["verify"])
+
+    assert result.exit_code == 1
+    assert "No compatible VR renderer archive has been published" in result.output
+    video_verify.assert_called_once_with({}, require_standalone=True)
 
 
 @pytest.mark.parametrize("family", ["textures", "renderer", "videos"])
@@ -336,6 +424,7 @@ def test_release_verification_handles_private_drafts_but_publication_rejects_the
         lock = {"tag": tag, "archives": [{"filename": filename, "sha256": digest, "size": 123}]}
         if family == "videos":
             lock["schema_version"] = 1
+            lock["player_recipe_sha256"] = video_recipe_digest()
             verify = package._verify_videos_remote
         else:
             verify = package._verify_remote
@@ -344,6 +433,27 @@ def test_release_verification_handles_private_drafts_but_publication_rejects_the
             verify(lock, allow_draft=allow_draft)
     else:
         verify(lock, allow_draft=allow_draft)
+
+
+@pytest.mark.parametrize(
+    ("player", "message"),
+    [(None, "missing its player recipe pin"), ("0" * 64, "different playback")],
+)
+def test_release_cannot_reuse_an_unqualified_movie_player(
+    monkeypatch: pytest.MonkeyPatch, player: str | None, message: str
+) -> None:
+    lookup = Mock()
+    monkeypatch.setattr(package, "_release_inventory", lookup)
+    lock = {
+        "schema_version": 1,
+        "tag": "v2.0.0",
+        "archives": [{"filename": "movies.zip", "sha256": "f" * 64, "size": 123}],
+    }
+    if player is not None:
+        lock["player_recipe_sha256"] = player
+    with pytest.raises(ValueError, match=message):
+        package._verify_videos_remote(lock)
+    lookup.assert_not_called()
 
 
 @pytest.mark.parametrize("inventory", [None, [], {}, {"isDraft": "false"}])

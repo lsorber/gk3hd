@@ -49,6 +49,9 @@ FONT_BANK_CACHE_SIZE: Final = FONT_BANK_CACHE_CAPACITY * FONT_BANK_CACHE_STRIDE
 # Preserve the record ABI: selection bits fit inside the old 96-byte flag area.
 _FLAG_STORAGE_BYTES: Final = 96
 _STACK_SIZE: Final = 144
+_REGISTRATION_OFFSET: Final = 0x4100
+_RECORD_OFFSET: Final = 0x4500
+_TRANSFER_OFFSET: Final = 0x4800
 
 
 def font_row_layout_table() -> bytes:
@@ -101,7 +104,7 @@ def install_font_bank_adapter(
         bitmap_manager_va=profile.address("bitmap.manager"),
         get_pixel_va=profile.address("bitmap.get_pixel"),
     )
-    entries = FontBankEntryPoints(base + 0x100, base + FONT_BANK_DRAW_SCOPE_OFFSET)
+    entries = FontBankEntryPoints(base + _REGISTRATION_OFFSET, base + FONT_BANK_DRAW_SCOPE_OFFSET)
     payload = SegmentPayloadBuilder(
         owner="runtime2d.font_banks",
         segment=FONT_BANK_SEGMENT.logical_name,
@@ -119,31 +122,33 @@ def install_font_bank_adapter(
     payload.reserve(label="validated font handles", offset=0x1000, size=FONT_BANK_CACHE_SIZE)
     payload.place(
         label="font registration",
-        offset=0x100,
+        offset=_REGISTRATION_OFFSET,
         payload=runtime.registration(
             entries.registration_va, row_layouts_va=base + FONT_BANK_ROW_LAYOUTS_OFFSET
         ),
-        limit=0x500,
+        limit=_RECORD_OFFSET,
     )
     payload.place(
         label="native glyph coordinates",
-        offset=0x500,
-        payload=runtime.glyph_record(base + 0x500),
-        limit=0x800,
+        offset=_RECORD_OFFSET,
+        payload=runtime.glyph_record(base + _RECORD_OFFSET),
+        limit=_TRANSFER_OFFSET,
     )
     payload.place(
         label="stack-local font transfer",
-        offset=0x800,
-        payload=runtime.draw(base + 0x800, record_va=base + 0x500, target_va=target_va),
-        limit=0x1000,
+        offset=_TRANSFER_OFFSET,
+        payload=runtime.draw(
+            base + _TRANSFER_OFFSET, record_va=base + _RECORD_OFFSET, target_va=target_va
+        ),
+        limit=FONT_BANK_SEGMENT.size,
     )
     payload.place(
         label="nested font scope",
         offset=FONT_BANK_DRAW_SCOPE_OFFSET,
         payload=build_font_scope(
             base_va=entries.draw_va,
-            target_va=base + 0x800,
-            record_va=base + 0x500,
+            target_va=base + _TRANSFER_OFFSET,
+            record_va=base + _RECORD_OFFSET,
             scope_va=base + FONT_BANK_SCOPE_OFFSET,
         ),
         limit=FONT_BANK_SELECT_OFFSET,

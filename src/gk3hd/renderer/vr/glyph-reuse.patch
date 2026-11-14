@@ -1,0 +1,231 @@
+diff --git a/src/ddraw/status_batch.h b/src/ddraw/status_batch.h
+--- a/src/ddraw/status_batch.h
++++ b/src/ddraw/status_batch.h
+@@ -3,13 +3,31 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <algorithm>
++#include <new>
++#include <vector>
+ #include "../util/com/com_pointer.h"
+ #include "private_stretch.h"
+ #include "private_native_copy.h"
+
+ namespace dxvk::status_batch {
+ struct Request { RECT from, to; };
++// The native caller owns the layout comparison and the private destination.
++// These counters bind a candidate to one successful publication and allocation.
++struct ReuseOwner {
++  IDirectDrawSurface* target=nullptr;
++  IDirectDrawSurface* atlas=nullptr;
++  const uint32_t* busy=nullptr;
++  uint32_t publication=0, creations=0, releases=0;
++
++  bool follows(const ReuseOwner& prior) const {
++    return target==prior.target && atlas==prior.atlas && busy==prior.busy &&
++      creations==prior.creations && releases==prior.releases &&
++      publication==prior.publication+1u;
++  }
++};
++
+ struct Capture {
++  ReuseOwner reuse;
+   IDirectDrawSurface* target=nullptr;
+   const uint32_t* busy=nullptr;
+   Com<IDirectDrawSurface> source;
+@@ -18,16 +36,6 @@
+ };
+ inline thread_local Capture capture;
+ constexpr DWORD flags=DDBLT_WAIT|DDBLT_ASYNC|DDBLT_KEYSRC;
+-inline void begin(IDirectDrawSurface* target,const uint32_t* busy) {
+-  capture = Capture{};
+-  capture.target=target;
+-  capture.busy=busy;
+-}
+-inline bool owns(IDirectDrawSurface* target) {
+-  auto& c=capture;
+-  if (c.target && !*c.busy) c=Capture{};
+-  return c.target==target;
+-}
+ inline bool bounded(const RECT& r,uint32_t w,uint32_t h) {
+   return r.left>=0 && r.top>=0 && r.right>r.left && r.bottom>r.top &&
+     uint32_t(r.right)<=w && uint32_t(r.bottom)<=h;
+@@ -38,6 +46,94 @@
+     uintptr_t(d.lpSurface)%alignof(uint16_t)==0 && f.dwFlags==DDPF_RGB &&
+     f.dwRGBBitCount==16 && f.dwRBitMask==0xf800 && f.dwGBitMask==0x7e0 && f.dwBBitMask==0x1f;
+ }
++struct RetainedGlyphs {
++  ReuseOwner owner;
++  uint32_t width=0, height=0;
++  std::vector<uint16_t> pixels;
++};
++
++inline thread_local ReuseOwner pendingReuse;
++inline thread_local RetainedGlyphs retainedGlyphs;
++
++inline bool atlasFormat(const DDSURFACEDESC& desc) {
++  constexpr uint32_t maxPixels=512*1024;
++  return format(desc) && desc.dwWidth && desc.dwHeight &&
++    desc.dwWidth<=8192 && desc.dwHeight<=8192 &&
++    uint64_t(desc.dwWidth)*desc.dwHeight<=maxPixels && desc.lPitch<=32768;
++}
++
++inline const char* atlasRow(const DDSURFACEDESC& desc, uint32_t row) {
++  return static_cast<const char*>(desc.lpSurface)+size_t(row)*desc.lPitch;
++}
++
++inline bool sourceKey(IDirectDrawSurface* source) {
++  DDCOLORKEY key{};
++  return SUCCEEDED(source->GetColorKey(DDCKEY_SRCBLT,&key)) &&
++    key.dwColorSpaceLowValue==63519 && key.dwColorSpaceHighValue==63519;
++}
++
++inline HRESULT prepareReuse(const ReuseOwner& owner, bool sameLayout) {
++  pendingReuse=owner;
++  auto& retained=retainedGlyphs;
++  if (!sameLayout || !retained.owner.target || !owner.follows(retained.owner) ||
++      owner.target->IsLost()!=DD_OK || !sourceKey(owner.atlas)) {
++    retained.owner={};
++    return S_FALSE;
++  }
++  DDSURFACEDESC input{};
++  input.dwSize=sizeof(input);
++  if (FAILED(owner.atlas->Lock(nullptr,&input,DDLOCK_READONLY|DDLOCK_DONOTWAIT,nullptr))) {
++    retained.owner={};
++    return S_FALSE;
++  }
++  bool equal=atlasFormat(input) && input.dwWidth==retained.width && input.dwHeight==retained.height;
++  for (uint32_t y=0;equal && y<input.dwHeight;++y)
++    equal=std::memcmp(atlasRow(input,y),retained.pixels.data()+size_t(y)*input.dwWidth,
++      size_t(input.dwWidth)*sizeof(uint16_t))==0;
++  const auto result=owner.atlas->Unlock(input.lpSurface);
++  if (!equal || FAILED(result)) {
++    retained.owner={};
++    return FAILED(result)?result:S_FALSE;
++  }
++  retained.owner=owner;
++  return S_OK;
++}
++
++inline void rememberAtlas(const ReuseOwner& owner, const DDSURFACEDESC& input) {
++  if (!atlasFormat(input)) return;
++  auto& retained=retainedGlyphs;
++  try {
++    retained.pixels.resize(size_t(input.dwWidth)*input.dwHeight);
++  } catch (const std::bad_alloc&) {
++    return;
++  }
++  for (uint32_t y=0;y<input.dwHeight;++y)
++    std::memcpy(retained.pixels.data()+size_t(y)*input.dwWidth,atlasRow(input,y),
++      size_t(input.dwWidth)*sizeof(uint16_t));
++  retained.width=input.dwWidth;
++  retained.height=input.dwHeight;
++  retained.owner=owner;
++}
++
++
++inline void begin(IDirectDrawSurface* target,const uint32_t* busy) {
++  capture = Capture{};
++  capture.target=target;
++  capture.busy=busy;
++  if (pendingReuse.target==target && pendingReuse.busy==busy)
++    capture.reuse=pendingReuse;
++  else if (retainedGlyphs.owner.target==target && retainedGlyphs.owner.busy==busy)
++    retainedGlyphs.owner={};
++  pendingReuse={};
++}
++inline bool owns(IDirectDrawSurface* target) {
++  auto& c=capture;
++  if (c.target && !*c.busy) {
++    if (c.reuse.target) retainedGlyphs.owner={};
++    c=Capture{};
++  }
++  return c.target==target;
++}
+ inline HRESULT original(IDirectDrawSurface* destination) {
+   auto& c=capture;
+   HRESULT hr=DD_OK;
+@@ -48,7 +144,13 @@
+ }
+ inline HRESULT flushOriginal(IDirectDrawSurface* surface) {
+   auto& c=capture;
+-  if ((!owns(surface) && (!c.target || c.source.ptr()!=surface)) || !c.count) return DD_OK;
++  if (!owns(surface) && (!c.target || (c.source.ptr()!=surface && c.reuse.atlas!=surface)))
++    return DD_OK;
++  if (c.reuse.target) {
++    retainedGlyphs.owner={};
++    c.reuse={};
++  }
++  if (!c.count) return DD_OK;
+   auto* target=c.target;
+   c.target=nullptr;
+   const HRESULT result=original(target);
+@@ -67,9 +169,9 @@
+ inline HRESULT draw(IDirectDrawSurface* target) {
+   auto& c=capture;
+   if (!c.count) return DD_OK;
+-  DDCOLORKEY key{};
+-  if (FAILED(c.source->GetColorKey(DDCKEY_SRCBLT,&key)) ||
+-      key.dwColorSpaceLowValue!=63519 || key.dwColorSpaceHighValue!=63519) return original(target);
++  const bool retain=c.reuse.target && c.reuse.atlas==c.source.ptr();
++  if (c.reuse.target) retainedGlyphs.owner={};
++  if (!sourceKey(c.source.ptr())) return original(target);
+   DDSURFACEDESC input{},output{};
+   input.dwSize=output.dwSize=sizeof(input);
+   if (FAILED(c.source->Lock(nullptr,&input,DDLOCK_READONLY|DDLOCK_DONOTWAIT,nullptr))) return original(target);
+@@ -101,9 +203,14 @@
+       }
+     }
+   }
++  if (valid && retain) rememberAtlas(c.reuse,input);
+   const HRESULT dst=target->Unlock(output.lpSurface);
+   const HRESULT src=c.source->Unlock(input.lpSurface);
+-  if (FAILED(dst) || FAILED(src)) { c.count=0; return FAILED(dst)?dst:src; }
++  if (FAILED(dst) || FAILED(src)) {
++    if (retain) retainedGlyphs.owner={};
++    c.count=0;
++    return FAILED(dst)?dst:src;
++  }
+   if (!valid) return original(target);
+   c.count=0;
+   return DD_OK;
+diff --git a/src/ddraw/ddraw_main.cpp b/src/ddraw/ddraw_main.cpp
+--- a/src/ddraw/ddraw_main.cpp
++++ b/src/ddraw/ddraw_main.cpp
+@@ -707,6 +707,28 @@
+     return E_NOTIMPL;
+ #endif
+   }
++
++  DLLEXPORT HRESULT __stdcall Gk3hdXrGlyphReuseV1(
++      IDirectDrawSurface* target, IDirectDrawSurface* atlas, const uint32_t* busy,
++      uint32_t publication, uint32_t creations, uint32_t releases, uint32_t sameLayout) {
++#ifdef GK3HD_OPENXR
++    // This is an idle private capture destination, never a desktop page.
++    dxvk::status_batch::pendingReuse={};
++    if (!target || !atlas || target==atlas || !busy || *busy || sameLayout>1 ||
++        !dxvk::DDrawCommonInterface::IsWrappedSurface(target) ||
++        !dxvk::DDrawCommonInterface::IsWrappedSurface(atlas)) return E_INVALIDARG;
++    for (auto* surface : {target,atlas}) {
++      const auto* common=static_cast<dxvk::DDrawSurface*>(surface)->GetCommonSurface();
++      if (!common->IsInSystemMemory() || common->IsRenderTarget() || common->GetClipper())
++        return S_FALSE;
++    }
++    return dxvk::status_batch::prepareReuse({target,atlas,busy,publication,creations,releases},
++      sameLayout!=0);
++#else
++    return E_NOTIMPL;
++#endif
++  }
++
+
+   DLLEXPORT HRESULT __stdcall Gk3hdXrPanelV1(IDirect3DDevice3* device, uint32_t operation, void* request) {
+ #ifdef GK3HD_OPENXR
+diff --git a/src/ddraw/ddraw.def b/src/ddraw/ddraw.def
+--- a/src/ddraw/ddraw.def
++++ b/src/ddraw/ddraw.def
+@@ -39,3 +39,4 @@
+   Gk3hdXrListenerV1 @38
+   Gk3hdXrReturnFloorV1 @39
+   Gk3hdXrGlyphBatchV1 @40
++  Gk3hdXrGlyphReuseV1 @41

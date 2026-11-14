@@ -1,0 +1,240 @@
+diff --git a/src/ddraw/status_batch.h b/src/ddraw/status_batch.h
+new file mode 100644
+index 0000000..b8d58cb
+--- /dev/null
++++ b/src/ddraw/status_batch.h
+@@ -0,0 +1,118 @@
++#pragma once
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <algorithm>
++#include "../util/com/com_pointer.h"
++#include "private_stretch.h"
++#include "private_native_copy.h"
++
++namespace dxvk::status_batch {
++struct Request { RECT from, to; };
++struct Capture {
++  IDirectDrawSurface* target=nullptr;
++  const uint32_t* busy=nullptr;
++  Com<IDirectDrawSurface> source;
++  std::array<Request,128> requests{};
++  size_t count=0;
++};
++inline thread_local Capture capture;
++constexpr DWORD flags=DDBLT_WAIT|DDBLT_ASYNC|DDBLT_KEYSRC;
++inline void begin(IDirectDrawSurface* target,const uint32_t* busy) {
++  capture = Capture{};
++  capture.target=target;
++  capture.busy=busy;
++}
++inline bool owns(IDirectDrawSurface* target) {
++  auto& c=capture;
++  if (c.target && !*c.busy) c=Capture{};
++  return c.target==target;
++}
++inline bool bounded(const RECT& r,uint32_t w,uint32_t h) {
++  return r.left>=0 && r.top>=0 && r.right>r.left && r.bottom>r.top &&
++    uint32_t(r.right)<=w && uint32_t(r.bottom)<=h;
++}
++inline bool format(const DDSURFACEDESC& d) {
++  const auto& f=d.ddpfPixelFormat;
++  return d.lpSurface && d.lPitch>=int64_t(d.dwWidth)*2 && d.lPitch%2==0 &&
++    uintptr_t(d.lpSurface)%alignof(uint16_t)==0 && f.dwFlags==DDPF_RGB &&
++    f.dwRGBBitCount==16 && f.dwRBitMask==0xf800 && f.dwGBitMask==0x7e0 && f.dwBBitMask==0x1f;
++}
++inline HRESULT original(IDirectDrawSurface* destination) {
++  auto& c=capture;
++  HRESULT hr=DD_OK;
++  for (size_t i=0;i<c.count && SUCCEEDED(hr);++i)
++    hr=destination->Blt(&c.requests[i].to,c.source.ptr(),&c.requests[i].from,flags,nullptr);
++  c.count=0;
++  return hr;
++}
++inline HRESULT flushOriginal(IDirectDrawSurface* surface) {
++  auto& c=capture;
++  if ((!owns(surface) && (!c.target || c.source.ptr()!=surface)) || !c.count) return DD_OK;
++  auto* target=c.target;
++  c.target=nullptr;
++  const HRESULT result=original(target);
++  capture=Capture{};
++  return result;
++}
++inline bool collect(IDirectDrawSurface* atlas,const RECT* from,const RECT* to,
++                    DWORD options,const DDBLTFX* effects) {
++  auto& c=capture;
++  if (!atlas || !from || !to || effects || options!=flags || c.count==c.requests.size() ||
++      (c.count && c.source.ptr()!=atlas)) return false;
++  if (!c.count) c.source=Com<IDirectDrawSurface>(atlas);
++  c.requests[c.count++]={*from,*to};
++  return true;
++}
++inline HRESULT draw(IDirectDrawSurface* target) {
++  auto& c=capture;
++  if (!c.count) return DD_OK;
++  DDCOLORKEY key{};
++  if (FAILED(c.source->GetColorKey(DDCKEY_SRCBLT,&key)) ||
++      key.dwColorSpaceLowValue!=63519 || key.dwColorSpaceHighValue!=63519) return original(target);
++  DDSURFACEDESC input{},output{};
++  input.dwSize=output.dwSize=sizeof(input);
++  if (FAILED(c.source->Lock(nullptr,&input,DDLOCK_READONLY|DDLOCK_DONOTWAIT,nullptr))) return original(target);
++  const HRESULT targetLock=target->Lock(nullptr,&output,DDLOCK_WRITEONLY|DDLOCK_DONOTWAIT,nullptr);
++  if (FAILED(targetLock)) {
++    const HRESULT unlocked=c.source->Unlock(input.lpSurface);
++    if (FAILED(unlocked)) return unlocked;
++    return original(target);
++  }
++  bool valid=format(input) && format(output) && DisjointRGB565Storage(input,output) &&
++    input.dwWidth<=8192 && input.dwHeight<=8192 && output.dwWidth<=8192 && output.dwHeight<=8192;
++  for (size_t i=0;valid && i<c.count;++i)
++    valid=bounded(c.requests[i].from,input.dwWidth,input.dwHeight) &&
++      bounded(c.requests[i].to,output.dwWidth,output.dwHeight);
++  if (valid) for (size_t i=0;i<c.count;++i) {
++    const auto& r=c.requests[i];
++    const uint32_t sw=r.from.right-r.from.left,sh=r.from.bottom-r.from.top;
++    const uint32_t dw=r.to.right-r.to.left,dh=r.to.bottom-r.to.top;
++    const PixelCenterAxis firstX(sw,dw);
++    PixelCenterAxis sampleY(sh,dh);
++    for (uint32_t y=0;y<dh;++y,sampleY.advance()) {
++      const auto sy=r.from.top+sampleY.position;
++      const auto* in=reinterpret_cast<const uint16_t*>(static_cast<const char*>(input.lpSurface)+size_t(sy)*input.lPitch);
++      auto* out=reinterpret_cast<uint16_t*>(static_cast<char*>(output.lpSurface)+size_t(r.to.top+y)*output.lPitch);
++      auto sampleX=firstX;
++      for (uint32_t x=0;x<dw;++x,sampleX.advance()) {
++        const auto p=in[r.from.left+sampleX.position];
++        if (p!=63519) out[r.to.left+x]=p;
++      }
++    }
++  }
++  const HRESULT dst=target->Unlock(output.lpSurface);
++  const HRESULT src=c.source->Unlock(input.lpSurface);
++  if (FAILED(dst) || FAILED(src)) { c.count=0; return FAILED(dst)?dst:src; }
++  if (!valid) return original(target);
++  c.count=0;
++  return DD_OK;
++}
++inline HRESULT finish(IDirectDrawSurface* target) {
++  if (!owns(target)) return DD_OK;
++  capture.target=nullptr;
++  const HRESULT result=draw(target);
++  capture=Capture{};
++  return result;
++}
++}
+diff --git a/src/ddraw/ddraw/ddraw_surface.cpp b/src/ddraw/ddraw/ddraw_surface.cpp
+index 32867c2..010741d 100644
+--- a/src/ddraw/ddraw/ddraw_surface.cpp
++++ b/src/ddraw/ddraw/ddraw_surface.cpp
+@@ -1,6 +1,9 @@
+ #include "ddraw_surface.h"
+ #include "../private_native_copy.h"
+ #include "../private_stretch.h"
++#ifdef GK3HD_OPENXR
++#include "../status_batch.h"
++#endif
+
+ #include "../d3d_common_device.h"
+
+@@ -361,6 +364,16 @@ namespace dxvk {
+       Logger::err("DDrawSurface::Blt: Received an unwrapped source surface");
+       return DDERR_UNSUPPORTED;
+     }
++#ifdef GK3HD_OPENXR
++    if (status_batch::owns(this)) {
++      auto* atlas = lpDDSrcSurface ? static_cast<DDrawSurface*>(lpDDSrcSurface)->GetCommonSurface() : nullptr;
++      if (atlas && atlas->IsInSystemMemory() && !atlas->IsRenderTarget() &&
++          m_commonIntf->GetOptions()->cpuRenderTargetBacking && status_batch::collect(lpDDSrcSurface,lpSrcRect,lpDestRect,dwFlags,lpDDBltFx))
++        return DD_OK;
++    }
++    if (const HRESULT hr=status_batch::flushOriginal(this); FAILED(hr))
++      return hr;
++#endif
+     if (lpDDSrcSurface && m_commonSurf->TryGPUCopy(static_cast<DDrawSurface*>(lpDDSrcSurface)->GetCommonSurface(), lpDestRect, lpSrcRect, dwFlags, lpDDBltFx))
+       return DD_OK;
+
+@@ -472,6 +484,9 @@ namespace dxvk {
+   }
+
+   HRESULT STDMETHODCALLTYPE DDrawSurface::BltFast(DWORD dwX, DWORD dwY, LPDIRECTDRAWSURFACE lpDDSrcSurface, LPRECT lpSrcRect, DWORD dwTrans) {
++#ifdef GK3HD_OPENXR
++    if (const HRESULT hr=status_batch::flushOriginal(this); FAILED(hr)) return hr;
++#endif
+     if (unlikely(lpDDSrcSurface != nullptr
+              && !DDrawCommonInterface::IsWrappedSurface(lpDDSrcSurface))) {
+       Logger::err("DDrawSurface::BltFast: Received an unwrapped source surface");
+@@ -845,6 +860,9 @@ namespace dxvk {
+   }
+
+   HRESULT STDMETHODCALLTYPE DDrawSurface::Lock(LPRECT lpDestRect, LPDDSURFACEDESC lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent) {
++#ifdef GK3HD_OPENXR
++    if (const HRESULT hr=status_batch::flushOriginal(this); FAILED(hr)) return hr;
++#endif
+     m_commonSurf->AccessCPU();
+     // Write back any dirty surface data from bound D3D9 back buffers or depth stencils
+     if (HRESULT downloadResult = DownloadSurfaceData(lpDestRect); FAILED(downloadResult)) return downloadResult;
+@@ -895,6 +913,9 @@ namespace dxvk {
+   }
+
+   HRESULT STDMETHODCALLTYPE DDrawSurface::Restore() {
++#ifdef GK3HD_OPENXR
++    if (const HRESULT hr=status_batch::flushOriginal(this); FAILED(hr)) return hr;
++#endif
+     return m_proxy->Restore();
+   }
+
+@@ -926,6 +947,9 @@ namespace dxvk {
+   }
+
+   HRESULT STDMETHODCALLTYPE DDrawSurface::SetColorKey(DWORD dwFlags, LPDDCOLORKEY lpDDColorKey) {
++#ifdef GK3HD_OPENXR
++    if (const HRESULT hr=status_batch::flushOriginal(this); FAILED(hr)) return hr;
++#endif
+     // The Combat Mission series of games set a color key which is
+     // outside the color range of the surface they are setting it on...
+     // clamp it to the surface color depth in that case. This doesn't
+diff --git a/src/ddraw/ddraw_main.cpp b/src/ddraw/ddraw_main.cpp
+index 0e2180c..c82860c 100644
+--- a/src/ddraw/ddraw_main.cpp
++++ b/src/ddraw/ddraw_main.cpp
+@@ -16,6 +16,7 @@
+ #include "../gk3hd_xr/scene.h"
+ #include "../gk3hd_xr/observer_return.h"
+ #include "../gk3hd_xr/overlay.h"
++#include "status_batch.h"
+ #endif
+
+ namespace dxvk {
+@@ -690,6 +691,23 @@ extern "C" {
+ #endif
+   }
+
++  DLLEXPORT HRESULT __stdcall Gk3hdXrGlyphBatchV1(
++      IDirectDrawSurface* target, uint32_t operation, const uint32_t* busy) {
++#ifdef GK3HD_OPENXR
++    if (!target || !busy || *busy != 1 ||
++        !dxvk::DDrawCommonInterface::IsWrappedSurface(target)) return E_INVALIDARG;
++    if (operation == 1) return dxvk::status_batch::finish(target);
++    if (operation != 0) return E_INVALIDARG;
++    auto* common = static_cast<dxvk::DDrawSurface*>(target)->GetCommonSurface();
++    if (!common->IsInSystemMemory() || common->IsRenderTarget() || common->GetClipper())
++      return S_FALSE;
++    dxvk::status_batch::begin(target,busy);
++    return DD_OK;
++#else
++    return E_NOTIMPL;
++#endif
++  }
++
+   DLLEXPORT HRESULT __stdcall Gk3hdXrPanelV1(IDirect3DDevice3* device, uint32_t operation, void* request) {
+ #ifdef GK3HD_OPENXR
+     if (!device) return E_POINTER;
+diff --git a/src/ddraw/ddraw.def b/src/ddraw/ddraw.def
+index b0f3cad..acd0988 100644
+--- a/src/ddraw/ddraw.def
++++ b/src/ddraw/ddraw.def
+@@ -38,3 +38,4 @@ EXPORTS
+   Gk3hdWorldPreparedV1 @37
+   Gk3hdXrListenerV1 @38
+   Gk3hdXrReturnFloorV1 @39
++  Gk3hdXrGlyphBatchV1 @40

@@ -10,7 +10,9 @@ import tomllib
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Annotated
+from uuid import uuid4
 
 import typer
 from rich.console import Console
@@ -20,7 +22,7 @@ from gk3hd.renderer.artifact import inspect_dll, release_target
 from gk3hd.renderer.artifact import validate_release_assets as validate_renderer_assets
 from gk3hd.renderer.build import local_build
 from gk3hd.system.discovery import discover_game
-from gk3hd.system.files import atomic_write
+from gk3hd.system.files import atomic_write, sha256_file
 from gk3hd.textures.pack.source import TexturePackSource
 from gk3hd.textures.workspace import (
     UPSCALE_DIRECTORY,
@@ -31,6 +33,12 @@ from gk3hd.videos.catalog import movie_workspace
 from gk3hd.videos.pack import LOCK_FILENAME as VIDEO_LOCK_FILENAME
 from gk3hd.videos.pack import build_pack as build_video_pack
 from gk3hd.videos.pack import release_archives
+from gk3hd.vr import distribution as vr_distribution
+from gk3hd.vr.standalone import sources as vr_sources
+from gk3hd.vr.standalone.build import android_sdk
+from gk3hd.vr.standalone.paths import recorded_build
+from gk3hd.vr.standalone.paths import workspace as vr_workspace
+from gk3hd.vr.standalone.signing import ReleaseSigner
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -149,9 +157,11 @@ def _verify_renderer_remote(lock: object, *, allow_draft: bool = False) -> None:
         raise ValueError(msg)
 
 
-def _verify_videos_remote(lock: object, *, allow_draft: bool = False) -> None:
+def _verify_videos_remote(
+    lock: object, *, allow_draft: bool = False, require_standalone: bool = False
+) -> None:
     """Require the default install's video assets to be published and intact."""
-    tag, archives = release_archives(lock)
+    tag, archives = release_archives(lock, require_standalone=require_standalone)
     release = _release_inventory(_REPOSITORY, tag)
     if release.get("draft") and not allow_draft:
         msg = "pinned videos are private draft assets; publish their release first"
@@ -181,11 +191,14 @@ def verify_assets() -> None:
     try:
         _verify_remote(json.loads(_LOCK.read_text(encoding="utf-8")))
         _verify_renderer_remote(json.loads(_RENDERER_LOCK.read_text(encoding="utf-8")))
-        _verify_videos_remote(json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")))
+        _verify_videos_remote(
+            json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")), require_standalone=True
+        )
+        _verify_published_vr()
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from exc
-    console.print("[green]All pinned release assets match GitHub.[/]")
+    console.print("[green]All required release assets are available on GitHub.[/]")
 
 
 def _release_version(version: str | None) -> str:
@@ -211,8 +224,8 @@ def _release_version(version: str | None) -> str:
     return selected
 
 
-def _pack(version: str) -> tuple[Path, ...]:
-    workspace = texture_workspace_directory(discover_game().game_dir)
+def _pack(version: str, *, game_dir: Path | None) -> tuple[Path, ...]:
+    workspace = texture_workspace_directory(discover_game(game_dir=game_dir).game_dir)
     report = texture_pack.pack(
         workspace / UPSCALE_DIRECTORY,
         workspace / texture_pack_filename(version),
@@ -250,14 +263,82 @@ def _release_notes(version: str) -> str:
     return entry[0].strip()
 
 
-def _prepare(
-    version: str | None, *, textures: bool, renderer: Path | None = None, videos: bool = False
+def _verify_published_vr() -> None:
+    for kind in vr_distribution.AssetKind:
+        vr_distribution.published_asset(kind, require_source=True)
+
+
+def _vr_archives(build: Path | None) -> tuple[Path, ...]:
+    if build is None:
+        return ()
+    signer = ReleaseSigner.configured(android_sdk())
+    output = Path("dist") / "vr" / uuid4().hex
+    renderer = vr_distribution.archive(build, output, kind=vr_distribution.AssetKind.RENDERER)
+    standalone = vr_distribution.archive(build, output, signer=signer)
+    source = vr_sources.attachment(build, standalone, name=vr_distribution.source_asset_name())
+    return renderer, standalone, source
+
+
+def _verify_vr_remote(paths: tuple[Path, ...], tag: str) -> None:
+    if not paths:
+        return
+    release = _release_inventory(_REPOSITORY, tag)
+    assets = release.get("assets")
+    if release.get("tag_name") != tag or not isinstance(assets, list):
+        msg = "Invalid VR release asset inventory"
+        raise TypeError(msg)
+    for path in paths:
+        matches = [
+            item for item in assets if isinstance(item, dict) and item.get("name") == path.name
+        ]
+        if len(matches) != 1 or (
+            matches[0].get("state"),
+            matches[0].get("size"),
+            matches[0].get("digest"),
+        ) != ("uploaded", path.stat().st_size, "sha256:" + sha256_file(path)):
+            msg = f"Uploaded VR asset differs from the verified archive: {path.name}"
+            raise ValueError(msg)
+
+
+def _upload_draft(tag: str, notes: str, archives: tuple[Path, ...]) -> None:
+    with TemporaryDirectory(prefix="gk3hd-release-") as temporary:
+        notes_file = Path(temporary) / "release-notes.md"
+        notes_file.write_bytes(notes.encode("utf-8"))
+        _run(
+            "gh",
+            "release",
+            "create",
+            tag,
+            "--repo",
+            _REPOSITORY,
+            "--draft",
+            "--verify-tag",
+            "--title",
+            tag,
+            "--notes-file",
+            str(notes_file),
+        )
+    if archives:
+        _run(
+            "gh", "release", "upload", tag, "--repo", _REPOSITORY, *(str(path) for path in archives)
+        )
+
+
+def _prepare(  # noqa: PLR0913 - Mirrors the independent release inputs exposed by the CLI.
+    version: str | None,
+    *,
+    textures: bool,
+    renderer: Path | None = None,
+    videos: bool = False,
+    vr_build: Path | None = None,
+    game_dir: Path | None = None,
 ) -> str:
     if _run("git", "status", "--porcelain", capture=True):
         msg = "commit your work first: release preparation requires a clean worktree"
         raise ValueError(msg)
     branch = _run("git", "symbolic-ref", "--short", "HEAD", capture=True)
     _run("gh", "auth", "status", capture=True)
+    vr_assets = _vr_archives(vr_build)
     # Validate an existing pack before changing the project version.
     if not textures:
         _verify_remote(json.loads(_LOCK.read_text(encoding="utf-8")))
@@ -265,7 +346,12 @@ def _prepare(
     if renderer_asset is None:
         _verify_renderer_remote(json.loads(_RENDERER_LOCK.read_text(encoding="utf-8")))
     if not videos:
-        _verify_videos_remote(json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")))
+        _verify_videos_remote(
+            json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")),
+            require_standalone=True,
+        )
+    if not vr_assets:
+        _verify_published_vr()
     paths = (
         Path("pyproject.toml"),
         Path("uv.lock"),
@@ -276,12 +362,13 @@ def _prepare(
     )
     with _restore_metadata_on_error(paths):
         selected = _release_version(version)
-        archives = _pack(selected) if textures else ()
+        archives = _pack(selected, game_dir=game_dir) if textures else ()
+        archives += vr_assets
         if videos:
-            game_dir = discover_game().game_dir
-            archives += build_video_pack(game_dir, version=selected)
+            selected_game = discover_game(game_dir=game_dir).game_dir
+            archives += build_video_pack(selected_game, version=selected, require_standalone=True)
             atomic_write(
-                _VIDEO_LOCK, (movie_workspace(game_dir) / VIDEO_LOCK_FILENAME).read_bytes()
+                _VIDEO_LOCK, (movie_workspace(selected_game) / VIDEO_LOCK_FILENAME).read_bytes()
             )
         if renderer_asset is not None:
             atomic_write(
@@ -304,33 +391,21 @@ def _prepare(
     tag = f"v{selected}"
     _run("git", "tag", "-a", tag, "-m", tag)
     _run("git", "push", "--atomic", "origin", branch, tag)
-    _run(
-        "gh",
-        "release",
-        "create",
-        tag,
-        "--repo",
-        _REPOSITORY,
-        "--draft",
-        "--verify-tag",
-        "--title",
-        tag,
-        "--notes",
-        notes,
-    )
-    if archives:
-        _run(
-            "gh", "release", "upload", tag, "--repo", _REPOSITORY, *(str(path) for path in archives)
-        )
+    _upload_draft(tag, notes, archives)
     _verify_remote(json.loads(_LOCK.read_text(encoding="utf-8")), allow_draft=textures)
     _verify_renderer_remote(
         json.loads(_RENDERER_LOCK.read_text(encoding="utf-8")), allow_draft=renderer is not None
     )
-    _verify_videos_remote(json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")), allow_draft=videos)
+    _verify_videos_remote(
+        json.loads(_VIDEO_LOCK.read_text(encoding="utf-8")),
+        allow_draft=videos,
+        require_standalone=True,
+    )
+    _verify_vr_remote(vr_assets, tag)
     return tag
 
 
-def _candidate(*, renderer: bool, dll: Path | None) -> Path | None:
+def _candidate(*, renderer: bool, dll: Path | None, game_dir: Path | None) -> Path | None:
     """Validate maintainer context and select an explicit or recorded build."""
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     if project.get("project", {}).get("name") != "gk3hd":
@@ -339,11 +414,11 @@ def _candidate(*, renderer: bool, dll: Path | None) -> Path | None:
     if renderer and dll is not None:
         msg = "choose --renderer or --dll, not both"
         raise ValueError(msg)
-    return local_build().path if renderer else dll
+    return local_build(game_dir=game_dir).path if renderer else dll
 
 
 @app.command("draft")
-def prepare(
+def prepare(  # noqa: PLR0913 - Typer exposes independent release component choices.
     version: Annotated[
         str | None, typer.Argument(help="Optional version; otherwise use conventional commits.")
     ] = None,
@@ -356,15 +431,28 @@ def prepare(
         bool, typer.Option(help="Attach the last verified local renderer build.")
     ] = False,
     dll: Annotated[Path | None, typer.Option(help="Override the renderer build to attach.")] = None,
+    vr: Annotated[
+        bool, typer.Option(help="Attach the last verified signed VR component build.")
+    ] = False,
+    game_dir: Annotated[
+        Path | None, typer.Option(help="Game directory to use for local release assets.")
+    ] = None,
 ) -> None:
     """Check, commit, tag, push, and upload a gk3hd-version draft for review.
 
-    Reuse published assets unless --textures, --renderer or --videos is supplied.
+    Reuse published assets unless a replacement is selected.
     Publishing the resulting GitHub draft triggers PyPI; this command does not.
     """
     try:
-        candidate = _candidate(renderer=renderer, dll=dll)
-        tag = _prepare(version, textures=textures, renderer=candidate, videos=videos)
+        candidate = _candidate(renderer=renderer, dll=dll, game_dir=game_dir)
+        tag = _prepare(
+            version,
+            textures=textures,
+            renderer=candidate,
+            videos=videos,
+            vr_build=recorded_build(vr_workspace(game_dir), release=True) if vr else None,
+            game_dir=game_dir,
+        )
     except (OSError, TypeError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from exc

@@ -12,6 +12,7 @@ from gk3hd.patch.binary.x86 import BranchOpcode, Condition, X86Emitter
 from gk3hd.patch.definitions.runtime2d.layout import (
     GPS_SEGMENT,
     GPS_TRANSFER_OFFSET,
+    RuntimeImage,
     install_runtime_segment,
 )
 from gk3hd.patch.model import PatchError
@@ -36,6 +37,33 @@ INPUT_SITES = (
     "gps.button_pixels",
     "gps.auxiliary_bounds",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class NativeGPSHooksABI:
+    """Verified-runtime addresses for separately validated GPS extensions."""
+
+    owner_va: int
+    member_va: int
+    bitmap_vtable_va: int
+    bitmap_draw_va: int
+    destroy_va: int
+
+
+def native_gps_hooks(image: PEFile, profile: BuildProfile) -> NativeGPSHooksABI:
+    """Export the installed entries, not proof of arbitrary runtime bytes."""
+    section = RuntimeImage(image).get_section(GPS_SEGMENT.logical_name)
+    if section is None:
+        msg = "native GPS runtime dependency is missing"
+        raise PatchError(msg)
+    base = image.rva_to_va(section.virtual_address)
+    return NativeGPSHooksABI(
+        base + OWNER_OFFSET,
+        base + MEMBER_OFFSET,
+        profile.site(DRAW_SITES[0]).va - 0xA0,
+        base + 0x400,
+        base + 0x140,
+    )
 
 
 def build_member(*, wrapper_va: int, owner_va: int) -> bytes:

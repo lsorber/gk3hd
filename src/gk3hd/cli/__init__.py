@@ -43,6 +43,7 @@ from gk3hd.textures.install.service import STATE_FILENAME, TextureInstallRequest
 from gk3hd.videos.install import MovieInstaller
 from gk3hd.videos.manifest import STATE_FILENAME as MOVIE_STATE_FILENAME
 from gk3hd.videos.pack import PackRequest
+from gk3hd.vr.cli import app as vr_app
 
 app = typer.Typer(
     name="gk3hd",
@@ -55,6 +56,7 @@ app.add_typer(videos_app, name="videos")
 app.add_typer(textures_app, name="textures")
 app.add_typer(renderer_app, name="renderer")
 app.add_typer(package_app, name="package")
+app.add_typer(vr_app, name="vr")
 
 
 def _version_callback(value: bool) -> None:

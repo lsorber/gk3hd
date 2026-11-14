@@ -1,0 +1,11 @@
+--- a/server/request.c
++++ b/server/request.c
+@@ -644,7 +644,7 @@
+     if (asprintf( &base_dir, "%s/.wineserver", config_dir ) == -1)
+         fatal_error( "out of memory\n" );
+ #else
+-    if (asprintf( &base_dir, "/tmp/.wine-%u", getuid() ) == -1)
++    if (asprintf( &base_dir, "%s/.wine-%u", getenv( "TMPDIR" ) ? getenv( "TMPDIR" ) : "/tmp", getuid() ) == -1)
+         fatal_error( "out of memory\n" );
+ #endif
+     create_dir( base_dir, &st2 );

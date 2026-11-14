@@ -1,0 +1,37 @@
+cmake_minimum_required(VERSION 3.24)
+find_program(GLSLC NAMES glslc REQUIRED)
+foreach(stage vert frag)
+    add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/quad.${stage}.inc"
+        COMMAND "${GLSLC}" --target-env=vulkan1.0 -mfmt=c
+            "${CMAKE_CURRENT_SOURCE_DIR}/quad.${stage}"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/quad.${stage}.inc"
+        DEPENDS "quad.${stage}" VERBATIM)
+endforeach()
+add_library(gk3hd_standalone_quads STATIC quad.cpp quad_math.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/quad.vert.inc" "${CMAKE_CURRENT_BINARY_DIR}/quad.frag.inc")
+target_compile_features(gk3hd_standalone_quads PUBLIC cxx_std_17)
+target_include_directories(gk3hd_standalone_quads PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${WXR_SOURCE}/include" "${VULKAN_INCLUDE}")
+target_include_directories(gk3hd_standalone_quads PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+if(MSVC)
+    set_property(TARGET gk3hd_standalone_quads PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+    target_compile_options(gk3hd_standalone_quads PRIVATE /W4 /WX /EHsc)
+endif()
+if(GK3HD_COMPOSITOR_TESTS)
+    add_executable(gk3hd-projection-capture-tests ../tests/ProjectionCaptureTests.cpp)
+    target_compile_features(gk3hd-projection-capture-tests PRIVATE cxx_std_17)
+    if(MSVC)
+        target_compile_options(gk3hd-projection-capture-tests PRIVATE /W4 /WX /EHsc)
+    endif()
+    if(NOT DEFINED GK3HD_VR_SOURCE)
+        set(GK3HD_VR_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../renderer/vr")
+    endif()
+    add_executable(gk3hd-vulkan-quad-tests ../tests/VulkanQuadTests.cpp)
+    target_sources(gk3hd-vulkan-quad-tests PRIVATE "${GK3HD_VR_SOURCE}/input.cpp")
+    target_include_directories(gk3hd-vulkan-quad-tests PRIVATE "${GK3HD_VR_SOURCE}")
+    target_link_libraries(gk3hd-vulkan-quad-tests PRIVATE gk3hd_standalone_quads)
+    if(MSVC)
+        set_property(TARGET gk3hd-vulkan-quad-tests PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+        target_compile_options(gk3hd-vulkan-quad-tests PRIVATE /W4 /WX /EHsc)
+    endif()
+endif()

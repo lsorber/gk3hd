@@ -129,7 +129,7 @@ def videos_upscale(
             if strength > 0 and any(restoration_pipeline(path) == "seedvr2" for path in sources):
                 backend = create_backend(device, download)
                 progress.console.print(f"AI device: {backend.device_description}")
-                progress.console.print("Encoding: AV1 + FLAC (MKV)")
+                progress.console.print("Encoding: HEVC Main10 + FLAC (MKV)")
             report = upscale_movies(sources, output_path, backend, options=options, progress=update)
         console.print(
             f"Restored {report.generated} videos; reused {report.skipped} verified outputs; "
@@ -280,7 +280,7 @@ def videos_extract(
 
 @app.command("build")
 def videos_build(game_dir: GameDirOption = None) -> None:
-    """Build the AV1 player in GAME/gk3hd/videos/player (Windows toolchain required)."""
+    """Build the movie player in GAME/gk3hd/videos/player (Windows toolchain required)."""
     try:
         from gk3hd.videos.runtime import build_player  # noqa: PLC0415 - developer operation.
 

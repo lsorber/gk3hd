@@ -45,7 +45,12 @@ from gk3hd.patch.definitions.runtime2d.layout import (
     SYSTEM_CONTROL_TOOLBAR_INPUT_SOURCE_RECT_OFFSET,
     SYSTEM_CONTROL_TOOLBAR_INPUT_TARGET_RECT_OFFSET,
     SYSTEM_CONTROL_TOOLBAR_INPUT_VALID_OFFSET,
+    SYSTEM_INPUT_ACTIVE_OFFSET,
+    SYSTEM_ROOT_POINTER_OFFSET,
     SYSTEM_SEGMENT,
+    SYSTEM_SOURCE_RECT_OFFSET,
+    SYSTEM_TARGET_RECT_OFFSET,
+    SYSTEM_TRANSFORM_MODE_OFFSET,
     TIMEBLOCK_LAYER_OFFSET,
     TIMEBLOCK_LOGICAL_RECT_OFFSET,
     TIMEBLOCK_SEGMENT,
@@ -140,7 +145,7 @@ class SidneyPresentationCompiler:
     _section_characteristics: ClassVar[int] = SIDNEY_PRESENTATION_SEGMENT.characteristics
     _magic: ClassVar[bytes] = SIDNEY_PRESENTATION_SEGMENT.magic
     _off_layout_version: ClassVar[int] = 0x08
-    _layout_version: ClassVar[int] = 102
+    _layout_version: ClassVar[int] = 104
 
     _off_active_depth: ClassVar[int] = SIDNEY_DRAW_DEPTH_OFFSET
     _off_toolbar_input_depth: ClassVar[int] = SIDNEY_TOOLBAR_INPUT_DEPTH_OFFSET
@@ -211,11 +216,12 @@ class SidneyPresentationCompiler:
     _cursor_blt_trace_stride: ClassVar[int] = 60
     # MouseManager owns a second, five-argument pointer-motion traversal after
     # the common +B8/+BC/+50 dispatch. Keep its adapter and one-POINT thunk in
-    # the free executable tail after bounded cursor telemetry. This closes the
-    # coordinate transaction without moving durable physical cursor or delta
-    # state into an authored interface domain.
+    # bounded executable tail after cursor telemetry. The larger motion thunk
+    # shares the otherwise unused tail after software-alpha composition. Its
+    # per-event endpoint snapshots close the coordinate transaction without
+    # moving durable physical cursor or delta state into an authored domain.
     _off_motion_dispatch_wrapper: ClassVar[int] = 0x1900
-    _off_motion_dispatch_thunk: ClassVar[int] = 0x1A60
+    _off_motion_dispatch_thunk: ClassVar[int] = 0x1D40
     _off_periodic_cursor_select_wrapper: ClassVar[int] = 0x1A80
     _off_periodic_cursor_select_thunk: ClassVar[int] = 0x1AE0
     _off_motion_dispatch_limit: ClassVar[int] = 0x1B00
@@ -239,11 +245,11 @@ class SidneyPresentationCompiler:
     _hd_2d_driving_map_input_active_offset: ClassVar[int] = RESOURCE_DRIVING_MAP_INPUT_ACTIVE_OFFSET
     _system_blt_wrapper_offset: ClassVar[int] = 0x300
     _system_cursor_bounds_wrapper_offset: ClassVar[int] = 0xDC0
-    _system_input_active_offset: ClassVar[int] = 0x10
-    _system_root_ptr_offset: ClassVar[int] = 0x1C
-    _system_source_rect_offset: ClassVar[int] = 0x20
-    _system_target_rect_offset: ClassVar[int] = 0x30
-    _system_transform_mode_offset: ClassVar[int] = 0xE0
+    _system_input_active_offset: ClassVar[int] = SYSTEM_INPUT_ACTIVE_OFFSET
+    _system_root_ptr_offset: ClassVar[int] = SYSTEM_ROOT_POINTER_OFFSET
+    _system_source_rect_offset: ClassVar[int] = SYSTEM_SOURCE_RECT_OFFSET
+    _system_target_rect_offset: ClassVar[int] = SYSTEM_TARGET_RECT_OFFSET
+    _system_transform_mode_offset: ClassVar[int] = SYSTEM_TRANSFORM_MODE_OFFSET
     # SystemScreenCompiler retains the currently presented ActionMenu root in
     # the shared system segment. Unlike a
     # child-array position, this identity survives Inventory redraws and is
@@ -290,8 +296,8 @@ class SidneyPresentationCompiler:
         ("right_release", 3),
         ("middle_release", 3),
         ("left_click", 4),
-        ("right_click", 2),
-        ("middle_click", 4),
+        ("right_click", 4),
+        ("middle_click", 2),
         ("drag_begin", 5),
     )
     _shared_dispatch_site_names: ClassVar[tuple[str, str, str]] = (
@@ -760,6 +766,7 @@ class SidneyPresentationCompiler:
         motion_dispatch_thunk = build_pointer_motion_dispatch_thunk(
             self,
             wrapper_va=motion_dispatch_thunk_va,
+            sidney_root_va=root_ptr_va,
         )
         motion_dispatch_wrapper = build_pointer_motion_dispatch_wrapper(
             wrapper_va=motion_dispatch_wrapper_va,
@@ -767,6 +774,7 @@ class SidneyPresentationCompiler:
             thunk_va=motion_dispatch_thunk_va,
             native_dispatch_va=self.profile.address("mouse_move.motion_dispatch"),
             physical_width_va=self._physical_width_global_va,
+            sidney_root_va=root_ptr_va,
             tbt_layer_va=tbt_input_vas[0],
             current_layer_va=self._current_layer_va,
             driving_map_active_va=driving_map_active_va,
@@ -1050,7 +1058,7 @@ class SidneyPresentationCompiler:
                 "software-alpha composition",
                 SIDNEY_ALPHA_CONSTRUCTOR_OFFSET,
                 alpha_wrapper,
-                SIDNEY_PORTRAIT_SOURCE_OFFSET,
+                self._off_motion_dispatch_thunk,
             ),
             (
                 "TimeBlock input",
@@ -1136,13 +1144,13 @@ class SidneyPresentationCompiler:
             label="pointer-motion tail adapter",
             offset=self._off_motion_dispatch_wrapper,
             payload=motion_dispatch_wrapper,
-            limit=self._off_motion_dispatch_thunk,
+            limit=self._off_periodic_cursor_select_wrapper,
         )
         payload.place(
             label="pointer-motion native thunk",
             offset=self._off_motion_dispatch_thunk,
             payload=motion_dispatch_thunk,
-            limit=self._off_periodic_cursor_select_wrapper,
+            limit=SIDNEY_PORTRAIT_SOURCE_OFFSET,
         )
         payload.place(
             label="periodic cursor-selection adapter",
@@ -1175,15 +1183,18 @@ class SidneyPresentationCompiler:
             target_va=section_va + self._off_solid_fill_wrapper,
             size=len(solid_fill_site.original),
         )
-        caret_site = self.profile.site("editbox.caret_fill_call")
-        mutations.branch(
-            label="SIDNEY editbox caret fill",
-            opcode=BranchOpcode.CALL,
-            site_va=caret_site.va,
-            expected=caret_site.original,
-            target_va=section_va + self._off_caret_fill_wrapper,
-            size=len(caret_site.original),
-        )
+        # Single-line and multiline editors have distinct draw methods, but
+        # both carets bypass Blt through the same native FillRectangle ABI.
+        for name in ("editbox.caret_fill_call", "multiline_editbox.caret_fill_call"):
+            caret_site = self.profile.site(name)
+            mutations.branch(
+                label=f"SIDNEY {name}",
+                opcode=BranchOpcode.CALL,
+                site_va=caret_site.va,
+                expected=caret_site.original,
+                target_va=section_va + self._off_caret_fill_wrapper,
+                size=len(caret_site.original),
+            )
         mutations.pointer(
             label="SIDNEY root draw",
             slot_va=self._sidney_root_draw_slot_va,

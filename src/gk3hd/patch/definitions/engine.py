@@ -127,22 +127,24 @@ def _prevent_save_warning_dialogs(
 
 
 def _skip_all_movies(context: CompilationContext) -> tuple[PatchOperation, ...]:
-    """Complete Bink playback immediately through GK3's native teardown.
+    """Skip both movie codecs without waiting on a playback/decoder pipeline.
 
     Outcome:
         Startup and transition movies do not delay automated or player-driven
         entry into the next game state.
     Before:
-        GK3 waits for each initialized Bink stream to reach its final frame.
+        GK3 waits for each initialized Bink or AVI stream to reach its final frame.
     After:
-        The first update requests normal movie completion and reports no further
-        playback work.
+        The first Bink update requests normal completion. AVI loading takes the
+        native unavailable-media path before starting its decoder/filter graph.
     Strategy:
-        Replace the validated update body with a call to GK3's existing
-        completion routine, preserving stream initialization and destruction.
+        Replace the validated Bink update with native completion and make AVI
+        opening return false with its original argument-cleanup convention.
+        Starting then immediately stopping AVI is not equivalent: a legacy
+        filter graph can block during either update or teardown under Wine.
     Boundaries:
-        Movie discovery, Bink opening, audio resources, and post-movie game
-        transitions remain native.
+        Bink initialization, native unavailable-media handling and post-movie
+        transitions remain native. Recommended installations retain all movies.
     """
     owner = PatchId("skip_all_movies")
     profile = _profile(context)
@@ -154,6 +156,12 @@ def _skip_all_movies(context: CompilationContext) -> tuple[PatchOperation, ...]:
             owner,
             "movies.update",
             bytes.fromhex("6a 01 e8 99 f8 ff ff 32 c0 c3"),
+        ),
+        _replace(
+            profile,
+            owner,
+            "movies.avi_open",
+            bytes.fromhex("32 c0 c2 04 00"),
         ),
     )
 
