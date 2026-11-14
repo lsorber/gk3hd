@@ -1,3 +1,10 @@
+## v1.3.0 (2026-11-14)
+
+### Feat
+
+- **vr**: play Gabriel Knight 3 in virtual reality
+- **videos**: make HD cinematics compatible with standalone VR
+
 ## v1.2.1 (2026-10-31)
 
 ### Fix
