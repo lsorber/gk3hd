@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import base64
 import configparser
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from gk3hd.patch.definitions.skip_steam_launcher import build_launcher
+from gk3hd.patch.definitions.skip_steam_launcher import UnsupportedLauncherError, build_launcher
 from gk3hd.patch.manifest import ExternalChange
 
 if TYPE_CHECKING:
@@ -20,10 +21,7 @@ _BYTES_PREFIX = "base64:"
 
 def _find(root: Path, name: str) -> Path | None:
     matches = [path for path in root.iterdir() if path.name.casefold() == name.casefold()]
-    if len(matches) > 1:
-        message = f"ambiguous Steam launcher file: {name}"
-        raise ValueError(message)
-    return matches[0] if matches else None
+    return matches[0] if len(matches) == 1 else None
 
 
 def launcher_path(exe: Path, name: str) -> Path:
@@ -38,36 +36,47 @@ def launcher_path(exe: Path, name: str) -> Path:
     return path
 
 
-def prepare_launcher(exe: Path) -> ExternalChange | None:
+def prepare_launcher(exe: Path, *, owned: ExternalChange | None = None) -> ExternalChange | None:
     """Capture the launcher only when its INI selects this exact single game."""
     root = exe.parent.parent
-    candidate = _find(root, LAUNCHER_NAME)
-    ini = _find(root, _INI_NAME)
-    if candidate is None or ini is None or not ini.is_file():
-        return None
     config = configparser.ConfigParser(interpolation=None)
-    config.read_string(ini.read_text(encoding="utf-8-sig"))
-    if "Launcher" not in config:
+    try:
+        candidate = _find(root, LAUNCHER_NAME)
+        ini = _find(root, _INI_NAME)
+        if (
+            candidate is None
+            or ini is None
+            or candidate.is_symlink()
+            or not candidate.is_file()
+            or not ini.is_file()
+        ):
+            return None
+        config.read_string(ini.read_text(encoding="utf-8-sig"))
+        settings = config["Launcher"]
+    except (OSError, UnicodeError, configparser.Error, KeyError):
         return None
-    settings = config["Launcher"]
     expected = {
         "NumButtons": "1",
         "Game1Prog": "other",
         "Game1Path": exe.parent.name,
         "Game1Exe": exe.name,
     }
-    if any(settings.get(key, "").casefold() != value.casefold() for key, value in expected.items()):
-        return None
     # Custom INI arguments must not silently disappear when bypassing the menu.
-    # The stock GK3 INI has no arguments; a customized launcher stays untouched.
-    if settings.get("Game1Cmd", "").strip():
+    if settings.get("Game1Cmd", "").strip() or any(
+        settings.get(key, "").casefold() != value.casefold() for key, value in expected.items()
+    ):
         return None
-    path = launcher_path(exe, candidate.name)
-    original = path.read_bytes()
-    patched = build_launcher(original, game_directory=exe.parent.name, exe_name=exe.name)
+    if owned is not None and owned.key.casefold() == candidate.name.casefold():
+        # The installer has verified the prior manifest and the on-disk bytes.
+        return replace(owned, previous=owned.installed)
+    try:
+        original = launcher_path(exe, candidate.name).read_bytes()
+        patched = build_launcher(original, game_directory=exe.parent.name, exe_name=exe.name)
+    except (OSError, UnsupportedLauncherError):
+        return None
     return ExternalChange(
         surface=LAUNCHER_SURFACE,
-        key=path.name,
+        key=candidate.name,
         previous=encode_launcher(original),
         installed=encode_launcher(patched),
     )
@@ -92,8 +101,13 @@ def validate_launcher_change(exe: Path, change: ExternalChange) -> None:
     if change.previous is None or change.installed is None:
         message = "Steam launcher transaction has no original executable"
         raise ValueError(message)
-    original = decode_launcher(change.previous)
-    expected = build_launcher(original, game_directory=exe.parent.name, exe_name=exe.name)
-    if decode_launcher(change.installed) != expected:
+    first, second = map(decode_launcher, (change.previous, change.installed))
+    try:
+        expected = build_launcher(first, game_directory=exe.parent.name, exe_name=exe.name)
+    except UnsupportedLauncherError:
+        # Updating can retire the bypass and restore the stock menu.
+        first, second = second, first
+        expected = build_launcher(first, game_directory=exe.parent.name, exe_name=exe.name)
+    if second != expected:
         message = "Steam launcher transaction does not match the verified handoff"
         raise ValueError(message)

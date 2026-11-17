@@ -29,9 +29,9 @@ class InstallConfiguration(Protocol):
         width: int,
         height: int,
         patches: tuple[PatchId, ...],
-        graphics_backend: GraphicsBackend = GraphicsBackend.NATIVE,
+        owned: tuple[ExternalChange, ...] = (),
     ) -> tuple[ExternalChange, ...]:
-        """Describe desired changes without mutating external state."""
+        """Describe desired changes, using verified ownership when upgrading."""
         ...
 
     def apply(self, *, exe: Path, changes: tuple[ExternalChange, ...]) -> None:
@@ -86,10 +86,10 @@ class NoopConfiguration:
         width: int,
         height: int,
         patches: tuple[PatchId, ...],
-        graphics_backend: GraphicsBackend = GraphicsBackend.NATIVE,
+        owned: tuple[ExternalChange, ...] = (),
     ) -> tuple[ExternalChange, ...]:
         """Return no changes."""
-        del exe, width, height, patches, graphics_backend
+        del exe, width, height, patches, owned
         return ()
 
     def apply(self, *, exe: Path, changes: tuple[ExternalChange, ...]) -> None:

@@ -15,11 +15,15 @@ LIMIT = 32768
 _MAX_COMPONENT_UNITS = 255
 
 
+class UnsupportedLauncherError(ValueError):
+    """The executable is outside the hash-bound launcher recipe."""
+
+
 def build_launcher(payload: bytes, *, game_directory: str, exe_name: str) -> bytes:
     """Bypass the menu, preserving command arguments, child cwd and exit status."""
     if hashlib.sha256(payload).hexdigest() != STOCK_SHA256:
         message = "unsupported Sierra launcher executable"
-        raise ValueError(message)
+        raise UnsupportedLauncherError(message)
     for value in (game_directory, exe_name):
         if (
             not value

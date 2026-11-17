@@ -7,9 +7,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from gk3hd.patch.definitions.skip_steam_launcher import API_NAMES, _entrypoint, build_launcher
+from gk3hd.patch.definitions.skip_steam_launcher import (
+    API_NAMES,
+    UnsupportedLauncherError,
+    _entrypoint,
+    build_launcher,
+)
 from gk3hd.patch.install import launcher
-from gk3hd.patch.install.windows import ConfigurationError, WindowsInstallConfiguration
+from gk3hd.patch.install.windows import WindowsInstallConfiguration
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,7 +38,7 @@ def _layout(tmp_path: Path, ini: str = _INI) -> Path:
 def _fake_build(payload: bytes, *, game_directory: str, exe_name: str) -> bytes:
     if payload != _ORIGINAL:
         message = "unsupported synthetic launcher"
-        raise ValueError(message)
+        raise UnsupportedLauncherError(message)
     return payload + (game_directory + "/" + exe_name).encode()
 
 
@@ -70,8 +75,7 @@ def test_post_install_launcher_edits_are_preserved_unless_force_is_explicit(
     configuration = WindowsInstallConfiguration()
     configuration.apply(exe=exe, changes=(change,))
     path.write_bytes(b"user edit")
-    with pytest.raises(ConfigurationError, match="no longer matches"):
-        configuration.restore(exe=exe, changes=(change,), force=False)
+    configuration.restore(exe=exe, changes=(change,), force=False)
     assert path.read_bytes() == b"user edit"
     configuration.restore(exe=exe, changes=(change,), force=True)
     assert path.read_bytes() == _ORIGINAL
@@ -104,6 +108,21 @@ def test_unrelated_or_custom_launchers_are_not_modified(
     exe = _layout(tmp_path, _INI.replace(original_line, key + "=" + value))
     assert launcher.prepare_launcher(exe) is None
     assert (tmp_path / launcher.LAUNCHER_NAME).read_bytes() == _ORIGINAL
+
+
+@pytest.mark.parametrize(
+    ("launcher_bytes", "ini_bytes"),
+    [(b"MZ" + bytes(32), _INI.encode()), (_ORIGINAL, b"missing header"), (_ORIGINAL, b"\xff")],
+)
+def test_unsupported_optional_launcher_yields_no_install_change(
+    tmp_path: Path, launcher_bytes: bytes, ini_bytes: bytes
+) -> None:
+    exe = _layout(tmp_path)
+    path = tmp_path / launcher.LAUNCHER_NAME
+    path.write_bytes(launcher_bytes)
+    (tmp_path / "SierraLauncher.ini").write_bytes(ini_bytes)
+    assert launcher.prepare_launcher(exe) is None
+    assert path.read_bytes() == launcher_bytes
 
 
 def test_discovery_matches_case_insensitively(

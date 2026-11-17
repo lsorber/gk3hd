@@ -282,10 +282,9 @@ class WindowsInstallConfiguration:
         width: int,
         height: int,
         patches: tuple[PatchId, ...] = (),
-        graphics_backend: GraphicsBackend = GraphicsBackend.NATIVE,
+        owned: tuple[ExternalChange, ...] = (),
     ) -> tuple[ExternalChange, ...]:
         """Capture current values and calculate the exact desired state."""
-        del graphics_backend
         desired = {
             "Game Width": width,
             "Game Height": height,
@@ -332,7 +331,10 @@ class WindowsInstallConfiguration:
                 )
                 for name, value in quality.items()
             )
-        launcher = prepare_launcher(exe)
+        active_launcher = next(
+            (change for change in owned if change.surface == LAUNCHER_SURFACE), None
+        )
+        launcher = prepare_launcher(exe, owned=active_launcher)
         if launcher is not None:
             changes.append(launcher)
         return tuple(changes)
@@ -413,25 +415,24 @@ class WindowsInstallConfiguration:
     def prepare_restore(
         self, *, exe: Path, changes: tuple[ExternalChange, ...], force: bool = False
     ) -> tuple[ExternalChange, ...]:
-        """Retain newer registry values, but still protect changed managed files.
+        """Preserve later settings and launcher edits when restoring managed state.
 
         Games and compatibility tools legitimately update registry settings.
-        Those edits, including deletions, cease to be installer-owned. Return
-        the exact remaining changes so transaction rollback cannot overwrite
-        the retained edits either.
+        Steam can also replace the optional launcher. Return only values still
+        owned by the installer so rollback preserves later edits.
         """
         if force:
             return changes
         selected = tuple(
             change
             for change in changes
-            if not change.surface.startswith("registry:")
-            or self._registry_value_matches(exe=exe, change=change)
+            if not (change.surface.startswith("registry:") or change.surface == LAUNCHER_SURFACE)
+            or self._value_matches(exe=exe, change=change)
         )
         self._require_values(exe=exe, changes=selected, installed=True)
         return selected
 
-    def _registry_value_matches(self, *, exe: Path, change: ExternalChange) -> bool:
+    def _value_matches(self, *, exe: Path, change: ExternalChange) -> bool:
         """Retain a newer unsupported type without swallowing registry access failures."""
         try:
             return self._read_value(exe=exe, change=change) == change.installed

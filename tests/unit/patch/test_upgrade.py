@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from gk3hd.patch.install import launcher
 from gk3hd.patch.install.configuration import NoopConfiguration
 from gk3hd.patch.install.transaction import InstallError
 from gk3hd.patch.install.windows import WindowsInstallConfiguration
@@ -16,6 +17,7 @@ from tests.unit.patch.test_install_transaction import (
     PassingVerificationInstaller,
     _prepared,
 )
+from tests.unit.patch.test_steam_launcher import _INI, _ORIGINAL, _fake_build, _layout
 from tests.unit.patch.test_windows_install_configuration import MemoryRegistry
 
 
@@ -123,3 +125,59 @@ def test_updates_keep_later_registry_edits_and_deletions_even_after_uninstall(
     )
     installer.restore(exe=exe)
     assert registry.values == {"Game Width": '{"type":4,"value":1280}'}
+
+
+@pytest.mark.parametrize("launcher_state", ["retained", "custom_ini", "external_replacement"])
+def test_upgrade_tracks_only_the_launcher_it_still_owns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launcher_state: str
+) -> None:
+    monkeypatch.setattr(launcher, "build_launcher", _fake_build)
+    exe = _layout(tmp_path)
+    pristine = exe.read_bytes()
+    path = tmp_path / launcher.LAUNCHER_NAME
+    configuration = WindowsInstallConfiguration(MemoryRegistry())
+    installer = PassingVerificationInstaller(
+        configuration=configuration, process_probe=lambda: False
+    )
+    first = _prepared(exe, pristine, b"first version")
+    initial = installer.apply(exe=exe, prepared=first)
+    patched = path.read_bytes()
+    assert patched != _ORIGINAL
+    assert (
+        installer.apply(exe=exe, prepared=replace(first, target_sha256=sha256_file(exe))) == initial
+    )
+    if launcher_state == "custom_ini":
+        (tmp_path / "SierraLauncher.ini").write_text(
+            _INI.replace("Game1Cmd=", "Game1Cmd=-custom"), encoding="utf-8"
+        )
+    if launcher_state == "external_replacement":
+        path.write_bytes(b"replacement from Steam")
+    next_plan = replace(_prepared(exe, pristine, b"next version"), target_sha256=sha256_file(exe))
+    if launcher_state == "custom_ini":
+        failing = FailingVerificationInstaller(
+            configuration=configuration, process_probe=lambda: False
+        )
+        with pytest.raises(RuntimeError, match="injected installed-verification failure"):
+            failing.apply(exe=exe, prepared=next_plan)
+        assert exe.read_bytes() == first.output
+        assert path.read_bytes() == patched
+    final = installer.apply(exe=exe, prepared=next_plan)
+    expected = {
+        "retained": patched,
+        "custom_ini": _ORIGINAL,
+        "external_replacement": b"replacement from Steam",
+    }[launcher_state]
+    assert exe.read_bytes() == next_plan.output
+    assert path.read_bytes() == expected
+    assert any(c.surface == launcher.LAUNCHER_SURFACE for c in final.external_changes) == (
+        launcher_state == "retained"
+    )
+    configuration.verify(exe=exe, changes=final.external_changes)
+    monkeypatch.setattr(
+        "gk3hd.patch.install.transaction.profile_for_sha256", lambda _hash: first.profile
+    )
+    installer.restore(exe=exe)
+    assert exe.read_bytes() == pristine
+    assert path.read_bytes() == (
+        b"replacement from Steam" if launcher_state == "external_replacement" else _ORIGINAL
+    )

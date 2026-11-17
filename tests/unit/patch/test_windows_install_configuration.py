@@ -198,7 +198,6 @@ def test_modern_resolution_patch_does_not_install_a_graphics_backend(tmp_path: P
         width=3840,
         height=2160,
         patches=(PatchId("enable_modern_resolutions"),),
-        graphics_backend=GraphicsBackend.NATIVE,
     )
 
     assert all(change.key not in {"ddraw.dll", D7VK_CONFIG_NAME} for change in changes)
@@ -279,7 +278,6 @@ def test_rendering_quality_patch_owns_explicit_maximum_hardware_profile(
         width=3840,
         height=2160,
         patches=(PatchId("maximize_graphics_quality"),),
-        graphics_backend=GraphicsBackend.NATIVE,
     )
     configuration.apply(exe=exe, changes=changes)
     configuration.verify(exe=exe, changes=changes)
@@ -318,7 +316,6 @@ def test_native_quality_policy_retains_the_identity_gamma_curve(tmp_path: Path) 
         width=1920,
         height=1080,
         patches=(PatchId("maximize_graphics_quality"),),
-        graphics_backend=GraphicsBackend.NATIVE,
     )
     configuration.apply(exe=exe, changes=changes)
 

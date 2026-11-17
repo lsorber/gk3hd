@@ -43,9 +43,9 @@ class TransactionConfiguration:
         width: int,
         height: int,
         patches: tuple[PatchId, ...],
-        graphics_backend: GraphicsBackend = GraphicsBackend.NATIVE,
+        owned: tuple[ExternalChange, ...] = (),
     ) -> tuple[ExternalChange, ...]:
-        del exe, width, height, patches, graphics_backend
+        del exe, width, height, patches, owned
         return (ExternalChange("test", "setting", "before", "after"),)
 
     def apply(self, *, exe: Path, changes: tuple[ExternalChange, ...]) -> None:

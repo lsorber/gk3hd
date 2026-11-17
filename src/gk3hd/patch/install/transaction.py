@@ -157,7 +157,7 @@ class Installer:
             width=prepared.display_mode.width,
             height=prepared.display_mode.height,
             patches=prepared.plan.patch_ids,
-            graphics_backend=prepared.graphics_backend,
+            owned=restorable,
         )
         if previous:
             external_changes = _preserve_settings(
@@ -165,6 +165,8 @@ class Installer:
                 previous.external_changes,
                 explicit_resolution=not prepared.preserve_resolution,
             )
+        baseline = _original_baseline(external_changes, previous)
+        if previous:
             desired = {(c.surface, c.key) for c in external_changes}
             external_changes += tuple(
                 replace(c, previous=c.installed, installed=c.previous)
@@ -174,7 +176,7 @@ class Installer:
             if (
                 previous.installed_sha256 == prepared.installed_sha256
                 and previous.patches == prepared.plan.patch_ids
-                and previous.external_changes == _original_baseline(external_changes, previous)
+                and previous.external_changes == baseline
                 and all(change.previous == change.installed for change in external_changes)
             ):
                 return previous
@@ -193,14 +195,15 @@ class Installer:
             ),
             installed_sha256=prepared.installed_sha256,
             backup_created=previous.backup_created if previous else not backup_existed,
-            external_changes=_original_baseline(external_changes, previous),
+            external_changes=baseline,
         )
+        writes = tuple(change for change in external_changes if change.previous != change.installed)
         journal = ApplyJournal.create(
             exe=exe,
             backup=prepared.backup,
             backup_existed=backup_existed,
             manifest=manifest,
-            transition=replace(manifest, external_changes=external_changes),
+            transition=replace(manifest, external_changes=writes),
         )
         try:
             # Publish rollback intent before the first owned mutation. The
@@ -211,7 +214,7 @@ class Installer:
             _validate_backup(prepared.backup, prepared.profile.original_sha256)
             atomic_write(exe, prepared.output)
             atomic_write(manifest_path, manifest.to_json().encode("utf-8"))
-            self._configuration_for(exe).apply(exe=exe, changes=external_changes)
+            self._configuration_for(exe).apply(exe=exe, changes=writes)
             self._verify_unlocked(exe=exe)
             # A killed process after this boundary must retain the verified
             # installation rather than undoing a completed commit.
