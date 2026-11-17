@@ -1,3 +1,11 @@
+## v1.3.1 (2026-11-17)
+
+### Fix
+
+- **install**: keep optional Steam launchers from blocking updates
+- **renderer**: display HD videos on Windows
+- **patch**: keep hardware rendering when legacy depth allocation fails
+
 ## v1.3.0 (2026-11-14)
 
 ### Feat
