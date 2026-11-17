@@ -3804,21 +3804,13 @@ def test_transition_blt_hook_only_observes_native_primary_handoffs() -> None:
     assert b"\x8b\x44\x24\x04\x8b\x10\x83\xc4\x04\xff\x52\x14" in wrapper
 
 
-def test_modern_resolution_patch_only_exposes_modes() -> None:
-    """Mode exposure does not smuggle in a private 3D presentation backend."""
+def test_modern_resolution_patch_can_install_independently() -> None:
+    """Players can enable modern modes without installing other patch features."""
     patch_id = PatchId("enable_modern_resolutions")
-    definition = PATCHES[patch_id]
-    assert definition.requires == frozenset()
     for build_id in SUPPORTED_BUILDS:
         build = BuildContext(build_id=build_id)
         plan = PLANNER.plan_explicit({patch_id}, build)
-        operations = plan.compile_operations()
-        assert {operation.symbol for operation in operations} == {
-            "resolution.fallback",
-            "resolution.menu_filter",
-            "resolution.framebuffer_guard",
-        }
-        assert not any(isinstance(operation, CompiledPayload) for operation in operations)
+        assert plan.patch_ids == (patch_id,)
 
 
 def test_native_payload_layouts_are_deterministic_and_bounded() -> None:

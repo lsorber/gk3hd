@@ -1,15 +1,13 @@
-"""Contract tests for declarative engine-patch definitions."""
+"""Contract tests for engine-patch definitions."""
 
 from __future__ import annotations
 
 from gk3hd.patch.binary.executor import OperationExecutor
-from gk3hd.patch.binary.operations import AssertBytes, ReplaceBytes
+from gk3hd.patch.binary.operations import AssertBytes
 from gk3hd.patch.builds import GOG_BUILD
 from gk3hd.patch.definitions.engine import ENGINE_PATCHES
 from gk3hd.patch.model import BuildContext, CompilationContext, PatchId
-from tests.unit.patch.test_binary_operations import FakeExecutable
-
-TEST_IMAGE_SIZE = 0x00710000
+from tests.unit.patch.test_complete_compilation import _source
 
 
 def _compilation_context(build: BuildContext, patch_id: PatchId) -> CompilationContext:
@@ -17,19 +15,8 @@ def _compilation_context(build: BuildContext, patch_id: PatchId) -> CompilationC
     return CompilationContext(build=build, selected_patches=frozenset({patch_id}))
 
 
-def _source_for(patch_id: PatchId) -> FakeExecutable:
-    """Build an identity-addressed source containing one definition's exact sites."""
-    source = FakeExecutable(bytearray(TEST_IMAGE_SIZE))
-    build = BuildContext(build_id=GOG_BUILD.id)
-    context = _compilation_context(build, patch_id)
-    for operation in ENGINE_PATCHES[patch_id].build_operations(context):
-        if isinstance(operation, (AssertBytes, ReplaceBytes)):
-            source.write_bytes(operation.va, operation.expected)
-    return source
-
-
 def test_engine_definitions_have_canonical_ids_and_stable_ownership() -> None:
-    """Generated claims agree across the two supported hash-bound profiles."""
+    """Generated mutation claims agree across all supported builds."""
     for definition in ENGINE_PATCHES.values():
         assert not definition.id.endswith(("_v1", "_v2", "_v3"))
         for build_id in definition.supported_builds:
@@ -39,7 +26,7 @@ def test_engine_definitions_have_canonical_ids_and_stable_ownership() -> None:
                 for operation in definition.build_operations(
                     _compilation_context(context, definition.id)
                 )
-                if operation.payload is not None
+                if operation.is_mutation
             )
             assert generated == definition.ownership
 
@@ -48,7 +35,7 @@ def test_each_engine_definition_executes_from_pristine_sites() -> None:
     """Every operation set preflights, applies, and postchecks as one memory image."""
     context = BuildContext(build_id=GOG_BUILD.id)
     for patch_id, definition in ENGINE_PATCHES.items():
-        source = _source_for(patch_id)
+        source = _source(GOG_BUILD)
         output = OperationExecutor().execute(
             source,
             definition.build_operations(_compilation_context(context, patch_id)),

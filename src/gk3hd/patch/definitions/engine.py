@@ -6,15 +6,19 @@ from collections.abc import Callable
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from gk3hd.patch.binary.compiled import CompiledPayload
 from gk3hd.patch.binary.operations import AssertBytes, ReplaceBytes
 from gk3hd.patch.binary.x86 import BranchOpcode, encode_rel32_branch
 from gk3hd.patch.builds import SUPPORTED_BUILDS, BuildProfile
+from gk3hd.patch.definitions.retry_depth_surface import DepthSurfaceCompiler
 from gk3hd.patch.model import (
     BuildContext,
     CompilationContext,
     PatchDefinition,
     PatchId,
     PatchOperation,
+    ResourceClaim,
+    ResourceKind,
 )
 
 if TYPE_CHECKING:
@@ -269,6 +273,8 @@ def _enable_modern_resolutions(context: CompilationContext) -> tuple[PatchOperat
     After:
         Enumerated modes remain visible and the chosen live dimensions reach
         renderer initialization without a named-resolution whitelist.
+        A hardware depth allocation can retry in system memory if legacy
+        DirectDraw runs out of video memory.
     Strategy:
         Make the validated menu predicate accept enumerated modes and replace
         the framebuffer bound branch while retaining the conservative 640x480
@@ -280,6 +286,7 @@ def _enable_modern_resolutions(context: CompilationContext) -> tuple[PatchOperat
     owner = PatchId("enable_modern_resolutions")
     profile = _profile(context)
     menu_site = profile.site("resolution.menu_filter")
+    depth_site = profile.site("resolution.create_depth_surface")
     menu_replacement = bytes.fromhex("b0 01 c3") + menu_site.original[3:]
     return (
         # Installation writes an explicit, driver-enumerated resolution. If
@@ -293,6 +300,24 @@ def _enable_modern_resolutions(context: CompilationContext) -> tuple[PatchOperat
             owner,
             "resolution.framebuffer_guard",
             bytes.fromhex("3b f8 eb 46"),
+        ),
+        AssertBytes(
+            owner,
+            "resolution.depth_surface_args",
+            depth_site.va - len(depth_site.context_before),
+            depth_site.context_before,
+        ),
+        AssertBytes(
+            owner,
+            "resolution.depth_surface_error_handler",
+            depth_site.va + len(depth_site.original),
+            depth_site.context_after,
+        ),
+        CompiledPayload(
+            owner=owner,
+            symbol=depth_site.symbol,
+            resource=ResourceClaim(ResourceKind.SECTION, DepthSurfaceCompiler.section_name),
+            compiler=DepthSurfaceCompiler(depth_site),
         ),
     )
 

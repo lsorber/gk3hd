@@ -276,6 +276,13 @@ _SHARED_SITES = MappingProxyType(
             va=0x00574CCB,
             original=bytes.fromhex("3b f8 72 46"),
         ),
+        "resolution.create_depth_surface": PatchSite(
+            symbol="resolution.create_depth_surface",
+            va=0x00575886,
+            original=bytes.fromhex("52 50 ff 51 18"),
+            context_before=bytes.fromhex("8b 08 6a 00 8d 95 ec fe ff ff 68 50 d2 70 00"),
+            context_after=bytes.fromhex("50 e8 df 36 00 00"),
+        ),
         "refresh.set_display_mode": PatchSite(
             symbol="refresh.set_display_mode",
             va=0x00574E29,
