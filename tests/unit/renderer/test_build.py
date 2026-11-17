@@ -43,6 +43,20 @@ def test_vr_source_changes_only_invalidate_the_vr_build(
     assert build.recipe_digest(variant="openxr") != openxr
 
 
+def test_desktop_revision_only_invalidates_the_desktop_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(build, "RECIPE", tmp_path)
+    version = tmp_path / "desktop-version.txt"
+    version.write_text("1.13.0-gk3hd.2", encoding="utf-8")
+    flat, openxr = build.recipe_digest(), build.recipe_digest(variant="openxr")
+
+    version.write_text("1.13.0-gk3hd.3", encoding="utf-8")
+
+    assert build.recipe_digest() != flat
+    assert build.recipe_digest(variant="openxr") == openxr
+
+
 @pytest.mark.parametrize(
     "name", ["renderer.patch", "build.ps1", "upstream.json", "LICENSE", "CMakeLists.txt"]
 )
@@ -70,8 +84,8 @@ def test_build_records_output_for_the_game_and_local_lookup_ignores_cwd(
     output = tmp_path / "custom-build" if custom_output else None
     digest = "a" * 64
     target = output or root / digest[:16]
-    pin = json.loads((build.RECIPE / "upstream.json").read_text(encoding="utf-8"))
-    asset = Mock(path=target / f"dxvk-sarek-{pin['version']}.dll", dll_sha256="b" * 64)
+    version = (build.RECIPE / "desktop-version.txt").read_text(encoding="utf-8").strip()
+    asset = Mock(path=target / f"dxvk-sarek-{version}.dll", dll_sha256="b" * 64)
     inspect = Mock(return_value=asset)
     compiler = Mock(return_value=Mock(returncode=0))
     monkeypatch.setattr(build, "sys", Mock(platform="win32"))

@@ -51,6 +51,7 @@ def recipe_digest(*, variant: Literal["flat", "openxr"] = "flat") -> str:
         and (
             path.suffix in {".ps1", ".patch", ".json", ".cpp", ".h", ".conf"}
             or path.name in {"LICENSE", "CMakeLists.txt"}
+            or (variant == "flat" and path.name == "desktop-version.txt")
         )
     )
     digest = hashlib.sha256()
@@ -100,8 +101,8 @@ def build(
     digest = recipe_digest()
     root = workspace(game_dir)
     target = (output or root / digest[:16]).resolve()
-    pin = json.loads((RECIPE / "upstream.json").read_text(encoding="utf-8"))
-    dll = target / f"dxvk-sarek-{pin['version']}.dll"
+    version = (RECIPE / "desktop-version.txt").read_text(encoding="utf-8").strip()
+    dll = target / f"dxvk-sarek-{version}.dll"
     if not target.exists():
         compile_recipe(target, jobs=jobs)
     asset = inspect_dll(dll)

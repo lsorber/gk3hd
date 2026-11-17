@@ -54,6 +54,7 @@ def renderer_dll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     }
     path.with_suffix(".json").write_text(json.dumps(build))
     (recipe / "upstream.json").write_text(json.dumps(pin))
+    (recipe / "desktop-version.txt").write_text(pin["version"], encoding="utf-8")
     (recipe / "renderer.patch").write_bytes(patch)
     monkeypatch.setattr(artifact, "_TOOLS", recipe)
     return path

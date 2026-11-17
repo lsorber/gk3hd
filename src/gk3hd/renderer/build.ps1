@@ -63,7 +63,9 @@ $build = Join-Path $output 'build'
 $sourcePatch = Join-Path $output 'renderer.patch'
 $xrInputs = [ordered]@{}
 $xrStage = $null
-$candidateVersion = $pin.version
+$candidateVersion = if ($OpenXR) { $pin.version } else {
+    (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'desktop-version.txt') -Raw).Trim()
+}
 # Git may check out the recipe with CRLF; git apply needs an LF-only diff.
 [IO.File]::WriteAllText($sourcePatch, [IO.File]::ReadAllText($patch).Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
 $shaderArchive = Join-Path $output 'glslang.zip'
